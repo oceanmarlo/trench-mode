@@ -347,3 +347,11 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
 .al-head button { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .al-head button:not(:first-child) { text-align: right; }
 .al-head button.on { color: var(--text); }
+.al-meta .b.mid { color: #f0b90b; background: rgba(240,185,11,.12); }
+.al-meta .b.wait { color: var(--muted); background: rgba(255,255,255,.06); }
+.al-note a { color: #c7f284; }
+.al-grid label:nth-last-child(-n+2) span { color: #c7f284; }
+.al-meta span { overflow: hidden; text-overflow: clip; }
+.al-meta .al-rc { margin-top: 2px; }
+.al-meta .al-rc .b:first-child { margin-left: 0; }
+.al-meta .vf { font-style: normal; color: #2ebd85; font-size: 11px; margin-right: 3px; }

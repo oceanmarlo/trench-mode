@@ -992,12 +992,14 @@ const ALPHA_IVS = ["5m", "1h", "6h", "24h"];
 const ALPHA_NUM = [
   ["mcapMin", "MCap min"], ["mcapMax", "MCap max"], ["liqMin", "Liquidity min"], ["volMin", "24h vol min"],
   ["ageMinH", "Age min (h)"], ["ageMaxH", "Age max (h)"], ["holdersMin", "Holders min"], ["top10Max", "Top-10 % max"],
-  ["devMax", "Dev hold % max"], ["chgMin", "Chg % min"], ["chgMax", "Chg % max"], ["scoreMin", "Organic min"]
+  ["devMax", "Dev hold % max"], ["chgMin", "Chg % min"], ["chgMax", "Chg % max"], ["scoreMin", "Organic min"],
+  ["lpMin", "LP locked/burned % min"], ["rcMax", "RugCheck score max"]
 ];
-const ALPHA_BOOL = [["noFreeze", "Freeze off"], ["noMint", "Mint off"], ["verified", "Verified"]];
-const ALPHA_SORTS = [["mcap", "MCap"], ["liq", "Liq"], ["vol", "Vol 24h"], ["chg", "Chg"], ["age", "Age"], ["holders", "Holders"], ["top10", "Top10"], ["score", "Organic"]];
+const ALPHA_RC_KEYS = ["lpMin", "rcMax", "noDanger"];
+const ALPHA_BOOL = [["noFreeze", "Freeze off"], ["noMint", "Mint off"], ["verified", "Verified"], ["noDanger", "No RugCheck dangers"]];
+const ALPHA_SORTS = [["mcap", "MCap"], ["liq", "Liq"], ["vol", "Vol 24h"], ["chg", "Chg"], ["age", "Age"], ["holders", "Holders"], ["top10", "Top10"], ["score", "Organic"], ["lp", "LP lock"], ["rc", "RugCheck"]];
 const ALPHA_BUILTIN = {
-  "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300" },
+  "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300", lpMin: "90", noDanger: true },
   "Fresh": { ageMaxH: "24", mcapMax: "2m", holdersMin: "100", noFreeze: true, noMint: true },
   "Movers": { chgMin: "20", volMin: "100k", liqMin: "50k" }
 };
@@ -1020,6 +1022,87 @@ function parseAmt(v) {
   return Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]] || 1);
 }
 
+// ---- RugCheck (api.rugcheck.xyz): free, keyless, CORS *, ~15-request burst bucket ----
+// Only GET /v1/tokens/{mint}/report/summary (~300 B). Fetched lazily for rows that pass
+// the other filters, max 3 in flight, >=250 ms apart, cached 30 min in memory + localStorage.
+const RC_URL = "https://api.rugcheck.xyz/v1/tokens/";
+const RC_STORE = "trench-rugcheck";
+const RC_TTL = 30 * 60 * 1000;
+const RC_MAX_INFLIGHT = 3;
+const RC_GAP_MS = 250;
+const rc = {
+  cache: (() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(RC_STORE)) || {};
+      const now = Date.now();
+      return new Map(Object.entries(raw).filter(([, v]) => v && now - v.at < RC_TTL));
+    } catch (_) { return new Map(); }
+  })(),
+  queue: [], queued: new Set(), inflight: 0, last: 0, coolUntil: 0, saveTimer: 0, paintTimer: 0
+};
+function rcGet(mint) {
+  const v = rc.cache.get(mint);
+  return v && Date.now() - v.at < RC_TTL ? v : null;
+}
+function rcSave() {
+  clearTimeout(rc.saveTimer);
+  rc.saveTimer = setTimeout(() => {
+    const entries = [...rc.cache.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, 600);
+    try { localStorage.setItem(RC_STORE, JSON.stringify(Object.fromEntries(entries))); } catch (_) {}
+  }, 1000);
+}
+function rcRepaint() {
+  clearTimeout(rc.paintTimer);
+  rc.paintTimer = setTimeout(() => { if (state.view === "alpha") paintAlphaList(); }, 300);
+}
+function rcWant(mints) {
+  for (const m of mints) {
+    if (rcGet(m) || rc.queued.has(m)) continue;
+    rc.queued.add(m);
+    rc.queue.push(m);
+  }
+  rcPump();
+}
+function rcPump() {
+  while (rc.inflight < RC_MAX_INFLIGHT && rc.queue.length) {
+    const wait = Math.max(rc.coolUntil - Date.now(), rc.last + RC_GAP_MS - Date.now());
+    if (wait > 0) { setTimeout(rcPump, wait); return; }
+    const mint = rc.queue.shift();
+    rc.last = Date.now();
+    rc.inflight++;
+    rcFetch(mint).finally(() => { rc.inflight--; rcPump(); });
+  }
+}
+async function rcFetch(mint) {
+  try {
+    const res = await fetch(RC_URL + mint + "/report/summary", { cache: "no-store" });
+    if (res.status === 429) {
+      const ra = Number(res.headers.get("retry-after"));
+      rc.coolUntil = Date.now() + (Number.isFinite(ra) && ra > 0 ? ra * 1000 : 10000);
+      rc.queue.unshift(mint); // retry later
+      return;
+    }
+    rc.queued.delete(mint);
+    if (!res.ok) { rc.cache.set(mint, { at: Date.now(), missing: true }); return; }
+    const d = await res.json();
+    const risks = (d.risks || []).map((r) => ({ name: r.name, level: r.level }));
+    const level = risks.some((r) => r.level === "danger") ? "danger" : risks.some((r) => r.level === "warn") ? "warn" : "good";
+    rc.cache.set(mint, {
+      at: Date.now(),
+      lp: typeof d.lpLockedPct === "number" ? d.lpLockedPct : null,
+      score: typeof d.score_normalised === "number" ? d.score_normalised : null,
+      level,
+      risks: risks.slice(0, 6)
+    });
+  } catch (_) {
+    rc.queued.delete(mint);
+    rc.cache.set(mint, { at: Date.now() - RC_TTL + 60000, missing: true }); // retry after a minute
+  } finally {
+    rcSave();
+    rcRepaint();
+  }
+}
+
 function alphaFields(t, iv) {
   const st = t["stats" + iv] || t.stats1h || {};
   const s24 = t.stats24h || {};
@@ -1035,6 +1118,9 @@ function alphaFields(t, iv) {
     top10: a.topHoldersPercentage ?? null,
     dev: a.devBalancePercentage ?? null,
     score: t.organicScore ?? null,
+    lp: rcGet(t.id)?.lp ?? null,
+    rc: rcGet(t.id)?.score ?? null,
+    rcLevel: rcGet(t.id)?.level || null,
     freezeOff: a.freezeAuthorityDisabled === true,
     mintOff: a.mintAuthorityDisabled === true,
     verified: !!t.isVerified
@@ -1061,13 +1147,21 @@ function alphaPass(x, f) {
     && (!f.noMint || x.mintOff)
     && (!f.verified || x.verified);
 }
+function alphaRcActive(f) { return parseAmt(f.lpMin) != null || parseAmt(f.rcMax) != null || !!f.noDanger; }
+function alphaRcPass(x, f) {
+  const lo = parseAmt(f.lpMin), hi = parseAmt(f.rcMax);
+  if (lo != null && (x.lp == null || x.lp < lo)) return false;
+  if (hi != null && (x.rc == null || x.rc > hi)) return false;
+  if (f.noDanger && x.rcLevel !== "good" && x.rcLevel !== "warn") return false;
+  return true;
+}
 
 function alphaList() {
   const a = state.alpha;
   const iv = a.src === "recent" ? "1h" : a.iv;
-  const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score" }[a.sort] || "vol";
+  const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score", lp: "lp", rc: "rc" }[a.sort] || "vol";
   const dir = a.dir === "asc" ? 1 : -1;
-  return a.rows.map((t) => ({ t, x: alphaFields(t, iv) }))
+  const base = a.rows.map((t) => ({ t, x: alphaFields(t, iv) }))
     .filter((r) => alphaPass(r.x, a.f))
     .sort((p, q) => {
       const u = p.x[key], v = q.x[key];
@@ -1076,6 +1170,13 @@ function alphaList() {
       if (v == null) return -1;
       return (u - v) * dir;
     });
+  // Lazy RugCheck: only rows that survived the other filters. With an RugCheck filter on,
+  // check all of them; otherwise just the top 40 for badges.
+  const rcOn = alphaRcActive(a.f) || a.sort === "lp" || a.sort === "rc";
+  rcWant(base.slice(0, rcOn ? 100 : 40).map((r) => r.t.id));
+  if (!rcOn) return { list: base, pending: 0 };
+  const pending = base.filter((r) => !rcGet(r.t.id)).length;
+  return { list: alphaRcActive(a.f) ? base.filter((r) => rcGet(r.t.id) && alphaRcPass(r.x, a.f)) : base, pending };
 }
 
 let alphaSeq = 0;
@@ -1119,24 +1220,34 @@ function pctText(v) { return v == null ? "—" : (v >= 0 ? "+" : "") + (Math.abs
 
 function alphaRowsHtml() {
   const a = state.alpha;
-  const list = alphaList();
-  const head = `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
+  const { list, pending } = alphaList();
+  const head = `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${pending ? ` · checking LP for ${pending}…` : ""}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
   if (a.err && !a.rows.length) return head + `<div class="k" style="padding:16px 0">Couldn't load: ${esc(a.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
-  if (!list.length) return head + (a.rows.length ? `<div class="k" style="padding:16px 0">No tokens match these filters.</div>` : "");
+  if (!list.length) return head + (a.rows.length && !pending ? `<div class="k" style="padding:16px 0">No tokens match these filters.</div>` : "");
   return head + list.map(({ t, x }) => {
     const badges = [
-      x.verified ? `<i class="b ok" title="Verified">✓</i>` : "",
       `<i class="b ${x.mintOff ? "ok" : "bad"}" title="Mint authority ${x.mintOff ? "disabled" : "enabled"}">M</i>`,
       `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
     ].join("");
+    const lpb = lpBadge(t.id);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}">
       <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
-        <span class="al-meta"><b>${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span></span></span>
+        <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : compactCount(x.holders)} h</span></span>
       <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : x.top10.toFixed(0) + "%"}</span></span>
     </button>`;
   }).join("");
+}
+
+function lpBadge(mint) {
+  const r = rcGet(mint);
+  if (!r) return rc.queued.has(mint) ? `<i class="b wait" title="Checking RugCheck">LP…</i>` : "";
+  if (r.missing) return `<i class="b wait" title="No RugCheck data">LP?</i>`;
+  const lp = r.lp;
+  const lpCls = lp == null ? "wait" : lp >= 90 ? "ok" : lp >= 50 ? "mid" : "bad";
+  const tip = `LP locked/burned ${lp == null ? "unknown" : lp.toFixed(1) + "%"} · RugCheck ${r.score ?? "?"}${r.risks?.length ? " · " + r.risks.map((x) => x.name).join(", ") : ""}`;
+  return `<i class="b ${lpCls}" title="${esc(tip)}">LP${lp == null ? "?" : Math.round(lp)}</i><i class="b ${r.level === "danger" ? "bad" : r.level === "warn" ? "mid" : "ok"}" title="${esc(tip)}">RC${r.score ?? "?"}</i>`;
 }
 
 function paintAlphaList() {
@@ -1176,7 +1287,7 @@ function alphaView() {
     ${a.open ? `<div class="al-filters">
       <div class="al-grid">${ALPHA_NUM.map(([k, l]) => `<label><span>${l === "Chg % min" || l === "Chg % max" ? l + " (" + ivLabel + ")" : l}</span><input data-alpha-f="${k}" value="${esc(a.f[k] ?? "")}" inputmode="text" autocomplete="off" placeholder="${/Max|max/.test(l) && /%/.test(l) ? "e.g. 30" : /h\)/.test(l) ? "hours" : /%|Organic/.test(l) ? "e.g. 10" : "e.g. 50k"}"></label>`).join("")}</div>
       <div class="al-bools">${ALPHA_BOOL.map(([k, l]) => `<label><input type="checkbox" data-alpha-b="${k}" ${a.f[k] ? "checked" : ""}> ${l}</label>`).join("")}</div>
-      <div class="k al-note">LP burned/locked isn't in Jupiter's free token data, so it can't be filtered. Missing data fails an active filter.</div>
+      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. Token data: Jupiter. Missing data fails an active filter.</div>
       <div class="al-actions"><button type="button" data-alpha-clear>Clear</button><button type="button" data-alpha-save class="save">Save preset</button></div>
     </div>` : ""}
     <div class="al-sort">${ALPHA_SORTS.map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
@@ -1193,7 +1304,7 @@ function bindAlpha() {
   document.querySelectorAll("[data-alpha-sort]").forEach((b) => b.onclick = () => {
     const k = b.dataset.alphaSort;
     if (a.sort === k) a.dir = a.dir === "asc" ? "desc" : "asc";
-    else { a.sort = k; a.dir = k === "age" || k === "top10" ? "asc" : "desc"; }
+    else { a.sort = k; a.dir = k === "age" || k === "top10" || k === "rc" ? "asc" : "desc"; }
     rerender();
   });
   const fb = $("[data-alpha-filters]");
