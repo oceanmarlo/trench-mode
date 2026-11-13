@@ -882,7 +882,7 @@ function render() {
       <button class="icon-btn" id="connect" aria-label="Wallet">${state.wallet ? state.wallet.slice(0, 4) : "＋"}</button>
     </div>
     <div class="scroll">
-      ${state.view === "portfolio" ? portfolioView() : `
+      ${state.view === "portfolio" ? portfolioView() : state.view === "alpha" ? alphaView() : `
       ${t ? tokenHead(t, price, chg) : `<div class="panel">${esc(state.status || "Search a token to trade.")}</div>`}
       <div class="tabs" role="tablist" aria-label="Token details">
         ${[["trade","Overview"],["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" && t?.holderCount ? ` <span class="tab-n">${compactCount(t.holderCount)}</span>` : ""}</button>`).join("")}
@@ -897,7 +897,7 @@ function render() {
       <button type="button" data-nav="spot" class="${state.view==="spot"?"on":""}"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>Spot</button>
       <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 16l5-6 4 3 7-8"/></svg>Perps</button>
       <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 10h16v8H4zM8 10V7a4 4 0 0 1 8 0v3"/></svg>Lend</button>
-      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M5 19V5M5 19h14M9 15l3-4 2 2 4-5"/></svg>Predict</button>
+      <button type="button" data-nav="alpha" class="${state.view==="alpha"?"on":""}"><svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6L20 9.5l-4 4 1 5.8L12 16.6 7 19.3l1-5.8-4-4 5.4-.9z"/></svg>Alpha</button>
       <button type="button" data-nav="portfolio" class="${state.view==="portfolio"?"on":""}"><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
     </nav>
     ${state.infoOpen ? sheet() : ""}
@@ -905,6 +905,7 @@ function render() {
     ${state.toast ? `<div class="toast"><span>${/^(Bought|Sold)/.test(state.toast) ? "✓ " : ""}${esc(state.toast)}</span><button id="toast-x">✕</button></div>` : ""}
   `;
   bind();
+  if (state.view === "alpha") bindAlpha();
   drawChart();
   if (state.view === "spot" && state.tab === "holders") drawMap();
 }
@@ -979,6 +980,260 @@ function holdingsPanel() {
     </div>`;
   }).join("");
   return head + rows;
+}
+
+// ---------------- Alpha: trending / new token screener ----------------
+// Trending, Organic and Top traded come from datapi.jup.ag (no key, no budget).
+// New comes from Tokens v2 /recent through the shared 1 RPS queue, at most once a minute.
+const ALPHA_KEY = "trench-alpha";
+const ALPHA_PRESETS_KEY = "trench-alpha-presets";
+const ALPHA_SOURCES = [["toptrending", "Trending"], ["toporganicscore", "Organic"], ["toptraded", "Top traded"], ["recent", "New"]];
+const ALPHA_IVS = ["5m", "1h", "6h", "24h"];
+const ALPHA_NUM = [
+  ["mcapMin", "MCap min"], ["mcapMax", "MCap max"], ["liqMin", "Liquidity min"], ["volMin", "24h vol min"],
+  ["ageMinH", "Age min (h)"], ["ageMaxH", "Age max (h)"], ["holdersMin", "Holders min"], ["top10Max", "Top-10 % max"],
+  ["devMax", "Dev hold % max"], ["chgMin", "Chg % min"], ["chgMax", "Chg % max"], ["scoreMin", "Organic min"]
+];
+const ALPHA_BOOL = [["noFreeze", "Freeze off"], ["noMint", "Mint off"], ["verified", "Verified"]];
+const ALPHA_SORTS = [["mcap", "MCap"], ["liq", "Liq"], ["vol", "Vol 24h"], ["chg", "Chg"], ["age", "Age"], ["holders", "Holders"], ["top10", "Top10"], ["score", "Organic"]];
+const ALPHA_BUILTIN = {
+  "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300" },
+  "Fresh": { ageMaxH: "24", mcapMax: "2m", holdersMin: "100", noFreeze: true, noMint: true },
+  "Movers": { chgMin: "20", volMin: "100k", liqMin: "50k" }
+};
+const alphaSaved = (() => { try { return JSON.parse(localStorage.getItem(ALPHA_KEY)) || {}; } catch (_) { return {}; } })();
+state.alpha = {
+  src: alphaSaved.src || "toptrending", iv: alphaSaved.iv || "1h",
+  sort: alphaSaved.sort || "vol", dir: alphaSaved.dir || "desc",
+  f: alphaSaved.f || {}, open: false, rows: [], loading: false, err: "", at: 0, recentAt: 0, recent: []
+};
+function saveAlpha() {
+  const a = state.alpha;
+  localStorage.setItem(ALPHA_KEY, JSON.stringify({ src: a.src, iv: a.iv, sort: a.sort, dir: a.dir, f: a.f }));
+}
+function alphaPresets() { try { return JSON.parse(localStorage.getItem(ALPHA_PRESETS_KEY)) || {}; } catch (_) { return {}; } }
+
+function parseAmt(v) {
+  if (v == null || String(v).trim() === "") return null;
+  const m = String(v).trim().toLowerCase().replace(/[$,%\s]/g, "").match(/^(-?\d*\.?\d+)([kmb]?)$/);
+  if (!m) return null;
+  return Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[m[2]] || 1);
+}
+
+function alphaFields(t, iv) {
+  const st = t["stats" + iv] || t.stats1h || {};
+  const s24 = t.stats24h || {};
+  const born = t.firstPool?.createdAt || t.createdAt;
+  const a = t.audit || {};
+  return {
+    mcap: t.mcap ?? (t.circSupply && t.usdPrice ? t.circSupply * t.usdPrice : null),
+    liq: t.liquidity ?? null,
+    vol: (s24.buyVolume || 0) + (s24.sellVolume || 0),
+    chg: st.priceChange ?? null,
+    ageH: born ? (Date.now() - new Date(born).getTime()) / 3.6e6 : null,
+    holders: t.holderCount ?? null,
+    top10: a.topHoldersPercentage ?? null,
+    dev: a.devBalancePercentage ?? null,
+    score: t.organicScore ?? null,
+    freezeOff: a.freezeAuthorityDisabled === true,
+    mintOff: a.mintAuthorityDisabled === true,
+    verified: !!t.isVerified
+  };
+}
+
+function alphaPass(x, f) {
+  const n = (k) => parseAmt(f[k]);
+  const need = (val, lo, hi) => {
+    if (lo == null && hi == null) return true;
+    if (val == null || Number.isNaN(val)) return false; // missing data fails an active filter
+    return (lo == null || val >= lo) && (hi == null || val <= hi);
+  };
+  return need(x.mcap, n("mcapMin"), n("mcapMax"))
+    && need(x.liq, n("liqMin"), null)
+    && need(x.vol, n("volMin"), null)
+    && need(x.ageH, n("ageMinH"), n("ageMaxH"))
+    && need(x.holders, n("holdersMin"), null)
+    && need(x.top10, null, n("top10Max"))
+    && need(x.dev, null, n("devMax"))
+    && need(x.chg, n("chgMin"), n("chgMax"))
+    && need(x.score, n("scoreMin"), null)
+    && (!f.noFreeze || x.freezeOff)
+    && (!f.noMint || x.mintOff)
+    && (!f.verified || x.verified);
+}
+
+function alphaList() {
+  const a = state.alpha;
+  const iv = a.src === "recent" ? "1h" : a.iv;
+  const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score" }[a.sort] || "vol";
+  const dir = a.dir === "asc" ? 1 : -1;
+  return a.rows.map((t) => ({ t, x: alphaFields(t, iv) }))
+    .filter((r) => alphaPass(r.x, a.f))
+    .sort((p, q) => {
+      const u = p.x[key], v = q.x[key];
+      if (u == null && v == null) return 0;
+      if (u == null) return 1;
+      if (v == null) return -1;
+      return (u - v) * dir;
+    });
+}
+
+let alphaSeq = 0;
+async function loadAlpha() {
+  const a = state.alpha;
+  const seq = ++alphaSeq;
+  a.loading = true;
+  a.err = "";
+  paintAlphaList();
+  try {
+    let rows;
+    if (a.src === "recent") {
+      if (Date.now() - a.recentAt < 60000 && a.recent.length) rows = a.recent;
+      else {
+        rows = await jup("https://api.jup.ag/tokens/v2/recent?limit=100");
+        a.recent = rows || [];
+        a.recentAt = Date.now();
+      }
+    } else {
+      const d = await datapi(`https://datapi.jup.ag/v1/assets/${a.src}/${a.iv}?limit=100`);
+      rows = Array.isArray(d) ? d : d?.assets || [];
+    }
+    if (seq !== alphaSeq) return;
+    a.rows = rows || [];
+    a.at = Date.now();
+  } catch (err) {
+    if (seq === alphaSeq) a.err = err.message || String(err);
+  } finally {
+    if (seq === alphaSeq) { a.loading = false; paintAlphaList(); }
+  }
+}
+
+function ageText(h) {
+  if (h == null) return "—";
+  if (h < 1) return Math.max(1, Math.round(h * 60)) + "m";
+  if (h < 48) return Math.round(h) + "h";
+  if (h < 24 * 60) return Math.round(h / 24) + "d";
+  return Math.round(h / 24 / 30) + "mo";
+}
+function pctText(v) { return v == null ? "—" : (v >= 0 ? "+" : "") + (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)) + "%"; }
+
+function alphaRowsHtml() {
+  const a = state.alpha;
+  const list = alphaList();
+  const head = `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
+  if (a.err && !a.rows.length) return head + `<div class="k" style="padding:16px 0">Couldn't load: ${esc(a.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
+  if (!list.length) return head + (a.rows.length ? `<div class="k" style="padding:16px 0">No tokens match these filters.</div>` : "");
+  return head + list.map(({ t, x }) => {
+    const badges = [
+      x.verified ? `<i class="b ok" title="Verified">✓</i>` : "",
+      `<i class="b ${x.mintOff ? "ok" : "bad"}" title="Mint authority ${x.mintOff ? "disabled" : "enabled"}">M</i>`,
+      `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
+    ].join("");
+    return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}">
+      <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
+        <span class="al-meta"><b>${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span></span></span>
+      <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
+      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : compactCount(x.holders)} h</span></span>
+      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : x.top10.toFixed(0) + "%"}</span></span>
+    </button>`;
+  }).join("");
+}
+
+function paintAlphaList() {
+  const box = $("#alpha-list");
+  if (!box) return;
+  box.innerHTML = alphaRowsHtml();
+  box.querySelectorAll("[data-alpha-open]").forEach((b) => b.onclick = () => {
+    state.view = "spot";
+    state.tab = "trade";
+    render();
+    loadToken(b.dataset.alphaOpen).catch((err) => { state.status = err.message; render(); });
+  });
+  const r = box.querySelector("[data-alpha-retry]");
+  if (r) r.onclick = () => loadAlpha().catch(() => {});
+  const cnt = $("#alpha-fcount");
+  if (cnt) cnt.textContent = alphaActiveCount() ? String(alphaActiveCount()) : "";
+}
+
+function alphaActiveCount() {
+  const f = state.alpha.f;
+  return ALPHA_NUM.filter(([k]) => parseAmt(f[k]) != null).length + ALPHA_BOOL.filter(([k]) => f[k]).length;
+}
+
+function alphaView() {
+  const a = state.alpha;
+  const presets = { ...ALPHA_BUILTIN, ...alphaPresets() };
+  const user = alphaPresets();
+  const ivLabel = a.src === "recent" ? "1h" : a.iv;
+  return `<div class="alpha">
+    <div class="al-top"><h2>Alpha</h2><button type="button" class="al-refresh" data-alpha-refresh aria-label="Refresh">↻</button></div>
+    <div class="chips">${ALPHA_SOURCES.map(([k, l]) => `<button type="button" data-alpha-src="${k}" class="${a.src === k ? "on" : ""}">${l}</button>`).join("")}</div>
+    ${a.src === "recent" ? "" : `<div class="chips small">${ALPHA_IVS.map((k) => `<button type="button" data-alpha-iv="${k}" class="${a.iv === k ? "on" : ""}">${k}</button>`).join("")}</div>`}
+    <div class="chips small presets-row">
+      <button type="button" class="${a.open ? "on" : ""}" data-alpha-filters>Filters <span id="alpha-fcount" class="tab-n">${alphaActiveCount() || ""}</span></button>
+      ${Object.keys(presets).map((n) => `<span class="preset"><button type="button" data-alpha-preset="${esc(n)}">${esc(n)}</button>${user[n] ? `<button type="button" class="x" data-alpha-del="${esc(n)}" aria-label="Delete preset">✕</button>` : ""}</span>`).join("")}
+    </div>
+    ${a.open ? `<div class="al-filters">
+      <div class="al-grid">${ALPHA_NUM.map(([k, l]) => `<label><span>${l === "Chg % min" || l === "Chg % max" ? l + " (" + ivLabel + ")" : l}</span><input data-alpha-f="${k}" value="${esc(a.f[k] ?? "")}" inputmode="text" autocomplete="off" placeholder="${/Max|max/.test(l) && /%/.test(l) ? "e.g. 30" : /h\)/.test(l) ? "hours" : /%|Organic/.test(l) ? "e.g. 10" : "e.g. 50k"}"></label>`).join("")}</div>
+      <div class="al-bools">${ALPHA_BOOL.map(([k, l]) => `<label><input type="checkbox" data-alpha-b="${k}" ${a.f[k] ? "checked" : ""}> ${l}</label>`).join("")}</div>
+      <div class="k al-note">LP burned/locked isn't in Jupiter's free token data, so it can't be filtered. Missing data fails an active filter.</div>
+      <div class="al-actions"><button type="button" data-alpha-clear>Clear</button><button type="button" data-alpha-save class="save">Save preset</button></div>
+    </div>` : ""}
+    <div class="al-sort">${ALPHA_SORTS.map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
+    <div class="al-head">${[["age", "Token · age"], ["mcap", "MCap / Liq"], ["vol", "Vol / Holders"], ["chg", `Chg ${ivLabel} / Top10`]].map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
+    <div id="alpha-list">${alphaRowsHtml()}</div>
+  </div>`;
+}
+
+function bindAlpha() {
+  const a = state.alpha;
+  const rerender = () => { saveAlpha(); render(); };
+  document.querySelectorAll("[data-alpha-src]").forEach((b) => b.onclick = () => { if (a.src === b.dataset.alphaSrc) return; a.src = b.dataset.alphaSrc; a.rows = []; rerender(); loadAlpha().catch(() => {}); });
+  document.querySelectorAll("[data-alpha-iv]").forEach((b) => b.onclick = () => { if (a.iv === b.dataset.alphaIv) return; a.iv = b.dataset.alphaIv; a.rows = []; rerender(); loadAlpha().catch(() => {}); });
+  document.querySelectorAll("[data-alpha-sort]").forEach((b) => b.onclick = () => {
+    const k = b.dataset.alphaSort;
+    if (a.sort === k) a.dir = a.dir === "asc" ? "desc" : "asc";
+    else { a.sort = k; a.dir = k === "age" || k === "top10" ? "asc" : "desc"; }
+    rerender();
+  });
+  const fb = $("[data-alpha-filters]");
+  if (fb) fb.onclick = () => { a.open = !a.open; render(); };
+  const rf = $("[data-alpha-refresh]");
+  if (rf) rf.onclick = () => { a.recentAt = 0; loadAlpha().catch(() => {}); };
+  // Typing only repaints the list so the input keeps focus.
+  document.querySelectorAll("[data-alpha-f]").forEach((i) => i.oninput = () => {
+    a.f[i.dataset.alphaF] = i.value;
+    i.classList.toggle("bad", i.value.trim() !== "" && parseAmt(i.value) == null);
+    saveAlpha();
+    paintAlphaList();
+  });
+  document.querySelectorAll("[data-alpha-b]").forEach((i) => i.onchange = () => { a.f[i.dataset.alphaB] = i.checked; saveAlpha(); paintAlphaList(); });
+  const clr = $("[data-alpha-clear]");
+  if (clr) clr.onclick = () => { a.f = {}; rerender(); };
+  const sv = $("[data-alpha-save]");
+  if (sv) sv.onclick = () => {
+    const name = (prompt("Preset name") || "").trim().slice(0, 24);
+    if (!name) return;
+    const all = alphaPresets();
+    all[name] = { ...a.f };
+    localStorage.setItem(ALPHA_PRESETS_KEY, JSON.stringify(all));
+    state.toast = "Saved preset " + name;
+    render();
+  };
+  document.querySelectorAll("[data-alpha-preset]").forEach((b) => b.onclick = () => {
+    const n = b.dataset.alphaPreset;
+    const p = alphaPresets()[n] || ALPHA_BUILTIN[n];
+    if (!p) return;
+    a.f = { ...p };
+    a.open = true;
+    rerender();
+  });
+  document.querySelectorAll("[data-alpha-del]").forEach((b) => b.onclick = () => {
+    const all = alphaPresets();
+    delete all[b.dataset.alphaDel];
+    localStorage.setItem(ALPHA_PRESETS_KEY, JSON.stringify(all));
+    render();
+  });
 }
 
 function portfolioView() {
@@ -1162,11 +1417,12 @@ function bind() {
   });
   document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => {
     const v = b.dataset.nav;
-    if (v === "soon") { state.toast = "Only Spot and Portfolio are in this app. Use jup.ag for the rest."; render(); return; }
+    if (v === "soon") { state.toast = "Only Spot, Alpha and Portfolio are in this app. Use jup.ag for the rest."; render(); return; }
     state.view = v;
     render();
     $(".scroll") && ($(".scroll").scrollTop = 0);
     if (v === "portfolio" && state.wallet && !state.holdingsLoading) loadHoldings().catch(() => {});
+    if (v === "alpha") loadAlpha().catch(() => {});
   });
   document.querySelectorAll("[data-connect]").forEach((b) => b.onclick = () => connect());
   document.querySelectorAll("[data-reload-holdings]").forEach((b) => b.onclick = () => loadHoldings().catch(() => {}));
@@ -1220,6 +1476,7 @@ async function boot() {
     every(PRICE_EVERY_MS, pollPrices);
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
+    every(30000, () => (state.view === "alpha" ? loadAlpha() : null));
     every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
   } catch (err) {
     state.status = err.message || String(err);
