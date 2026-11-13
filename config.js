@@ -1,0 +1,1 @@
+window.JUP_API_KEY = "jup_919a450de6c9ed88f2e5002c20d150a908cb1826b9cdcaa2a92b2881a487522e";
