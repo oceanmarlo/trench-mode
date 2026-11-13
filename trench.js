@@ -14,6 +14,9 @@ const FEED_EVERY_MS = 5000;    // datapi chart + trades (separate host, no key b
 
 const state = {
   tab: "trade",
+  view: "spot",
+  holdingsLoading: false,
+  holdingsError: "",
   side: "buy",
   amount: 0.1,
   sellPct: 50,
@@ -266,6 +269,7 @@ function paintResults() {
 }
 function pick(mint) {
   state.searchOpen = false;
+  state.view = "spot";
   render();
   loadToken(mint).catch((err) => { state.status = err.message; render(); });
 }
@@ -358,10 +362,19 @@ async function balancesFromRpc(owner) {
 async function loadHoldings() {
   if (!state.wallet) return;
   const owner = state.wallet;
+  state.holdingsLoading = true;
+  state.holdingsError = "";
+  if (state.view === "portfolio" || state.tab === "holdings") render();
   let bal;
-  try { bal = await balancesFromJupiter(owner); }
-  catch (_) { bal = await balancesFromRpc(owner); }
+  try {
+    try { bal = await withTimeout(balancesFromJupiter(owner), 10000); }
+    catch (_) { bal = await withTimeout(balancesFromRpc(owner), 12000); }
+  } catch (err) {
+    if (state.wallet === owner) { state.holdingsError = err.message || String(err); state.holdingsLoading = false; render(); }
+    return;
+  }
   if (state.wallet !== owner) return;
+  state.holdingsLoading = false;
   state.sol = bal.sol;
   let rows = bal.rows.filter((h) => h.ui > 0 && h.mint !== SOL);
   if (rows.length > MAX_TRACKED) {
@@ -393,6 +406,10 @@ async function loadHoldings() {
   }
   await pollPrices().catch(() => {});
   render();
+}
+
+function withTimeout(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timed out")), ms))]);
 }
 
 function isMobile() { return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent); }
@@ -553,6 +570,8 @@ function pnlText(d, pct) {
 }
 function paintLive() {
   const t = state.active;
+  const pf = $("#pf-total");
+  if (pf && state.wallet) pf.textContent = usd(state.sol * (state.prices[SOL] || 0) + state.holdings.reduce((n, h) => n + h.ui * (state.prices[h.mint] || 0), 0));
   const p = activePnl();
   const solPx = $("#sol-px");
   if (solPx) solPx.textContent = usd(state.prices[SOL] || 0);
@@ -808,22 +827,23 @@ function render() {
       <button class="icon-btn" id="connect" aria-label="Wallet">${state.wallet ? state.wallet.slice(0, 4) : "＋"}</button>
     </div>
     <div class="scroll">
+      ${state.view === "portfolio" ? portfolioView() : `
       ${t ? tokenHead(t, price, chg) : `<div class="panel">${esc(state.status || "Search a token to trade.")}</div>`}
       <div class="tabs" role="tablist" aria-label="Token details">
         ${[["trade","Overview"],["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" && t?.holderCount ? ` <span class="tab-n">${compactCount(t.holderCount)}</span>` : ""}</button>`).join("")}
       </div>
-      <div class="panel">${panel()}</div>
+      <div class="panel">${panel()}</div>`}
     </div>
     <div class="bar">
       <span id="bar-hold">Holding ${usd(p.value)}</span>
       <span id="bar-pnl" class="${cls(p.d)}">${pnlText(p.d, p.p)}</span>
     </div>
     <nav class="nav">
-      <button class="on"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>Spot</button>
-      <button><svg viewBox="0 0 24 24"><path d="M4 16l5-6 4 3 7-8"/></svg>Perps</button>
-      <button><svg viewBox="0 0 24 24"><path d="M4 10h16v8H4zM8 10V7a4 4 0 0 1 8 0v3"/></svg>Lend</button>
-      <button><svg viewBox="0 0 24 24"><path d="M5 19V5M5 19h14M9 15l3-4 2 2 4-5"/></svg>Predict</button>
-      <button><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
+      <button type="button" data-nav="spot" class="${state.view==="spot"?"on":""}"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>Spot</button>
+      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 16l5-6 4 3 7-8"/></svg>Perps</button>
+      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 10h16v8H4zM8 10V7a4 4 0 0 1 8 0v3"/></svg>Lend</button>
+      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M5 19V5M5 19h14M9 15l3-4 2 2 4-5"/></svg>Predict</button>
+      <button type="button" data-nav="portfolio" class="${state.view==="portfolio"?"on":""}"><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
     </nav>
     ${state.infoOpen ? sheet() : ""}
     ${state.searchOpen ? searchSheet() : ""}
@@ -831,7 +851,7 @@ function render() {
   `;
   bind();
   drawChart();
-  if (state.tab === "holders") drawMap();
+  if (state.view === "spot" && state.tab === "holders") drawMap();
 }
 
 function tokenAge(iso) {
@@ -888,10 +908,16 @@ function panel() {
   return tradePanel();
 }
 
+function connectPrompt(text) {
+  return `<div class="k" style="padding:16px 0">${text}</div><button type="button" class="go buy" data-connect style="width:100%;padding:12px 0">Connect wallet</button>`;
+}
 function holdingsPanel() {
-  if (!state.wallet) return `<div class="cols"><span>Last Traded</span><span>Holding</span><span>Unrealised</span><span>Actions</span></div><div class="k" style="padding:16px 0">No holdings. Tokens you buy will appear here.</div>`;
-  if (!state.holdings.length) return `<div class="k">No token balances in this wallet.</div>`;
-  const rows = state.holdings.map((h) => {
+  const head = `<div class="cols"><span>Last Traded</span><span>Holding</span><span>Unrealised</span><span>Actions</span></div>`;
+  if (!state.wallet) return head + connectPrompt("Connect your wallet to see your holdings.");
+  if (state.holdingsLoading && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Loading holdings…</div>`;
+  if (state.holdingsError && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Couldn't load holdings: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>`;
+  if (!state.holdings.length) return head + `<div class="k" style="padding:16px 0">No token balances in this wallet yet. Tokens you buy will appear here.</div>`;
+  const rows = [...state.holdings].sort((a, b) => b.ui * (state.prices[b.mint] || 0) - a.ui * (state.prices[a.mint] || 0)).map((h) => {
     const price = state.prices[h.mint] || 0;
     const entry = entryOf(h.mint, price);
     const value = h.ui * price;
@@ -904,7 +930,21 @@ function holdingsPanel() {
       <div class="actions"><span class="share" aria-hidden="true">↗</span><button class="sell" data-sell="${h.mint}">Sell</button></div>
     </div>`;
   }).join("");
-  return `<div class="cols"><span>Last Traded</span><span>Holding</span><span>Unrealised</span><span>Actions</span></div>${rows}`;
+  return head + rows;
+}
+
+function portfolioView() {
+  const w = state.wallet;
+  const solPx = state.prices[SOL] || 0;
+  const tokUsd = state.holdings.reduce((n, h) => n + h.ui * (state.prices[h.mint] || 0), 0);
+  const total = state.sol * solPx + tokUsd;
+  const top = `<div class="token-head"><div class="tok-name"><div class="sym">Portfolio</div>
+      <div class="sub">${w ? `<span>${w.slice(0, 4)}…${w.slice(-4)}</span><button type="button" class="copy" data-copy="${w}" aria-label="Copy">⧉</button>` : `<span>No wallet connected</span>`}</div></div>
+      <div class="mc"><div class="px" id="pf-total">${w ? usd(total) : "—"}</div><div class="k">Net worth</div></div></div>`;
+  if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Phantom, Solflare or Backpack) to see your balances.")}</div>`;
+  const solRow = `<div class="row" data-pf-sol><div class="who"><div class="tok-av"><img src="${SOL_ICON}" alt=""></div><div class="meta"><b>SOL</b><span>${usd(solPx)}</span></div></div>
+      <div><div class="hold-n">${usd(state.sol * solPx)}</div><div class="hold-q">${solText(state.sol)}</div></div><div></div><div></div></div>`;
+  return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
 }
 
 function quoteSummary() {
@@ -1063,13 +1103,25 @@ function bind() {
     state.side = "sell";
     state.tab = "trade";
     state.sellPct = 100;
+    state.view = "spot";
     await loadToken(mint).catch((err) => { state.status = err.message; render(); });
   });
   document.querySelectorAll("[data-mint]").forEach((r) => r.onclick = (e) => {
     if (e.target.closest("[data-sell]")) return;
     state.tab = "trade";
+    state.view = "spot";
     loadToken(r.dataset.mint).catch((err) => { state.status = err.message; render(); });
   });
+  document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => {
+    const v = b.dataset.nav;
+    if (v === "soon") { state.toast = "Only Spot and Portfolio are in this app. Use jup.ag for the rest."; render(); return; }
+    state.view = v;
+    render();
+    $(".scroll") && ($(".scroll").scrollTop = 0);
+    if (v === "portfolio" && state.wallet && !state.holdingsLoading) loadHoldings().catch(() => {});
+  });
+  document.querySelectorAll("[data-connect]").forEach((b) => b.onclick = () => connect());
+  document.querySelectorAll("[data-reload-holdings]").forEach((b) => b.onclick = () => loadHoldings().catch(() => {}));
   const c = $("#connect");
   if (c) c.onclick = () => connect();
   const so = $("#search-open");
