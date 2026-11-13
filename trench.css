@@ -107,7 +107,7 @@ button { font: inherit; }
   background: none; border: 0; color: var(--muted); font: inherit; padding: 4px 0;
 }
 .tf button.on { color: var(--text); font-weight: 700; }
-.chart-wrap { position: relative; height: 188px; margin: 0 4px; }
+.chart-wrap { position: relative; height: 260px; margin: 0 4px; padding-bottom: 14px; box-sizing: border-box; }
 .tools {
   position: absolute; left: 0; top: 34px; z-index: 2;
   display: grid; gap: 2px; color: #8b939e;
@@ -283,3 +283,21 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
 .hidden { display: none !important; }
 .flash { animation: flash .45s ease; }
 @keyframes flash { from { filter: brightness(1.8); } to { filter: none; } }
+
+/* Lightweight Charts host + resize */
+.chart-slot { position: absolute; inset: 0 0 14px 0; }
+.lwc-host { position: absolute; inset: 0; }
+.lwc-legend { position: absolute; left: 6px; top: 34px; z-index: 3; display: flex; flex-wrap: wrap; gap: 2px 5px; font-size: 10px; pointer-events: none; max-width: calc(100% - 70px); }
+.lwc-legend span { color: var(--muted); }
+.lwc-legend b { font-weight: 600; }
+.chart-label { z-index: 3; pointer-events: none; }
+.chart-full-btn { position: absolute; top: 4px; right: 4px; z-index: 4; width: 28px; height: 28px; border-radius: 8px; border: 0; background: rgba(28,34,43,.85); color: #fff; font-size: 15px; line-height: 28px; padding: 0; }
+.chart-grip { position: absolute; left: 0; right: 0; bottom: 0; height: 18px; display: flex; align-items: center; justify-content: center; cursor: ns-resize; touch-action: none; z-index: 4; user-select: none; -webkit-user-select: none; }
+.chart-grip span { width: 44px; height: 4px; border-radius: 2px; background: #3a4350; }
+.chart-grip:hover span, .chart-wrap.resizing .chart-grip span { background: #8b939e; }
+.chart-wrap.resizing { user-select: none; -webkit-user-select: none; }
+.chart-wrap.full { position: fixed; inset: 0; z-index: 60; margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) calc(env(safe-area-inset-bottom) + 40px) env(safe-area-inset-left); background: #07090e; height: auto !important; }
+.chart-wrap.full .chart-slot { inset: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 40px) 0; }
+.chart-wrap.full .tf-full { position: absolute; left: 0; right: 0; bottom: env(safe-area-inset-bottom); height: 40px; display: flex; gap: 4px; align-items: center; padding: 0 8px; overflow-x: auto; }
+#chart-mode { background: none; border: 0; color: var(--muted); font: inherit; padding: 0; }
+#chart-mode.on { color: var(--text); }

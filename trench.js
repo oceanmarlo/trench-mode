@@ -218,12 +218,13 @@ async function datapi(url) {
 async function loadCandles() {
   const t = state.active;
   if (!t) return;
+  const tf = state.tf;
   const interval = { "15s": "15_SECOND", "1m": "1_MINUTE", "3m": "3_MINUTE", "15m": "15_MINUTE", "1h": "1_HOUR", "4h": "4_HOUR", "1D": "1_DAY" }[state.tf] || "1_MINUTE";
   const to = new Date().toISOString();
-  const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=48`);
-  if (state.active !== t) return;
+  const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=300`);
+  if (state.active !== t || state.tf !== tf) return;
   state.candles = data.candles || [];
-  drawChart();
+  setChartData();
 }
 
 function ageLabel(iso) {
@@ -626,136 +627,189 @@ function paintLive() {
     if (hn) hn.textContent = usd(value);
     if (pn) pn.innerHTML = `<b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span>`;
   });
-  drawChart();
+  tickChart();
+  paintEntryLine();
 }
 
-function drawChart() {
-  const c = $("#chart");
-  if (!c) return;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  const w = c.clientWidth || 360;
-  const h = c.clientHeight || 280;
-  c.width = w * dpr;
-  c.height = h * dpr;
-  const g = c.getContext("2d");
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, w, h);
-  const cs = state.candles.length ? state.candles : [];
-  if (!cs.length) return;
-  const padR = 70;
-  const padL = 40;
-  const volH = state.showInd ? 28 : 0;
-  const chopH = state.showInd ? 12 : 0;
-  const macdH = state.showInd ? 14 : 0;
-  const top = 20;
-  const plotB = h - volH - chopH - macdH - 6;
-  const max = Math.max(...cs.map((x) => x.high));
-  const min = Math.min(...cs.map((x) => x.low));
-  const Y = (v) => top + ((max - v) / (max - min || 1)) * (plotB - top);
-  const slot = (w - padR - padL) / cs.length;
-  cs.forEach((cd, i) => {
-    const up = cd.close >= cd.open;
-    const x = padL + i * slot;
-    g.strokeStyle = up ? "#5ed68c" : "#e5546f";
-    g.fillStyle = up ? "#5ed68c" : "#e5546f";
-    g.beginPath();
-    g.moveTo(x + slot / 2, Y(cd.high));
-    g.lineTo(x + slot / 2, Y(cd.low));
-    g.stroke();
-    const y1 = Y(Math.max(cd.open, cd.close));
-    const y2 = Y(Math.min(cd.open, cd.close));
-    g.fillRect(x + 1, y1, Math.max(2, slot - 3), Math.max(1, y2 - y1));
-    const vmax = Math.max(...cs.map((x) => x.volume || 0)) || 1;
-    g.globalAlpha = 0.85;
-    const vx = Math.max(x + 1, 64);
-    if (vx < w - padR) g.fillRect(vx, plotB + 4, Math.max(2, slot - 3), ((cd.volume || 0) / vmax) * (volH - 6));
-    g.globalAlpha = 1;
-    g.fillStyle = up ? "#e6c84a" : "#5ed6e0";
-    g.fillRect(Math.max(x + 1, 78), h - macdH - chopH, Math.max(2, slot - 2), chopH - 2);
-  });
-  const entry = activePnl().entry;
-  if (entry && entry >= min && entry <= max) {
-    g.setLineDash([3, 3]);
-    g.strokeStyle = "#5ed68c";
-    g.beginPath();
-    g.moveTo(padL, Y(entry));
-    g.lineTo(w - padR, Y(entry));
-    g.stroke();
-    g.setLineDash([]);
-  }
-  const supply = state.active?.circSupply || 0;
-  const axis = (v) => (supply ? usd(v * supply) : usd(v)).replace("$", "");
-  g.font = "10px -apple-system, sans-serif";
-  g.textAlign = "right";
-  g.fillStyle = "#8b939e";
-  [0.2, 0.5, 0.8].forEach((t) => {
-    const v = max - (max - min) * t;
-    const y = Y(v);
-    g.strokeStyle = "rgba(255,255,255,.06)";
-    g.beginPath();
-    g.moveTo(padL, y);
-    g.lineTo(w - 28, y);
-    g.stroke();
-    g.fillText(axis(v), w - 28, y - 2);
-  });
-  g.textAlign = "left";
-  const last = cs[cs.length - 1].close;
-  const priceLabel = axis(last);
-  g.font = "9px -apple-system, sans-serif";
-  const pw = g.measureText(priceLabel).width + 8;
-  const px = w - pw - 48;
-  const tagY = Math.min(Math.max(Y(last), top + 10), plotB - 10);
-  g.fillStyle = last >= cs[cs.length - 1].open ? "#143024" : "#3a1520";
-  g.fillRect(px, tagY - 8, pw, 16);
-  g.fillStyle = "#fff";
-  g.fillText(priceLabel, px + 4, tagY + 3);
-  if (entry && entry >= min && entry <= max) {
-    g.fillStyle = "#5ed68c";
-    g.font = "11px -apple-system, sans-serif";
-    const entryLabel = "Avg Entry";
-    const lw = g.measureText(entryLabel).width;
-    const entryY = Math.min(Math.max(Y(entry) - 6, top + 12), plotB - 4);
-    g.fillText(entryLabel, Math.max(padL, px - lw - 8), entryY);
-  }
-  if (state.showInd) {
-    g.fillStyle = "#8b939e";
-    g.font = "11px -apple-system, sans-serif";
-    g.fillText("Volume", 4, plotB + 12);
-    g.fillText("Chop Zone", 4, h - macdH - 2);
-    g.fillText("MACD 12 26 close 9", 4, h - 3);
-  }
-  if (state.pointer && state.tool === "cross") {
-    g.strokeStyle = "rgba(255,255,255,.5)";
-    g.setLineDash([2, 2]);
-    g.beginPath();
-    g.moveTo(state.pointer.x, 0);
-    g.lineTo(state.pointer.x, plotB);
-    g.moveTo(28, state.pointer.y);
-    g.lineTo(w - 30, state.pointer.y);
-    g.stroke();
-    g.setLineDash([]);
-  }
-  g.lineWidth = 1.5;
-  state.marks.forEach((m) => {
-    if (!m.a) return;
-    if (m.kind === "text") {
-      g.fillStyle = "#fff";
-      g.font = "12px -apple-system, sans-serif";
-      g.fillText(m.text || "Note", m.a.x, m.a.y);
-      return;
-    }
-    if (!m.b) return;
-    g.strokeStyle = m.kind === "trend" ? "#e6c84a" : "#9aa3ad";
-    g.beginPath();
-    if (m.kind === "range") {
-      g.strokeRect(Math.min(m.a.x, m.b.x), Math.min(m.a.y, m.b.y), Math.abs(m.b.x - m.a.x), Math.abs(m.b.y - m.a.y));
-    } else {
-      g.moveTo(m.a.x, m.a.y);
-      g.lineTo(m.b.x, m.b.y);
-      g.stroke();
-    }
-  });
+// ---- TradingView Lightweight Charts (Apache-2.0), created once and re-attached after each render ----
+const CHART_H_KEY = "trench-chart-h";
+const CHART_MODE_KEY = "trench-chart-mode";
+const chartUi = {
+  host: null, chart: null, candles: null, volume: null, legend: null, entryLine: null,
+  key: "", lastTime: 0, dragging: false, pendingRender: false
+};
+state.chartH = Number(localStorage.getItem(CHART_H_KEY)) || 260;
+state.chartMode = localStorage.getItem(CHART_MODE_KEY) || "mc";
+state.chartFull = false;
+
+function clampChartH(h) { return Math.round(Math.min(Math.max(h, 140), Math.max(220, window.innerHeight * 0.85))); }
+function chartScale() {
+  const t = state.active;
+  return state.chartMode === "mc" && t?.circSupply ? t.circSupply : 1;
 }
+function fmtAxis(v) {
+  const a = Math.abs(v);
+  if (state.chartMode === "mc" && chartScale() !== 1) return usd(v).replace("$", "");
+  if (a === 0) return "0";
+  if (a >= 1) return a >= 1000 ? usd(v).replace("$", "") : v.toFixed(4);
+  const z = Math.floor(-Math.log10(a));
+  if (z >= 4) return "0.0" + String.fromCharCode(8320 + Math.min(9, z)) + Math.round(a * 10 ** (z + 4)).toString().slice(0, 4);
+  return v.toPrecision(4);
+}
+
+function ensureChart() {
+  if (chartUi.chart || !window.LightweightCharts) return chartUi.chart;
+  const L = window.LightweightCharts;
+  const host = document.createElement("div");
+  host.className = "lwc-host";
+  const legend = document.createElement("div");
+  legend.className = "lwc-legend";
+  host.appendChild(legend);
+  const chart = L.createChart(host, {
+    autoSize: true,
+    layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
+    grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.06)" } },
+    rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.24 } },
+    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 4 },
+    crosshair: { mode: L.CrosshairMode.Normal },
+    localization: { priceFormatter: fmtAxis },
+    handleScale: { axisPressedMouseMove: true, pinch: true, mouseWheel: true },
+    handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
+  });
+  const candles = chart.addSeries(L.CandlestickSeries, {
+    upColor: "#2ebd85", downColor: "#f6465d", borderVisible: false, wickUpColor: "#2ebd85", wickDownColor: "#f6465d",
+    priceFormat: { type: "custom", formatter: fmtAxis, minMove: 1e-12 }
+  });
+  const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+  volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+  chart.subscribeCrosshairMove((param) => {
+    const bar = param?.seriesData?.get(candles);
+    const vol = param?.seriesData?.get(volume);
+    if (!bar) { paintLegend(); return; }
+    paintLegend(bar, vol?.value);
+  });
+  Object.assign(chartUi, { host, chart, candles, volume, legend });
+  return chart;
+}
+
+function paintLegend(bar, vol) {
+  if (!chartUi.legend) return;
+  if (!bar) { chartUi.legend.textContent = ""; return; }
+  const c = bar.close >= bar.open ? "up" : "down";
+  chartUi.legend.innerHTML = `<span>O</span><b class="${c}">${fmtAxis(bar.open)}</b><span>H</span><b class="${c}">${fmtAxis(bar.high)}</b><span>L</span><b class="${c}">${fmtAxis(bar.low)}</b><span>C</span><b class="${c}">${fmtAxis(bar.close)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+}
+
+function toBars(list) {
+  const k = chartScale();
+  const bars = [];
+  const vols = [];
+  let last = 0;
+  for (const c of list || []) {
+    const time = Number(c.time);
+    if (!time || time <= last) continue;
+    last = time;
+    bars.push({ time, open: c.open * k, high: c.high * k, low: c.low * k, close: c.close * k });
+    vols.push({ time, value: Number(c.volume) || 0, color: c.close >= c.open ? "rgba(46,189,133,.45)" : "rgba(246,70,93,.45)" });
+  }
+  return { bars, vols };
+}
+
+// Full data load (token, interval, or mode change) vs incremental update (polling).
+function setChartData() {
+  if (!ensureChart()) return;
+  const t = state.active;
+  const key = (t?.id || "") + "|" + state.tf + "|" + state.chartMode;
+  const { bars, vols } = toBars(state.candles);
+  if (key !== chartUi.key || !chartUi.lastTime) {
+    chartUi.candles.setData(bars);
+    chartUi.volume.setData(vols);
+    chartUi.key = key;
+    chartUi.chart.timeScale().fitContent();
+  } else {
+    bars.forEach((b, i) => { if (b.time >= chartUi.lastTime) { chartUi.candles.update(b); chartUi.volume.update(vols[i]); } });
+  }
+  chartUi.lastTime = bars.length ? bars[bars.length - 1].time : 0;
+  chartUi.volume.applyOptions({ visible: state.showInd });
+  paintEntryLine();
+}
+
+function paintEntryLine() {
+  const t = state.active;
+  if (!chartUi.candles || !t) return;
+  const p = activePnl();
+  const want = p.amount && p.entry ? p.entry * chartScale() : 0;
+  if (chartUi.entryLine && (!want || chartUi.entryLine.options().price !== want)) {
+    chartUi.candles.removePriceLine(chartUi.entryLine);
+    chartUi.entryLine = null;
+  }
+  if (want && !chartUi.entryLine) {
+    chartUi.entryLine = chartUi.candles.createPriceLine({ price: want, color: "#5ed68c", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "Avg Entry" });
+  }
+}
+
+// Live tick between candle fetches: move the last bar's close to the latest price.
+function tickChart() {
+  const t = state.active;
+  if (!chartUi.candles || !t || !chartUi.lastTime || !state.candles.length) return;
+  const price = state.prices[t.id];
+  if (!price) return;
+  const last = state.candles[state.candles.length - 1];
+  if (Number(last.time) !== chartUi.lastTime) return;
+  last.close = price;
+  last.high = Math.max(last.high, price);
+  last.low = Math.min(last.low, price);
+  const k = chartScale();
+  chartUi.candles.update({ time: chartUi.lastTime, open: last.open * k, high: last.high * k, low: last.low * k, close: price * k });
+}
+
+// Called by render(): move the persistent chart into the freshly rendered slot.
+function drawChart() {
+  const slot = $("#chart-slot");
+  if (!slot) return;
+  if (!ensureChart()) { slot.innerHTML = `<div class="k" style="padding:20px">Chart library failed to load.</div>`; return; }
+  if (chartUi.host.parentNode !== slot) slot.appendChild(chartUi.host);
+  setChartData();
+}
+
+function bindChartResize() {
+  const wrap = $("#chart-wrap");
+  const grip = $("#chart-grip");
+  if (!wrap || !grip) return;
+  let startY = 0, startH = 0;
+  grip.onpointerdown = (ev) => {
+    ev.preventDefault();
+    grip.setPointerCapture(ev.pointerId);
+    chartUi.dragging = true;
+    startY = ev.clientY;
+    startH = wrap.getBoundingClientRect().height;
+    wrap.classList.add("resizing");
+  };
+  grip.onpointermove = (ev) => {
+    if (!chartUi.dragging) return;
+    state.chartH = clampChartH(startH + ev.clientY - startY);
+    wrap.style.height = state.chartH + "px";
+  };
+  const end = () => {
+    if (!chartUi.dragging) return;
+    chartUi.dragging = false;
+    wrap.classList.remove("resizing");
+    localStorage.setItem(CHART_H_KEY, String(state.chartH));
+    if (chartUi.pendingRender) { chartUi.pendingRender = false; render(); }
+  };
+  grip.onpointerup = end;
+  grip.onpointercancel = end;
+  grip.onlostpointercapture = end;
+  grip.ondblclick = () => { state.chartH = 260; localStorage.setItem(CHART_H_KEY, "260"); wrap.style.height = "260px"; };
+}
+// Re-clamp to the viewport on rotation, but keep the user's saved preference.
+window.addEventListener("resize", () => {
+  const pref = Number(localStorage.getItem(CHART_H_KEY)) || state.chartH;
+  state.chartH = clampChartH(pref);
+  const w = $("#chart-wrap");
+  if (w && !state.chartFull && !chartUi.dragging) w.style.height = state.chartH + "px";
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
+
 
 function drawMap() {
   const c = $("#map");
@@ -816,6 +870,7 @@ function stat(win) {
 }
 
 function render() {
+  if (chartUi.dragging) { chartUi.pendingRender = true; return; }
   const t = state.active;
   const p = activePnl();
   const price = t ? (state.prices[t.id] || t.usdPrice || 0) : 0;
@@ -883,20 +938,13 @@ function tokenHead(t, price, chg) {
       <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)} <button id="info">⌄</button></div></div>
     </div>
     <div class="tf">${["Auto","15s","1m","3m","15m","1h","4h","1D"].map((x)=>`<button data-tf="${x}" class="${state.tf===x?"on":""}">${x}</button>`).join("")}<span class="tf-tools"><button type="button" id="ind" aria-label="Indicators">▦</button><button type="button" id="chart-set" aria-label="Chart settings">⚙</button></span></div>
-    <div class="chart-wrap">
-      <div class="tools">
-        <button type="button" data-tool="cross" class="${state.tool==="cross"?"on":""}" aria-label="Crosshair"><svg viewBox="0 0 16 16"><path d="M8 1v14M1 8h14"/></svg></button>
-        <button type="button" data-tool="trend" class="${state.tool==="trend"?"on":""}" aria-label="Trend"><svg viewBox="0 0 16 16"><path d="M2 12l4-5 3 2 5-7"/></svg></button>
-        <button type="button" data-tool="range" class="${state.tool==="range"?"on":""}" aria-label="Range"><svg viewBox="0 0 16 16"><path d="M3 3h10M3 8h10M3 13h10"/></svg></button>
-        <button type="button" data-tool="text" class="${state.tool==="text"?"on":""}" aria-label="Text"><svg viewBox="0 0 16 16"><path d="M3 3h10M8 3v10"/></svg></button>
-      </div>
-      <canvas class="chart" id="chart"></canvas>
-      <div class="chart-label">${esc(t.symbol)}/USD · jup.ag<div id="live"></div></div>
-      <div class="al al-price"><button class="on">A</button><button>L</button></div>
-      <div class="al al-vol"><button>A</button><button>L</button></div>
-      <div class="al al-chop"><button>A</button><button>L</button></div>
+    <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
+      <div id="chart-slot" class="chart-slot"></div>
+      <div class="chart-label">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · jup.ag<div id="live"></div></div>
+      <button type="button" class="chart-full-btn" id="chart-full" aria-label="${state.chartFull ? "Exit full screen" : "Full screen"}">${state.chartFull ? "✕" : "⤢"}</button>
+      ${state.chartFull ? `<div class="tf tf-full">${["15s","1m","3m","15m","1h","4h","1D"].map((x)=>`<button data-tf="${x}" class="${state.tf===x?"on":""}">${x}</button>`).join("")}</div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
-    <div class="chart-foot"><span></span><button type="button" class="range">Date Range ▾</button><span id="utc">${new Date().toISOString().slice(11, 19)} (UTC)</span><span>% log auto</span></div>
+    <div class="chart-foot"><span></span><span id="utc">${new Date().toISOString().slice(11, 19)} (UTC)</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>
     <div class="subnav"><button type="button" data-tab="holders">‹ Holders (${(t.holderCount || 0).toLocaleString()})</button><button type="button">Top Traders</button><button type="button">Dev Tokens${t.audit?.devMints == null ? "" : ` (${Number(t.audit.devMints).toLocaleString()})`}</button></div>`;
 }
 
@@ -1068,7 +1116,7 @@ function searchSheet() {
 
 function bind() {
   document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { state.tab = b.dataset.tab; render(); });
-  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { state.tf = b.dataset.tf; render(); loadCandles(); });
+  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { if (state.tf === b.dataset.tf) return; state.tf = b.dataset.tf; state.candles = []; render(); loadCandles().catch(() => {}); });
   document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => { state.side = b.dataset.side; state.quote = null; render(); scheduleQuote(0); });
   document.querySelectorAll("[data-amt]").forEach((b) => b.onclick = () => { state.amount = Number(b.dataset.amt); render(); scheduleQuote(0); });
   document.querySelectorAll("[data-pct]").forEach((b) => b.onclick = () => { state.sellPct = Number(b.dataset.pct); render(); scheduleQuote(0); });
@@ -1138,33 +1186,11 @@ function bind() {
   const sc = $("#search-close");
   if (sc) sc.onclick = () => { state.searchOpen = false; render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
-  document.querySelectorAll("[data-tool]").forEach((b) => b.onclick = (e) => {
-    e.stopPropagation();
-    state.tool = b.dataset.tool;
-    document.querySelectorAll("[data-tool]").forEach((x) => x.classList.toggle("on", x.dataset.tool === state.tool));
-  });
-  const chart = $("#chart");
-  if (chart) {
-    const pt = (ev) => {
-      const r = chart.getBoundingClientRect();
-      const src = ev.touches ? ev.touches[0] : ev;
-      return { x: src.clientX - r.left, y: src.clientY - r.top };
-    };
-    chart.onpointerdown = (ev) => {
-      const p = pt(ev);
-      if (state.tool === "cross") { state.pointer = p; drawChart(); return; }
-      if (state.tool === "text") { state.marks.push({ kind: "text", a: p, text: "Note" }); drawChart(); return; }
-      const open = state.marks.find((m) => m.kind === state.tool && !m.b);
-      if (!open) state.marks.push({ kind: state.tool, a: p });
-      else open.b = p;
-      drawChart();
-    };
-    chart.onpointermove = (ev) => {
-      if (state.tool !== "cross") return;
-      state.pointer = pt(ev);
-      drawChart();
-    };
-  }
+  bindChartResize();
+  const cf = $("#chart-full");
+  if (cf) cf.onclick = () => { state.chartFull = !state.chartFull; render(); };
+  const cm = $("#chart-mode");
+  if (cm) cm.onclick = () => { state.chartMode = state.chartMode === "mc" ? "price" : "mc"; localStorage.setItem(CHART_MODE_KEY, state.chartMode); render(); };
   document.querySelectorAll("[data-txf]").forEach((b) => b.onclick = () => {
     state.txFilter = b.dataset.txf;
     const box = $("#tape");
