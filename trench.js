@@ -8,9 +8,11 @@ const PRICE = "https://api.jup.ag/price/v3";
 const SEARCH = "https://api.jup.ag/tokens/v2/search";
 const RPC = "https://solana-rpc.publicnode.com";
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VeKKdPT7yHdmnMvEGB4ryFHSZH9Ee"];
-const PRICE_EVERY_MS = 3000;   // price poll; free plan is 1 RPS shared
+const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
 const QUOTE_EVERY_MS = 12000;  // background order refresh
-const FEED_EVERY_MS = 5000;    // datapi chart + trades (separate host, no key budget)
+const FEED_EVERY_MS = 1000;    // datapi chart refresh (separate host, no key budget); trades poll only if stream is down
+const ALPHA_LIST_MS = 5000;    // datapi list re-rank; row values stream live in between
+const TF_SEC = { "Auto": 60, "15s": 15, "1m": 60, "3m": 180, "15m": 900, "1h": 3600, "4h": 14400, "1D": 86400 };
 
 const state = {
   tab: "trade",
@@ -131,7 +133,7 @@ function jupHeaders(url, h = {}) {
 
 // Every call to api.jup.ag goes through one queue so the whole app stays under
 // the free plan (1 RPS, 60 s sliding window). /swap/v2/execute has its own bucket.
-const MAIN_GAP_MS = 1250;
+const MAIN_GAP_MS = 2000; // hard floor: <= 1 keyed request per 2 s
 let coolUntil = 0;
 let lastMain = 0;
 let mainChain = Promise.resolve();
@@ -201,8 +203,10 @@ async function loadToken(query) {
     const row = (extra || []).find((t) => t.id === hit.id);
     if (row && row.fees != null && state.active === hit) { hit.fees = row.fees; render(); }
   }).catch(() => {});
+  state.tapeIds = new Set();
+  streamSync();
   loadCandles().catch(() => {});
-  loadTape().catch(() => {});
+  loadTape(true).catch(() => {});
   loadHolders().catch(() => {});
   scheduleQuote(0);
 }
@@ -215,16 +219,32 @@ async function datapi(url) {
   return res.json();
 }
 
+let candleBusy = false;
 async function loadCandles() {
   const t = state.active;
-  if (!t) return;
+  if (!t || candleBusy) return;
   const tf = state.tf;
   const interval = { "15s": "15_SECOND", "1m": "1_MINUTE", "3m": "3_MINUTE", "15m": "15_MINUTE", "1h": "1_HOUR", "4h": "4_HOUR", "1D": "1_DAY" }[state.tf] || "1_MINUTE";
   const to = new Date().toISOString();
-  const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=300`);
-  if (state.active !== t || state.tf !== tf) return;
-  state.candles = data.candles || [];
-  setChartData();
+  // First load: 300 candles. After that: just the last 3 (tiny payload) every second.
+  const full = !state.candles.length;
+  candleBusy = true;
+  try {
+    const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=${full ? 300 : 3}`);
+    if (state.active !== t || state.tf !== tf) return;
+    const got = data.candles || [];
+    if (full) state.candles = got;
+    else {
+      for (const c of got) {
+        const i = state.candles.findIndex((x) => Number(x.time) === Number(c.time));
+        if (i >= 0) state.candles[i] = c;
+        else if (!state.candles.length || Number(c.time) > Number(state.candles[state.candles.length - 1].time)) state.candles.push(c);
+      }
+      if (state.candles.length > 600) state.candles.splice(0, state.candles.length - 600);
+    }
+    feedMark("candles");
+    setChartData();
+  } finally { candleBusy = false; }
 }
 
 function ageLabel(iso) {
@@ -234,12 +254,15 @@ function ageLabel(iso) {
   return Math.floor(s / 3600) + "h";
 }
 
-async function loadTape() {
+async function loadTape(force = false) {
   const t = state.active;
   if (!t) return;
+  if (!force && state.tape.length && streamLive()) return; // trades arrive over the stream
   const data = await datapi(`https://datapi.jup.ag/v1/txs/${t.id}?limit=40`);
   if (state.active !== t) return;
   state.tape = data.txs || [];
+  state.tapeIds = new Set(state.tape.map((x) => x.txHash || x.actionId));
+  feedMark("tradesPoll");
   const box = $("#tape");
   if (box) box.innerHTML = tapeRows();
   else if (state.tab === "tx") render();
@@ -291,7 +314,8 @@ function search(q) {
   }, 450);
 }
 
-async function pollPrices() {
+async function pollPrices(force = false) {
+  if (!force && streamPricesLive()) return; // prices arrive over the stream
   const t0 = performance.now();
   const ids = new Set([SOL]);
   if (state.active) ids.add(state.active.id);
@@ -310,6 +334,7 @@ async function pollPrices() {
     state.samples.push(state.active.usdPrice);
     if (state.samples.length > 60) state.samples.shift();
   }
+  feedMark("pricesPoll");
   paintLive();
   state.lag = Math.round(performance.now() - t0);
   const lag = $("#lag");
@@ -405,7 +430,8 @@ async function loadHoldings() {
       });
     } catch (_) {}
   }
-  await pollPrices().catch(() => {});
+  streamSync();
+  await pollPrices(true).catch(() => {});
   render();
 }
 
@@ -748,18 +774,28 @@ function paintEntryLine() {
 }
 
 // Live tick between candle fetches: move the last bar's close to the latest price.
-function tickChart() {
+function tickChart(addVolume = 0) {
   const t = state.active;
   if (!chartUi.candles || !t || !chartUi.lastTime || !state.candles.length) return;
   const price = state.prices[t.id];
   if (!price) return;
-  const last = state.candles[state.candles.length - 1];
+  const sec = TF_SEC[state.tf] || 60;
+  const bucket = Math.floor(Date.now() / 1000 / sec) * sec;
+  let last = state.candles[state.candles.length - 1];
   if (Number(last.time) !== chartUi.lastTime) return;
+  if (bucket > chartUi.lastTime) {
+    // A new interval started before datapi sent it: open the bar locally.
+    last = { time: bucket, open: last.close, high: price, low: price, close: price, volume: 0 };
+    state.candles.push(last);
+    chartUi.lastTime = bucket;
+  }
   last.close = price;
   last.high = Math.max(last.high, price);
   last.low = Math.min(last.low, price);
+  if (addVolume) last.volume = (Number(last.volume) || 0) + addVolume;
   const k = chartScale();
   chartUi.candles.update({ time: chartUi.lastTime, open: last.open * k, high: last.high * k, low: last.low * k, close: price * k });
+  chartUi.volume.update({ time: chartUi.lastTime, value: Number(last.volume) || 0, color: last.close >= last.open ? "rgba(46,189,133,.45)" : "rgba(246,70,93,.45)" });
 }
 
 // Called by render(): move the persistent chart into the freshly rendered slot.
@@ -1200,8 +1236,15 @@ async function loadAlpha() {
       rows = Array.isArray(d) ? d : d?.assets || [];
     }
     if (seq !== alphaSeq) return;
-    a.rows = rows || [];
+    // Keep whichever copy is newer: the streamed row or the fresh snapshot.
+    const old = new Map(a.rows.map((r) => [r.id, r]));
+    a.rows = (rows || []).map((r) => {
+      const o = old.get(r.id);
+      return o && o.updatedAt && r.updatedAt && new Date(o.updatedAt) > new Date(r.updatedAt) ? { ...r, ...o } : r;
+    });
     a.at = Date.now();
+    feedMark("alphaList");
+    streamSync();
   } catch (err) {
     if (seq === alphaSeq) a.err = err.message || String(err);
   } finally {
@@ -1531,6 +1574,7 @@ function bind() {
     if (v === "soon") { state.toast = "Only Spot, Alpha and Portfolio are in this app. Use jup.ag for the rest."; render(); return; }
     state.view = v;
     render();
+    streamSync();
     $(".scroll") && ($(".scroll").scrollTop = 0);
     if (v === "portfolio" && state.wallet && !state.holdingsLoading) loadHoldings().catch(() => {});
     if (v === "alpha") loadAlpha().catch(() => {});
@@ -1568,6 +1612,201 @@ function bind() {
   if (tx) tx.onclick = () => { state.toast = null; render(); };
 }
 
+// ---------------- Jupiter stream (wss://api.jup.ag/stream/v1/ws) ----------------
+// One websocket for live prices, trades and token stats. Opening it is one connection,
+// not a request per update, so it does not eat the 1 RPS REST budget.
+const STREAM_URL = "wss://api.jup.ag/stream/v1/ws";
+const stream = {
+  ws: null, open: false, retry: 0, lastMsg: 0, lastPrice: 0, lastAct: 0,
+  sent: { prices: new Set(), txns: new Set(), assets: new Set(), recent: false },
+  dirty: { live: false, tape: false, alpha: false }, raf: 0, alphaAt: 0
+};
+const feeds = {};
+function feedMark(name) {
+  const f = feeds[name] || (feeds[name] = { n: 0, last: 0, gaps: [] });
+  const now = performance.now();
+  if (f.last) { f.gaps.push(now - f.last); if (f.gaps.length > 200) f.gaps.shift(); }
+  f.last = now;
+  f.n++;
+}
+window.__feeds = () => Object.fromEntries(Object.entries(feeds).map(([k, f]) => {
+  const g = [...f.gaps].sort((a, b) => a - b);
+  return [k, { n: f.n, medianMs: g.length ? Math.round(g[g.length >> 1]) : null, p90Ms: g.length ? Math.round(g[Math.floor(g.length * 0.9)]) : null }];
+}));
+function streamLive() { return stream.open && Date.now() - stream.lastMsg < 5000; }
+function streamPricesLive() { return stream.open && Date.now() - stream.lastPrice < 4000; }
+
+function streamConnect() {
+  if (stream.ws && (stream.ws.readyState === 0 || stream.ws.readyState === 1)) return;
+  const k = window.JUP_API_KEY;
+  let ws;
+  try { ws = new WebSocket(STREAM_URL + (k ? "?apiKey=" + encodeURIComponent(k) : "")); }
+  catch (_) { streamRetry(); return; }
+  stream.ws = ws;
+  ws.onopen = () => {
+    stream.open = true;
+    stream.retry = 0;
+    stream.lastMsg = Date.now();
+    stream.sent = { prices: new Set(), txns: new Set(), assets: new Set(), recent: false };
+    streamSync();
+  };
+  ws.onmessage = (e) => {
+    stream.lastMsg = Date.now();
+    let d;
+    try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (d.type === "prices") onStreamPrices(d.data || []);
+    else if (d.type === "actions") onStreamActions(d.data || []);
+    else if (d.type === "asset-updates") onStreamAssets(d.data || []);
+  };
+  ws.onclose = () => { stream.open = false; if (stream.ws === ws) stream.ws = null; streamRetry(); };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+function streamRetry() {
+  const ms = Math.min(10000, 1000 * 2 ** stream.retry++);
+  setTimeout(() => { if (!document.hidden) streamConnect(); }, ms);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) streamConnect(); });
+
+function streamSend(type, payload) {
+  if (stream.ws?.readyState === 1) stream.ws.send(JSON.stringify({ type, ...payload }));
+}
+function syncSet(kind, want) {
+  const sent = stream.sent[kind];
+  const add = [...want].filter((x) => !sent.has(x));
+  const del = [...sent].filter((x) => !want.has(x));
+  if (del.length) streamSend("unsubscribe:" + kind, { assets: del });
+  if (add.length) streamSend("subscribe:" + kind, { assets: add });
+  stream.sent[kind] = new Set(want);
+}
+// Subscribe to exactly what is on screen.
+function streamSync() {
+  if (!stream.open) return;
+  const a = state.active?.id;
+  const prices = new Set([SOL]);
+  if (a) prices.add(a);
+  state.holdings.slice(0, 40).forEach((h) => prices.add(h.mint));
+  const assets = new Set(a ? [a] : []);
+  if (state.view === "alpha") state.alpha.rows.slice(0, 100).forEach((t) => assets.add(t.id));
+  syncSet("prices", prices);
+  syncSet("txns", new Set(a ? [a] : []));
+  syncSet("assets", assets);
+  const recent = state.view === "alpha" && state.alpha.src === "recent";
+  if (recent !== stream.sent.recent) {
+    streamSend((recent ? "subscribe" : "unsubscribe") + ":assets,recent", {});
+    stream.sent.recent = recent;
+  }
+}
+
+function onStreamPrices(list) {
+  const a = state.active;
+  for (const p of list) {
+    if (!p?.assetId || !(p.price > 0)) continue;
+    state.prices[p.assetId] = p.price;
+    if (a && p.assetId === a.id) {
+      a.usdPrice = p.price;
+      if (a.circSupply) a.mcap = a.circSupply * p.price;
+      feedMark("pricesStream");
+    }
+  }
+  stream.lastPrice = Date.now();
+  stream.dirty.live = true;
+  streamFlush();
+}
+function onStreamActions(list) {
+  const a = state.active;
+  if (!a) return;
+  if (!state.tapeIds) state.tapeIds = new Set();
+  let added = 0, vol = 0;
+  for (const x of list) {
+    if (x.asset !== a.id) continue;
+    const id = x.txHash || x.actionId;
+    if (state.tapeIds.has(id)) continue;
+    state.tapeIds.add(id);
+    state.tape.unshift(x);
+    vol += Number(x.usdVolume) || 0;
+    if (x.usdPrice > 0) state.prices[a.id] = x.usdPrice;
+    added++;
+  }
+  if (!added) return;
+  feedMark("tradesStream");
+  if (state.tape.length > 80) state.tape.length = 80;
+  if (state.tapeIds.size > 2000) state.tapeIds = new Set(state.tape.map((x) => x.txHash || x.actionId));
+  stream.lastAct = Date.now();
+  stream.pendingVol = (stream.pendingVol || 0) + vol;
+  stream.dirty.tape = true;
+  stream.dirty.live = true;
+  streamFlush();
+}
+function onStreamAssets(list) {
+  const a = state.active;
+  const al = state.alpha;
+  const alphaOn = state.view === "alpha";
+  let idx = null;
+  for (const u of list) {
+    const t = u?.asset;
+    if (!t?.id) continue;
+    if (a && t.id === a.id) {
+      const fees = a.fees;
+      Object.assign(a, t);
+      if (fees != null && t.fees == null) a.fees = fees;
+      if (t.usdPrice > 0) state.prices[t.id] = t.usdPrice;
+      feedMark("tokenStatsStream");
+      stream.dirty.live = true;
+    }
+    if (!alphaOn) continue;
+    if (!idx) idx = new Map(al.rows.map((r, i) => [r.id, i]));
+    const i = idx.get(t.id);
+    if (i != null) { al.rows[i] = { ...al.rows[i], ...t }; stream.dirty.alpha = true; feedMark("alphaRowStream"); }
+    else if (u.type === "new" && al.src === "recent") {
+      al.rows.unshift(t);
+      if (al.rows.length > 100) al.rows.length = 100;
+      idx = null;
+      stream.dirty.alpha = true;
+      feedMark("alphaNewStream");
+    }
+  }
+  if (stream.dirty.live || stream.dirty.alpha) streamFlush();
+}
+// Coalesce bursts into one paint per animation frame (Alpha list: at most every 250 ms).
+function streamFlush() {
+  if (stream.raf) return;
+  stream.raf = requestAnimationFrame(() => {
+    stream.raf = 0;
+    if (chartUi.dragging) { stream.dirty.live = true; return; }
+    if (stream.dirty.live) {
+      stream.dirty.live = false;
+      const v = stream.pendingVol || 0;
+      stream.pendingVol = 0;
+      if (v) tickChart(v);
+      paintLive();
+      paintHeadStats();
+    }
+    if (stream.dirty.tape) {
+      stream.dirty.tape = false;
+      const box = $("#tape");
+      if (box) box.innerHTML = tapeRows();
+    }
+    if (stream.dirty.alpha) {
+      const wait = 250 - (Date.now() - stream.alphaAt);
+      if (wait > 0) { setTimeout(streamFlush, wait); return; }
+      stream.dirty.alpha = false;
+      stream.alphaAt = Date.now();
+      if (state.view === "alpha") paintAlphaList();
+      feedMark("alphaPaint");
+    }
+  });
+}
+// Price / liquidity / volume cells in the token header, without a full re-render.
+function paintHeadStats() {
+  const t = state.active;
+  const st = document.querySelectorAll(".stats .v");
+  if (!t || st.length < 3) return;
+  const s1 = t.stats1h || {};
+  st[0].textContent = usd(state.prices[t.id] || t.usdPrice || 0);
+  st[1].textContent = usd(t.liquidity || 0);
+  st[2].textContent = usd((s1.buyVolume || 0) + (s1.sellVolume || 0));
+}
+
 let started = false;
 function every(ms, fn) {
   const tick = async () => {
@@ -1584,10 +1823,12 @@ async function boot() {
     if (started) return;
     started = true;
     connect(true);
-    every(PRICE_EVERY_MS, pollPrices);
+    streamConnect();
+    every(PRICE_EVERY_MS, () => pollPrices());
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
-    every(30000, () => (state.view === "alpha" ? loadAlpha() : null));
+    every(ALPHA_LIST_MS, () => (state.view === "alpha" && state.alpha.src !== "recent" ? loadAlpha() : null));
+    every(60000, () => (state.view === "alpha" && state.alpha.src === "recent" ? loadAlpha() : null));
     every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
   } catch (err) {
     state.status = err.message || String(err);
