@@ -37,6 +37,7 @@ const state = {
   amount: 0.1,
   sellPct: 50,
   tf: "1m",
+  tfPicked: false,
   showInd: true,
   chartSetOpen: false,
   infoOpen: false,
@@ -83,6 +84,14 @@ const state = {
   pointer: null,
   marks: []
 };
+
+try {
+  const savedTf = localStorage.getItem("trench-tf");
+  if (savedTf && (savedTf === "Auto" || TF_API[savedTf])) {
+    state.tf = savedTf;
+    state.tfPicked = true;
+  }
+} catch (_) {}
 
 const tapeVol = (n) => {
   if (n == null || !Number.isFinite(Number(n))) return "—";
@@ -205,11 +214,13 @@ function livePrice(t) {
 }
 function mcapText(t) {
   if (!t) return "—";
-  const listed = Number(t.mcap);
-  if (listed > 0) return usd(listed);
+  // Same number the chart pill uses. A listed mcap can sit on the first print
+  // while the live price has already moved.
   const px = livePrice(t);
   const supply = Number(t.circSupply);
-  if (px > 0 && supply > 0) return usd(supply * px);
+  if (px > 0 && supply > 0) return usd(px * supply);
+  const listed = Number(t.mcap);
+  if (listed > 0) return usd(listed);
   return "—";
 }
 const priceLabel = (n) => {
@@ -317,6 +328,7 @@ async function loadToken(query) {
     || (list || [])[0];
   if (!hit) throw new Error("No token found for " + q);
   state.active = hit;
+  applyDefaultTf(hit);
   state.prices[hit.id] = hit.usdPrice;
   state.candles = [];
   state.tape = [];
@@ -346,6 +358,15 @@ async function datapi(url) {
 }
 
 let candleBusy = false;
+// A seconds-old coin on the 1m default is one candle and hides the launch.
+// Auto (15s under 30 min) until the user picks a timeframe. An old coin stays on 1m.
+function applyDefaultTf(t) {
+  if (state.tfPicked) return;
+  const created = t && t.createdAt;
+  const age = created ? (Date.now() - new Date(created).getTime()) / 1000 : 1e9;
+  const young = Number.isFinite(age) && age >= 0 && age < 1800;
+  state.tf = young ? "Auto" : "1m";
+}
 function resolvedTf() {
   if (state.tf !== "Auto") return TF_API[state.tf] ? state.tf : "1m";
   const created = state.active?.createdAt;
@@ -2423,6 +2444,13 @@ function setChartData() {
     });
   }
   chartUi.lastTime = bars.length ? bars[bars.length - 1].time : 0;
+  // Candles can arrive after the header already has a newer price. Fold that
+  // price into the latest bar so the pill does not stay on the first print.
+  if (!setChartData.ticking) {
+    setChartData.ticking = true;
+    try { tickChart(); } catch (_) {}
+    setChartData.ticking = false;
+  }
   applyStyle();
   applyScale();
   fillIndicators(full);
@@ -4552,7 +4580,15 @@ function bind() {
     state.scrollToTab = true;
     render();
   });
-  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { if (state.tf === b.dataset.tf) return; state.tf = b.dataset.tf; state.candles = []; render(); loadCandles().catch(() => {}); });
+  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => {
+    if (state.tf === b.dataset.tf) return;
+    state.tf = b.dataset.tf;
+    state.tfPicked = true;
+    try { localStorage.setItem("trench-tf", state.tf); } catch (_) {}
+    state.candles = [];
+    render();
+    loadCandles().catch(() => {});
+  });
   document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => {
     state.side = b.dataset.side;
     state.quote = null;
