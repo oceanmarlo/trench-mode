@@ -1684,6 +1684,7 @@ function chartScale() {
   return state.chartMode === "mc" && t?.circSupply ? t.circSupply : 1;
 }
 function fmtAxis(v) {
+  if (state.scaleMode !== "pct" && v < 0) return "";
   const a = Math.abs(v);
   if (state.chartMode === "mc" && chartScale() !== 1) return usd(v).replace("$", "");
   if (a === 0) return "0";
@@ -1713,11 +1714,17 @@ function ensureChart() {
     handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
   });
   const priceFormat = { type: "custom", formatter: fmtAxis, minMove: 1e-12 };
+  const autoscaleInfoProvider = (original) => {
+    const res = original();
+    if (!res || !res.priceRange || state.scaleMode === "pct") return res;
+    if (res.priceRange.minValue < 0) res.priceRange.minValue = 0;
+    return res;
+  };
   const candles = chart.addSeries(L.CandlestickSeries, {
     upColor: "#2ebd85", downColor: "#f6465d", borderVisible: false, wickUpColor: "#2ebd85", wickDownColor: "#f6465d",
-    priceFormat, title: "", lastValueVisible: true
+    priceFormat, autoscaleInfoProvider, title: "", lastValueVisible: true
   });
-  const line = chart.addSeries(L.LineSeries, { color: "#c7f284", lineWidth: 2, priceFormat, visible: false, priceLineVisible: true, title: "" });
+  const line = chart.addSeries(L.LineSeries, { color: "#c7f284", lineWidth: 2, priceFormat, autoscaleInfoProvider, visible: false, priceLineVisible: true, title: "" });
   const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false, title: "" });
   volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
   const draw = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -1836,7 +1843,8 @@ function paintAxisEdge() {
     right.style.right = "auto";
     right.style.width = "auto";
     const textW = right.scrollWidth || 46;
-    const cover = Math.min(96, Math.max(textW + 36, 80));
+    // Wide enough to swallow the next tick too. A short cover bisects that label into junk like "0|".
+    const cover = Math.min(140, Math.max(textW + 64, 108));
     right.style.width = cover + "px";
     right.style.left = Math.max(0, paneW - cover) + "px";
   } else {
