@@ -98,6 +98,14 @@ const compactCount = (n) => {
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const cls = (n) => (n >= 0 ? "up" : "down");
 const signed = (n, d = 2) => (n >= 0 ? "+" : "") + Number(n).toFixed(d);
+function clockLabel(d = new Date()) {
+  const p = (n) => String(Math.abs(n)).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const hh = Math.floor(Math.abs(off) / 60);
+  const mm = Math.abs(off) % 60;
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + " (UTC" + sign + hh + (mm ? ":" + p(mm) : "") + ")";
+}
 const moveLabel = (pct) => {
   const n = Number(pct) || 0;
   const mult = Math.abs(1 + n / 100);
@@ -1003,11 +1011,8 @@ function paintLive() {
     live.className = "chart-live " + cls(pct);
   }
   const utc = $("#utc");
-  if (utc) {
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, "0");
-    utc.textContent = p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + ":" + p(d.getUTCSeconds()) + " (UTC)";
-  }
+  if (utc) utc.textContent = clockLabel();
+  parkLogo();
   if (barH) barH.textContent = "Holding " + usd(p.value);
   if (barP) {
     barP.textContent = pnlText(p.d, p.p);
@@ -1250,8 +1255,13 @@ function ensureChart() {
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => paintDrawings());
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
   bindDraw(draw);
+  parkLogo();
   requestAnimationFrame(watchDraw);
   return chart;
+}
+function parkLogo() {
+  const logo = document.getElementById("tv-attr-logo");
+  if (logo && chartUi.host && logo.parentNode !== chartUi.host) chartUi.host.appendChild(logo);
 }
 
 function paintLegend(bar, vol, param) {
@@ -1827,6 +1837,7 @@ function drawChart() {
   if (!slot) return;
   if (!ensureChart()) { slot.innerHTML = `<div class="k" style="padding:20px">Chart library failed to load.</div>`; return; }
   if (chartUi.host.parentNode !== slot) slot.appendChild(chartUi.host);
+  parkLogo();
   setChartData();
 }
 
@@ -2070,8 +2081,7 @@ function tokenHead(t, price, chg) {
       <button type="button" class="chart-full-btn" id="chart-full" aria-label="${state.chartFull ? "Exit full screen" : "Full screen"}">${state.chartFull ? "✕" : "⤢"}</button>
       ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
-    <div class="chart-foot">${scaleButtons()}<span id="utc">${new Date().toISOString().slice(11, 19)} (UTC)</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>
-    <div class="subnav"><button type="button" data-tab="holders">‹ Holders (${(t.holderCount || 0).toLocaleString()})</button></div>`;
+    <div class="chart-foot">${scaleButtons()}<span id="utc">${clockLabel()}</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>`;
 }
 
 function panel() {
