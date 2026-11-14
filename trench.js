@@ -941,12 +941,12 @@ function render() {
       <button type="button" data-nav="alpha" class="${state.view==="alpha"?"on":""}"><svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6L20 9.5l-4 4 1 5.8L12 16.6 7 19.3l1-5.8-4-4 5.4-.9z"/></svg>Alpha</button>
       <button type="button" data-nav="portfolio" class="${state.view==="portfolio"?"on":""}"><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
     </nav>
-    ${state.infoOpen ? sheet() : ""}
     ${state.searchOpen ? searchSheet() : ""}
     ${state.toast ? `<div class="toast"><span>${/^(Bought|Sold)/.test(state.toast) ? "✓ " : ""}${esc(state.toast)}</span><button id="toast-x">✕</button></div>` : ""}
   `;
   bind();
   if (state.view === "alpha") bindAlpha();
+  if (state.infoOpen) openSheet(); else if (document.getElementById("sheet-root")) closeSheet();
   drawChart();
   if (state.view === "spot" && state.tab === "holders") drawMap();
 }
@@ -1500,42 +1500,136 @@ function holdersPanel() {
     <div class="map-wrap"><canvas class="map" id="map"></canvas><div class="map-note" id="map-note">${state.mapReady ? "" : "Enhancing map…"}</div></div>`;
 }
 
-function sheet() {
+// ---- Token Info sheet: a persistent overlay outside #app, so re-renders never touch it ----
+function sheetVals() {
   const t = state.active || {};
   const audit = t.audit || {};
   const s = stat(state.infoWin);
-  const buy = (s.buyVolume || 0);
-  const sell = (s.sellVolume || 0);
-  const buyPct = buy + sell ? Math.round(100 * buy / (buy + sell)) : 0;
-  return `<div class="sheet" id="sheet">
-    <div class="grab"></div>
-    <h2>${esc(t.name || t.symbol)} Token Info</h2>
-    <div class="grid3">
-      <div><div class="k">Price</div><div class="v">${usd(t.usdPrice)}</div></div>
-      <div><div class="k">FDV</div><div class="v">${usd(t.fdv || t.mcap)}</div></div>
-      <div><div class="k">Liquidity</div><div class="v">${usd(t.liquidity)}</div></div>
-      <div><div class="k">Holders</div><div class="v">${t.holderCount ?? "—"}</div></div>
-      <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
+  const buy = s.buyVolume || 0, sell = s.sellVolume || 0;
+  return {
+    title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
+    price: usd(state.prices[t.id] || t.usdPrice), fdv: usd(t.fdv || t.mcap), liq: usd(t.liquidity),
+    holders: t.holderCount != null ? Number(t.holderCount).toLocaleString() : "—",
+    org: t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1),
+    vol: usd(buy + sell), net: usd(buy - sell), netCls: cls(buy - sell),
+    buyPct: (buy + sell ? Math.round(100 * buy / (buy + sell)) : 0) + "%",
+    traders: s.numTraders != null ? Number(s.numTraders).toLocaleString() : "—",
+    netBuyers: s.numNetBuyers != null ? Number(s.numNetBuyers).toLocaleString() : "—",
+    top10: audit.topHoldersPercentage != null ? audit.topHoldersPercentage.toFixed(2) + "%" : "—",
+    dev: audit.devBalancePercentage != null ? audit.devBalancePercentage.toFixed(2) + "%" : "—",
+    freeze: audit.freezeAuthorityDisabled ? "No" : "Yes", freezeCls: audit.freezeAuthorityDisabled ? "up" : "down",
+    mint: audit.mintAuthorityDisabled ? "No" : "Yes", mintCls: audit.mintAuthorityDisabled ? "up" : "down",
+    wins: Object.fromEntries(["5m", "1h", "6h", "24h"].map((w) => [w, stat(w).priceChange || 0]))
+  };
+}
+function sheetHtml() {
+  const f = (k, label, extra = "") => `<div><div class="k">${label}</div><div class="v ${extra}" data-sf="${k}"></div></div>`;
+  return `<div class="sheet-backdrop" data-sheet-close></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head" id="sheet-head"><div class="grab"></div><h2 id="sheet-title" data-sf="title"></h2>
+      <button type="button" class="sheet-x" data-sheet-close aria-label="Close">✕</button></div>
+    <div class="sheet-body" id="sheet-body">
+      <div class="grid3">${f("price", "Price")}${f("fdv", "FDV")}${f("liq", "Liquidity")}${f("holders", "Holders")}${f("org", "Org Score")}</div>
+      <div class="grid4">${["5m", "1h", "6h", "24h"].map((w) => `<button type="button" data-win="${w}">${w}<small data-sw="${w}"></small></button>`).join("")}</div>
+      <div class="grid3"><div><div class="k"><span data-sf="win"></span> Vol</div><div class="v" data-sf="vol"></div></div>${f("net", "Net Vol")}${f("buyPct", "Buy", "up")}${f("traders", "Traders")}${f("netBuyers", "Net Buyers")}</div>
+      <div class="tiles">
+        <div class="tile"><b class="down" data-sf="top10"></b>Top 10 H.</div>
+        <div class="tile"><b class="up" data-sf="dev"></b>Dev H.</div>
+        <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
+        <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
+      </div>
+      <button type="button" class="go buy sheet-close-btn" data-sheet-close>Close</button>
     </div>
-    <div class="grid4">
-      ${["5m","1h","6h","24h"].map((w)=>`<button data-win="${w}" class="${state.infoWin===w?"on":""}">${w}<small class="${cls(stat(w).priceChange||0)}">${signed(stat(w).priceChange||0)}%</small></button>`).join("")}
-    </div>
-    <div class="grid3">
-      <div><div class="k">${state.infoWin} Vol</div><div class="v">${usd(buy + sell)}</div></div>
-      <div><div class="k">Net Vol</div><div class="v ${cls(buy-sell)}">${usd(buy - sell)}</div></div>
-      <div><div class="k">Buy</div><div class="v up">${buyPct}%</div></div>
-      <div><div class="k">Traders</div><div class="v">${s.numTraders ?? "—"}</div></div>
-      <div><div class="k">Net Buyers</div><div class="v">${s.numNetBuyers ?? "—"}</div></div>
-    </div>
-    <div class="tiles">
-      <div class="tile"><b class="down">${audit.topHoldersPercentage != null ? audit.topHoldersPercentage.toFixed(2) + "%" : "—"}</b>Top 10 H.</div>
-      <div class="tile"><b class="up">${audit.devBalancePercentage != null ? audit.devBalancePercentage.toFixed(2) + "%" : "—"}</b>Dev H.</div>
-      <div class="tile"><b class="${audit.freezeAuthorityDisabled ? "up" : "down"}">${audit.freezeAuthorityDisabled ? "No" : "Yes"}</b>Freeze Auth</div>
-      <div class="tile"><b class="${audit.mintAuthorityDisabled ? "up" : "down"}">${audit.mintAuthorityDisabled ? "No" : "Yes"}</b>Mint Auth</div>
-    </div>
-    <button id="sheet-close" class="go buy">Close</button>
   </div>`;
 }
+// Update values in place (called on every stream paint).
+function paintSheet() {
+  const root = document.getElementById("sheet-root");
+  if (!root) return;
+  const v = sheetVals();
+  root.querySelectorAll("[data-sf]").forEach((el) => {
+    const k = el.dataset.sf;
+    const val = k === "win" ? state.infoWin : v[k];
+    if (val != null && el.textContent !== String(val)) el.textContent = val;
+  });
+  const net = root.querySelector('[data-sf="net"]');
+  if (net) net.className = "v " + v.netCls;
+  const fr = root.querySelector('[data-sf="freeze"]'); if (fr) fr.className = v.freezeCls;
+  const mi = root.querySelector('[data-sf="mint"]'); if (mi) mi.className = v.mintCls;
+  root.querySelectorAll("[data-sw]").forEach((el) => {
+    const pc = v.wins[el.dataset.sw];
+    const txt = signed(pc) + "%";
+    if (el.textContent !== txt) el.textContent = txt;
+    el.className = cls(pc);
+  });
+  root.querySelectorAll("[data-win]").forEach((b) => b.classList.toggle("on", b.dataset.win === state.infoWin));
+}
+let sheetPrevOverflow = null;
+function openSheet() {
+  if (document.getElementById("sheet-root")) {
+    const sc = $(".scroll"); // render() may have rebuilt the page behind the sheet: keep it locked
+    if (sc) sc.style.overflow = "hidden";
+    paintSheet();
+    return;
+  }
+  const root = document.createElement("div");
+  root.id = "sheet-root";
+  root.className = "sheet-root";
+  root.innerHTML = sheetHtml();
+  document.body.appendChild(root);
+  // Lock background scroll; restored in closeSheet().
+  const sc = $(".scroll");
+  sheetPrevOverflow = { body: document.body.style.overflow, scroll: sc ? sc.style.overflow : "" };
+  document.body.style.overflow = "hidden";
+  if (sc) sc.style.overflow = "hidden";
+  // One delegated handler on the stable root: survives any number of value updates.
+  root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-sheet-close]")) { e.preventDefault(); closeSheet(); return; }
+    const w = e.target.closest("[data-win]");
+    if (w) { state.infoWin = w.dataset.win; paintSheet(); }
+  });
+  bindSheetSwipe(root);
+  paintSheet();
+  requestAnimationFrame(() => root.classList.add("open"));
+}
+function closeSheet() {
+  state.infoOpen = false;
+  const root = document.getElementById("sheet-root");
+  if (root) root.remove();
+  if (sheetPrevOverflow) {
+    document.body.style.overflow = sheetPrevOverflow.body;
+    const sc = $(".scroll");
+    if (sc) sc.style.overflow = sheetPrevOverflow.scroll;
+    sheetPrevOverflow = null;
+  }
+}
+function bindSheetSwipe(root) {
+  const head = root.querySelector("#sheet-head");
+  const sheetEl = root.querySelector("#sheet");
+  let y0 = null, dy = 0, t0 = 0;
+  head.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("[data-sheet-close]")) return;
+    y0 = e.clientY; dy = 0; t0 = Date.now();
+    head.setPointerCapture(e.pointerId);
+    sheetEl.style.transition = "none";
+  });
+  head.addEventListener("pointermove", (e) => {
+    if (y0 == null) return;
+    dy = Math.max(0, e.clientY - y0);
+    sheetEl.style.transform = `translateY(${dy}px)`;
+  });
+  const end = () => {
+    if (y0 == null) return;
+    y0 = null;
+    sheetEl.style.transition = "";
+    const fast = dy > 30 && Date.now() - t0 < 250;
+    if (dy > 90 || fast) closeSheet();
+    else sheetEl.style.transform = "";
+  };
+  head.addEventListener("pointerup", end);
+  head.addEventListener("pointercancel", end);
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.infoOpen) closeSheet(); });
 
 function searchSheet() {
   return `<div class="sheet" id="search-sheet"><div class="grab"></div><h2>Search <button type="button" id="search-close" aria-label="Close" style="float:right;background:none;border:0;color:var(--muted);font-size:18px">✕</button></h2><input id="q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name, ticker or contract address" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="results">${searchRows()}</div></div>`;
@@ -1568,10 +1662,7 @@ function bind() {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
   const info = $("#info");
-  if (info) info.onclick = () => { state.infoOpen = true; render(); };
-  const close = $("#sheet-close");
-  if (close) close.onclick = () => { state.infoOpen = false; render(); };
-  document.querySelectorAll("[data-win]").forEach((b) => b.onclick = () => { state.infoWin = b.dataset.win; render(); });
+  if (info) info.onclick = (e) => { e.stopPropagation(); state.infoOpen = true; openSheet(); };
   document.querySelectorAll("[data-sell]").forEach((b) => b.onclick = async (e) => {
     e.stopPropagation();
     const mint = b.dataset.sell;
@@ -1898,6 +1989,7 @@ function streamFlush() {
       if (v) tickChart(v);
       paintLive();
       paintHeadStats();
+      paintSheet();
     }
     if (stream.dirty.tape) {
       stream.dirty.tape = false;
