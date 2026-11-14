@@ -29,6 +29,8 @@ const state = {
   infoOpen: false,
   infoWin: "24h",
   searchOpen: false,
+  searchQ: "",
+  searching: false,
   marketOpen: false,
   results: [],
   spotScan: { kind: "trending", rows: [], loading: false, err: "" },
@@ -53,6 +55,8 @@ const state = {
   tape: [],
   holders: [],
   txFilter: "All",
+  txSort: "age",
+  txDir: "desc",
   tool: "cross",
   pointer: null,
   marks: []
@@ -329,10 +333,16 @@ let searchSeq = 0;
 function searchRows() {
   return (state.results || []).slice(0, 12).map((t) => `<button class="row" data-pick="${t.id}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> ${lpPullBadge(t)} <span>${usd(t.mcap)}</span></button>`).join("");
 }
+function searchResultHtml() {
+  if (state.searching && !(state.results || []).length) return `<div class="k">Searching…</div>`;
+  if (!(state.results || []).length) return `<div class="k">No tokens found.</div>`;
+  return searchRows();
+}
 function paintResults() {
   const box = $("#results");
   if (!box) return;
-  box.innerHTML = searchRows();
+  if ((state.searchQ || "").trim().length < 2) return;
+  box.innerHTML = searchResultHtml();
   box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
 }
 function pick(mint) {
@@ -344,17 +354,29 @@ function pick(mint) {
 function search(q) {
   clearTimeout(searchTimer);
   const seq = ++searchSeq;
-  if (!q || q.length < 2) { state.results = []; paintResults(); return; }
+  state.searchQ = q || "";
+  if (state.searchQ.length < 2) {
+    state.results = [];
+    state.searching = false;
+    paintScan();
+    return;
+  }
+  state.results = [];
+  state.searching = true;
+  paintResults();
   searchTimer = setTimeout(async () => {
     try {
-      const list = await jup(SEARCH + "?query=" + encodeURIComponent(q));
+      const list = await jup(SEARCH + "?query=" + encodeURIComponent(state.searchQ));
       if (seq !== searchSeq) return;
-      state.results = list || [];
+      state.results = Array.isArray(list) ? list : [];
+      state.searching = false;
       rcWantFront((state.results || []).filter((t) => spotGate(t) === "checking").map((t) => t.id));
       paintResults();
     } catch (err) {
+      if (seq !== searchSeq) return;
+      state.searching = false;
       const box = $("#results");
-      if (box && seq === searchSeq) box.innerHTML = `<div class="k" style="padding:12px 0">${esc(err.message)}</div>`;
+      if (box) box.innerHTML = `<div class="k" style="padding:12px 0">${esc(err.message)}</div>`;
     }
   }, 450);
 }
@@ -398,10 +420,9 @@ function spotScanHtml() {
 }
 function paintScan() {
   const box = $("#results");
-  const q = $("#q");
   if (!box) return;
   // A typed query still has to refresh so RugCheck can replace the waiting badge.
-  if (q && q.value.trim()) { paintResults(); return; }
+  if ((state.searchQ || "").trim().length >= 2) { paintResults(); return; }
   box.innerHTML = spotScanHtml();
   box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   box.querySelectorAll("[data-scan]").forEach((b) => b.onclick = () => {
@@ -2048,7 +2069,7 @@ function tokenHead(t, price, chg) {
       ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
     <div class="chart-foot">${scaleButtons()}<span id="utc">${new Date().toISOString().slice(11, 19)} (UTC)</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>
-    <div class="subnav"><button type="button" data-tab="holders">‹ Holders (${(t.holderCount || 0).toLocaleString()})</button><button type="button">Top Traders</button><button type="button">Dev Tokens${t.audit?.devMints == null ? "" : ` (${Number(t.audit.devMints).toLocaleString()})`}</button></div>`;
+    <div class="subnav"><button type="button" data-tab="holders">‹ Holders (${(t.holderCount || 0).toLocaleString()})</button></div>`;
 }
 
 function panel() {
@@ -2787,7 +2808,7 @@ function tradePanel() {
   const balIcon = state.side === "buy" ? SOL_ICON : t.icon;
   const label = state.wallet ? (state.side === "buy" ? "Buy" : "Sell") : "Connect";
   return `<div class="trade-top">
-      <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> <span id="trade-bal">${bal}</span> <button class="pencil" type="button" aria-label="Edit">✎</button></span>
+      <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> <span id="trade-bal">${bal}</span></span>
       <span class="trade-right"><span class="market-wrap"><button class="market" type="button" id="market">Market <span>▾</span></button>${state.marketOpen ? `<div class="market-menu"><button type="button" class="on">Market</button></div>` : ""}</span>
       <div class="seg">
         <button class="buy ${state.side==="buy"?"on":""}" data-side="buy">Buy</button>
@@ -2806,13 +2827,19 @@ function tradePanel() {
 function tapeRows() {
   const t = state.active || {};
   const supply = t.circSupply || 0;
-  let rows = state.tape;
+  let rows = state.tape.slice();
   if (state.txFilter === "You") rows = rows.filter((x) => state.wallet && x.traderAddress === state.wallet);
   else if (state.txFilter === "Dev") rows = rows.filter((x) => t.dev && x.traderAddress === t.dev);
   else if (state.txFilter !== "All") {
     const key = state.txFilter.toLowerCase();
     rows = rows.filter((x) => (x.walletCategories || []).some((c) => String(c).toLowerCase().includes(key)));
   }
+  const dir = state.txDir === "asc" ? 1 : -1;
+  rows.sort((a, b) => {
+    const va = state.txSort === "mc" ? (a.usdPrice || 0) : (a.timestamp || 0);
+    const vb = state.txSort === "mc" ? (b.usdPrice || 0) : (b.timestamp || 0);
+    return (va - vb) * dir;
+  });
   if (!rows.length) return `<div class="k" style="padding:12px 0">No ${state.txFilter.toLowerCase()} trades in the latest tape.</div>`;
   return rows.slice(0, 40).map((x) => {
     const buy = x.type === "buy";
@@ -2823,8 +2850,9 @@ function tapeRows() {
 
 function txPanel() {
   const chips = ["All", "You", "Dev", "Followed", "Sniper", "Insider", "Bundler"];
+  const arrow = (k) => state.txSort === k ? (state.txDir === "asc" ? " ↑" : " ↓") : "";
   return `<div class="filters">${chips.map((f) => `<button data-txf="${f}" class="${state.txFilter === f ? "on" : ""}">${f}</button>`).join("")}</div>
-    <div class="tcols"><span>Age ↕</span><span>MC ↕</span><span>${esc(state.active?.symbol || "")}</span><span>Vol</span><span>Trader</span></div>
+    <div class="tcols"><button type="button" data-txsort="age">Age${arrow("age")}</button><button type="button" data-txsort="mc">MC${arrow("mc")}</button><span>${esc(state.active?.symbol || "")}</span><span>Vol</span><span>Trader</span></div>
     <div id="tape">${state.tape.length ? tapeRows() : `<div class="k">Loading trades…</div>`}</div>`;
 }
 
@@ -3171,7 +3199,9 @@ function bindSheetSwipe(root) {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.infoOpen) closeSheet(); });
 
 function searchSheet() {
-  return `<div class="sheet" id="search-sheet"><div class="grab"></div><h2>Search <button type="button" id="search-close" aria-label="Close" style="float:right;background:none;border:0;color:var(--muted);font-size:18px">✕</button></h2><input id="q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name, ticker or contract address" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="results">${spotScanHtml()}</div></div>`;
+  const q = state.searchQ || "";
+  const body = q.length >= 2 ? searchResultHtml() : spotScanHtml();
+  return `<div class="sheet" id="search-sheet"><div class="grab"></div><h2>Search <button type="button" id="search-close" aria-label="Close" style="float:right;background:none;border:0;color:var(--muted);font-size:18px">✕</button></h2><input id="q" value="${esc(q)}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name, ticker or contract address" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="results">${body}</div></div>`;
 }
 
 function bind() {
@@ -3286,13 +3316,13 @@ function bind() {
   if (q) {
     q.oninput = () => search(q.value.trim());
     q.onkeydown = (e) => {
-      if (e.key === "Escape") { state.searchOpen = false; render(); }
+      if (e.key === "Escape") { state.searchOpen = false; state.searchQ = ""; state.results = []; state.searching = false; render(); }
       if (e.key === "Enter" && q.value.trim()) pick((state.results[0] && state.results[0].id) || q.value.trim());
     };
     setTimeout(() => q.focus(), 0);
   }
   const sc = $("#search-close");
-  if (sc) sc.onclick = () => { state.searchOpen = false; render(); };
+  if (sc) sc.onclick = () => { state.searchOpen = false; state.searchQ = ""; state.results = []; state.searching = false; render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   bindChartResize();
   const cf = $("#chart-full");
@@ -3304,6 +3334,12 @@ function bind() {
     const box = $("#tape");
     if (box) box.innerHTML = tapeRows();
     document.querySelectorAll("[data-txf]").forEach((x) => x.classList.toggle("on", x.dataset.txf === state.txFilter));
+  });
+  document.querySelectorAll("[data-txsort]").forEach((b) => b.onclick = () => {
+    const k = b.dataset.txsort;
+    if (state.txSort === k) state.txDir = state.txDir === "asc" ? "desc" : "asc";
+    else { state.txSort = k; state.txDir = "desc"; }
+    render();
   });
   const tx = $("#toast-x");
   if (tx) tx.onclick = () => { state.toast = null; render(); };
