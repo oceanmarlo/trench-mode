@@ -2025,19 +2025,19 @@ const ALPHA_NUM = [
   ["mcapMin", "MCap min"], ["mcapMax", "MCap max"], ["liqMin", "Liquidity min"], ["volMin", "24h vol min"],
   ["ageMinH", "Age min (h)"], ["ageMaxH", "Age max (h)"], ["holdersMin", "Holders min"], ["top10Max", "Top-10 % max"],
   ["devMax", "Dev hold % max"], ["chgMin", "Chg % min"], ["chgMax", "Chg % max"], ["scoreMin", "Organic min"],
-  ["lpMin", "LP locked/burned % min"], ["rcMax", "RugCheck score max"]
+  ["rcMax", "RugCheck score max"]
 ];
-const ALPHA_RC_KEYS = ["lpMin", "rcMax", "noDanger"];
+const ALPHA_RC_KEYS = ["rcMax", "noDanger"];
 const ALPHA_BOOL = [["noFreeze", "Freeze off"], ["noMint", "Mint off"], ["verified", "Verified"], ["noDanger", "No RugCheck dangers"]];
 const ALPHA_SECS = [
   ["market", "Market", ["mcapMin", "mcapMax", "liqMin", "volMin", "chgMin", "chgMax"]],
   ["age", "Age & Holders", ["ageMinH", "ageMaxH", "holdersMin", "top10Max", "devMax"]],
   ["safety", "Safety (Audit)", ["noFreeze", "noMint", "verified", "scoreMin"]],
-  ["rug", "RugCheck", ["noDanger", "rcMax", "lpMin"]]
+  ["rug", "RugCheck", ["noDanger", "rcMax"]]
 ];
 const ALPHA_SORTS = [["mcap", "MCap"], ["liq", "Liq"], ["vol", "Vol 24h"], ["chg", "Chg"], ["age", "Age"], ["holders", "Holders"], ["top10", "Top10"], ["score", "Organic"], ["lp", "LP lock"], ["rc", "RugCheck"]];
 const ALPHA_BUILTIN = {
-  "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300", lpMin: "90", noDanger: true },
+  "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300", noDanger: true },
   "Fresh": { ageMaxH: "24", mcapMax: "2m", holdersMin: "100", noFreeze: true, noMint: true },
   "Movers": { chgMin: "20", volMin: "100k", liqMin: "50k" }
 };
@@ -2111,14 +2111,17 @@ function paintRcHead() {
   const line = document.getElementById("rc-line");
   if (line) line.innerHTML = rcLineInner(t);
 }
-function rcWant(mints) {
+function rcWantFront(mints) {
+  const want = [];
   for (const m of mints) {
-    if (rcGet(m) || rc.queued.has(m)) continue;
+    if (!m || rcGet(m) || rc.queued.has(m)) continue;
     rc.queued.add(m);
-    rc.queue.push(m);
+    want.push(m);
   }
+  if (want.length) rc.queue = [...want, ...rc.queue];
   rcPump();
 }
+function rcWant(mints) { rcWantFront(mints); }
 function rcPump() {
   while (rc.inflight < RC_MAX_INFLIGHT && rc.queue.length) {
     // Sliding window: never more than 3 request starts in any 1000 ms, plus the min gap.
@@ -2128,6 +2131,9 @@ function rcPump() {
     const wait = Math.max(rc.coolUntil - now, rc.last + RC_GAP_MS - now, winWait);
     if (wait > 0) { clearTimeout(rc.timer); rc.timer = setTimeout(rcPump, wait); return; }
     const mint = rc.queue.shift();
+    rc.busy = rc.busy || new Set();
+    if (rc.busy.has(mint) || rcGet(mint)) { if (rcGet(mint)) rc.queued.delete(mint); continue; }
+    rc.busy.add(mint);
     rc.last = now;
     rc.starts.push(now);
     rc.inflight++;
@@ -2135,15 +2141,16 @@ function rcPump() {
   }
 }
 async function rcFetch(mint) {
+  let retry = false;
   try {
     const res = await fetch(RC_URL + mint + "/report/summary", { cache: "no-store" });
     if (res.status === 429) {
+      retry = true;
       const ra = Number(res.headers.get("retry-after"));
       rc.coolUntil = Date.now() + (Number.isFinite(ra) && ra > 0 ? ra * 1000 : 10000);
-      rc.queue.unshift(mint); // retry later
+      if (!rc.queue.includes(mint)) rc.queue.unshift(mint);
       return;
     }
-    rc.queued.delete(mint);
     if (!res.ok) { rc.cache.set(mint, { at: Date.now(), missing: true }); return; }
     const d = await res.json();
     const risks = (d.risks || []).map((r) => ({ name: r.name, level: r.level }));
@@ -2156,9 +2163,10 @@ async function rcFetch(mint) {
       risks: risks.slice(0, 6)
     });
   } catch (_) {
-    rc.queued.delete(mint);
     rc.cache.set(mint, { at: Date.now() - RC_TTL + 60000, missing: true }); // retry after a minute
   } finally {
+    if (!retry) rc.queued.delete(mint);
+    rc.busy?.delete(mint);
     rcSave();
     rcRepaint();
   }
@@ -2213,14 +2221,38 @@ function alphaPass(x, f) {
     && (!f.noMint || x.mintOff)
     && (!f.verified || x.verified);
 }
-function alphaRcActive(f) { return parseAmt(f.lpMin) != null || parseAmt(f.rcMax) != null || !!f.noDanger; }
+function alphaRcActive(f) { return parseAmt(f.rcMax) != null || !!f.noDanger; }
 function alphaRcPass(x, f) {
-  const lo = parseAmt(f.lpMin), hi = parseAmt(f.rcMax);
-  if (lo != null && (x.lp == null || x.lp < lo)) return false;
+  const hi = parseAmt(f.rcMax);
   if (hi != null && (x.rc == null || x.rc > hi)) return false;
   if (f.noDanger && x.rcLevel !== "good" && x.rcLevel !== "warn") return false;
   return true;
 }
+const LP_LOCK_MIN = 99.9;
+// Launchpads whose program holds the curve liquidity, so it cannot be pulled. Ids seen on the AlphaScan payload, plus the names the task listed.
+const CURVE_PADS = new Set(["pump.fun", "met-dbc", "raydium-launchlab", "letsbonk.fun", "letsbonk", "moonshot", "believe"]);
+function alphaGraduated(t) { return !!(t && (t.graduatedAt || t.graduatedPool || t._migrated)); }
+function alphaAuthOff(t) {
+  const audit = t?.audit || {};
+  return audit.mintAuthorityDisabled === true && audit.freezeAuthorityDisabled === true;
+}
+function alphaOnCurvePad(t) {
+  if (!t || alphaGraduated(t)) return false;
+  if (!Number.isFinite(Number(t.bondingCurve))) return false;
+  const pad = String(t.launchpad || t.metaLaunchpad || "").toLowerCase();
+  return CURVE_PADS.has(pad);
+}
+// curve = (a) program-held bonding curve and authorities off. locked = (b) graduated, LP >= 99.9, authorities off.
+function alphaLiqState(t) {
+  if (alphaOnCurvePad(t)) return alphaAuthOff(t) ? "curve" : "auth";
+  if (!alphaGraduated(t)) return "nolp";
+  if (!alphaAuthOff(t)) return "auth";
+  const r = rcGet(t.id);
+  if (!r) return "checking";
+  if (r.missing || typeof r.lp !== "number" || r.lp < LP_LOCK_MIN) return "unlocked";
+  return "locked";
+}
+function alphaLiqOk(s) { return s === "curve" || s === "locked"; }
 
 function alphaList() {
   const a = state.alpha;
@@ -2228,7 +2260,18 @@ function alphaList() {
   const feed = a.sort === "feed";
   const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score", lp: "lp", rc: "rc" }[a.sort] || "vol";
   const dir = a.dir === "asc" ? 1 : -1;
-  const base = a.rows.map((t) => ({ t, x: alphaFields(t, iv) })).filter((r) => alphaPass(r.x, a.f));
+  // Hard gate, before user filters: curve with mint+freeze off, or graduated with LP locked >= 99.9 and mint+freeze off.
+  const gated = a.rows.map((t) => ({ t, lp: alphaLiqState(t) }));
+  const hidden = gated.filter((r) => !alphaLiqOk(r.lp)).length;
+  const checking = gated.filter((r) => r.lp === "checking").length;
+  const front = [];
+  for (const src of [a.src, ...ALPHA_COL_KEYS.filter((k) => k !== a.src)]) {
+    for (const t of (src === a.src ? a.rows : (a.cols[src] || []))) {
+      if (alphaLiqState(t) === "checking") front.push(t.id);
+    }
+  }
+  rcWantFront(front);
+  const base = gated.filter((r) => alphaLiqOk(r.lp)).map((r) => ({ t: r.t, x: alphaFields(r.t, iv) })).filter((r) => alphaPass(r.x, a.f));
   if (!feed) base.sort((p, q) => {
     const u = p.x[key], v = q.x[key];
     if (u == null && v == null) return 0;
@@ -2236,13 +2279,11 @@ function alphaList() {
     if (v == null) return -1;
     return (u - v) * dir;
   });
-  // Lazy RugCheck: only rows that survived the other filters. With an RugCheck filter on,
-  // check all of them; otherwise just the top 40 for badges.
+  // RugCheck for the LP gate is already queued above, newest column first. User RugCheck filters only see rows that passed it.
   const rcOn = alphaRcActive(a.f) || a.sort === "lp" || a.sort === "rc";
-  rcWant(base.slice(0, rcOn ? 100 : 40).map((r) => r.t.id));
-  if (!rcOn) return { list: base, pending: 0 };
+  if (!rcOn) return { list: base, pending: 0, hidden, checking };
   const pending = base.filter((r) => !rcGet(r.t.id)).length;
-  return { list: alphaRcActive(a.f) ? base.filter((r) => rcGet(r.t.id) && alphaRcPass(r.x, a.f)) : base, pending };
+  return { list: alphaRcActive(a.f) ? base.filter((r) => rcGet(r.t.id) && alphaRcPass(r.x, a.f)) : base, pending, hidden, checking };
 }
 
 let alphaSeq = 0;
@@ -2355,17 +2396,21 @@ function pctText(v) { return v == null ? "—" : (v >= 0 ? "+" : "") + (Math.abs
 
 function alphaRowsHtml() {
   const a = state.alpha;
-  const { list, pending } = alphaList();
-  const head = `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${pending ? ` · checking LP for ${pending}…` : ""}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
+  const { list, pending, hidden = 0, checking = 0 } = alphaList();
+  const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)</div>`;
+  const head = note + `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
   if (a.err && !a.rows.length) return head + `<div class="k" style="padding:16px 0">Couldn't load: ${esc(a.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
-  if (!list.length) return head + (a.rows.length && !pending ? `<div class="k" style="padding:16px 0">No tokens match these filters.</div>` : "");
+  if (!list.length) {
+    if (checking || !a.rows.length || hidden === a.rows.length) return head;
+    return head + `<div class="k" style="padding:16px 0">No tokens match these filters.</div>`;
+  }
   return head + list.map(({ t, x }) => {
     const badges = [
       `<i class="b ${x.mintOff ? "ok" : "bad"}" title="Mint authority ${x.mintOff ? "disabled" : "enabled"}">M</i>`,
       `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
-    return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}">
+    return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${alphaLiqState(t)}">
       <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
@@ -2495,11 +2540,8 @@ function alphaFilterSheet() {
       </div>
       <label class="af-field">Organic score min${afInput("scoreMin", "e.g. 50")}</label>`,
     rug: `${afSwitch("noDanger", "No dangers")}
-      <div class="af-row">
-        <label class="af-field">RugCheck score max${afInput("rcMax", "e.g. 20")}</label>
-        <label class="af-field">LP locked/burned % min${afInput("lpMin", "e.g. 90")}</label>
-      </div>
-      <div class="k af-note">These load slowly. RugCheck runs only for rows that already pass the other filters, at most 3/s, cached 30 min. Lower score is safer. <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a></div>`
+      <label class="af-field">RugCheck score max${afInput("rcMax", "e.g. 20")}</label>
+      <div class="k af-note">Score and danger flags load slowly (max 3/s, cached 30 min). Lower score is safer. The list only shows a coin when a launchpad bonding curve still holds the liquidity and mint plus freeze are off, or RugCheck confirms at least 99.9% of LP is locked or burned and mint plus freeze are off. <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a></div>`
   };
   const secs = ALPHA_SECS.map(([id, title]) => {
     const c = alphaSecCount(id);
