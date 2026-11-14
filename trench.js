@@ -1494,9 +1494,9 @@ function paintLive() {
     if (feeEl.innerHTML !== next) feeEl.innerHTML = next;
   }
   if (chg && t) {
-    const c = t.stats24h?.priceChange || 0;
+    const c = t.stats24h?.priceChange;
     chg.textContent = moveLabel(c);
-    chg.className = "chg " + cls(c);
+    chg.className = c == null || !Number.isFinite(Number(c)) ? "chg" : "chg " + cls(c);
   }
   if (live && t) {
     const supply = t.circSupply || 0;
@@ -1715,10 +1715,33 @@ function chartScale() {
   const t = state.active;
   return state.chartMode === "mc" && t?.circSupply ? t.circSupply : 1;
 }
+function mcSpan() {
+  let hi = -Infinity, lo = Infinity;
+  for (const c of state.candles || []) {
+    const h = Number(c.high), l = Number(c.low);
+    if (h > hi) hi = h;
+    if (l < lo) lo = l;
+  }
+  return hi > lo ? (hi - lo) * chartScale() : 0;
+}
+// usd() rounds a tight new-coin scale to one label ("2.69K" on every tick).
+function fmtMcTick(v) {
+  const a = Math.abs(Number(v));
+  const sign = v < 0 ? "-" : "";
+  if (!Number.isFinite(a)) return "";
+  if (a === 0) return "0";
+  let unit = 1, suf = "";
+  if (a >= 1e9) { unit = 1e9; suf = "B"; }
+  else if (a >= 1e6) { unit = 1e6; suf = "M"; }
+  else if (a >= 1e3) { unit = 1e3; suf = "K"; }
+  const step = (mcSpan() || a * 0.01) / 6 / unit;
+  const dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
+  return sign + (a / unit).toFixed(dec) + suf;
+}
 function fmtAxis(v) {
   if (state.scaleMode !== "pct" && v < 0) return "";
   const a = Math.abs(v);
-  if (state.chartMode === "mc" && chartScale() !== 1) return usd(v).replace("$", "");
+  if (state.chartMode === "mc" && chartScale() !== 1) return fmtMcTick(v);
   if (a === 0) return "0";
   if (a >= 1) return a >= 1000 ? usd(v).replace("$", "") : v.toFixed(4);
   const z = Math.floor(-Math.log10(a));
@@ -2790,7 +2813,6 @@ function rcLineInner(t) {
   return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
 }
 function tokenHead(t, price, chg) {
-  const s1 = t.stats1h || {};
   const mint = t.id || "";
   const short = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : "";
   const starred = isStarred(mint);
@@ -2808,12 +2830,12 @@ function tokenHead(t, price, chg) {
     <div class="rc-line" id="rc-line">${rcLineInner(t)}</div>
     <div class="mc-line">
       <span class="px" id="mc">${usd(t.mcap || (t.circSupply || 0) * price || 0)}</span>
-      <span class="chg ${cls(t.stats24h?.priceChange || 0)}" id="chg">${moveLabel(t.stats24h?.priceChange || 0)}</span>
+      <span class="chg ${t.stats24h?.priceChange == null ? "" : cls(t.stats24h.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
     </div>
     <div class="stats">
       <div><div class="k">Price</div><div class="v">${priceLabel(price)}</div></div>
-      <div><div class="k">Liquidity</div><div class="v">${usd(t.liquidity || 0)}</div></div>
-      <div><div class="k">1h Vol</div><div class="v">${usd((s1.buyVolume || 0) + (s1.sellVolume || 0))}</div></div>
+      <div><div class="k">Liquidity</div><div class="v">${t.liquidity == null ? "—" : usd(t.liquidity)}</div></div>
+      <div><div class="k">1h Vol</div><div class="v">${t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null) ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0)) : "—"}</div></div>
       <div><div class="k">Fees Paid</div><div class="v fee-sol" id="stat-fees">${feeHtml(t.fees)}</div></div>
       <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
@@ -4895,10 +4917,11 @@ function paintHeadStats() {
   const t = state.active;
   const st = document.querySelectorAll(".stats .v");
   if (!t || st.length < 3) return;
-  const s1 = t.stats1h || {};
   st[0].textContent = priceLabel(state.prices[t.id] || t.usdPrice || 0);
-  st[1].textContent = usd(t.liquidity || 0);
-  st[2].textContent = usd((s1.buyVolume || 0) + (s1.sellVolume || 0));
+  st[1].textContent = t.liquidity == null ? "—" : usd(t.liquidity);
+  st[2].textContent = t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null)
+    ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0))
+    : "—";
 }
 
 let started = false;
