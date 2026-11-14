@@ -364,3 +364,8 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
 .al-meta .al-rc { margin-top: 2px; }
 .al-meta .al-rc .b:first-child { margin-left: 0; }
 .al-meta .vf { font-style: normal; color: #2ebd85; font-size: 11px; margin-right: 3px; }
+.wp-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px; margin-bottom: 8px; border: 1px solid #232a34; border-radius: 12px; background: #161b22; color: #fff; font-size: 16px; text-align: left; }
+.wp-row img, .wp-dot { width: 32px; height: 32px; border-radius: 8px; flex: none; }
+.wp-dot { display: grid; place-items: center; background: #2a313c; font-weight: 700; }
+.wp-row small { margin-left: auto; color: #3ddc84; }
+.wp-link { display: block; text-align: center; text-decoration: none; padding: 14px 0; border-radius: 12px; }

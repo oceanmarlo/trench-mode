@@ -99,10 +99,6 @@ const moveLabel = (pct) => {
 const raw = (ui, decimals) => Math.round(Number(ui) * 10 ** decimals).toString();
 const ui = (amount, decimals) => Number(amount) / 10 ** decimals;
 
-function provider() {
-  const w = window;
-  return w.phantom?.solana || w.solflare || w.backpack || (w.solana?.isPhantom || w.solana?.signTransaction ? w.solana : null);
-}
 
 function entryKey(mint) { return "trench-entry:" + mint; }
 function entryOf(mint, price) {
@@ -442,40 +438,179 @@ function withTimeout(p, ms) {
   return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timed out")), ms))]);
 }
 
+// ---- Wallets: Wallet Standard (Jupiter Mobile, Solflare, Backpack, Phantom…) + legacy injected ----
+// Minimal @wallet-standard/app getWallets(): no bundler, same event protocol.
+const WS_CHAIN = "solana:mainnet";
+const stdWallets = [];
+const stdApi = {
+  register(...ws) {
+    for (const w of ws) if (w && !stdWallets.includes(w)) stdWallets.push(w);
+    walletsChanged();
+    return () => { for (const w of ws) { const i = stdWallets.indexOf(w); if (i >= 0) stdWallets.splice(i, 1); } walletsChanged(); };
+  },
+  get() { return stdWallets.slice(); },
+  on() { return () => {}; }
+};
+try {
+  window.addEventListener("wallet-standard:register-wallet", (e) => { try { e.detail(stdApi); } catch (_) {} });
+  const ready = new CustomEvent("wallet-standard:app-ready", { detail: stdApi });
+  window.dispatchEvent(ready);
+  // Legacy registration path: navigator.wallets was an array of callbacks.
+  const legacy = window.navigator.wallets;
+  if (Array.isArray(legacy)) {
+    for (const cb of legacy.splice(0)) { try { cb(stdApi); } catch (_) {} }
+    legacy.push = (...cbs) => { for (const cb of cbs) { try { cb(stdApi); } catch (_) {} } return 0; };
+  }
+} catch (_) {}
+function walletsChanged() { if (document.getElementById("wallet-root")) paintWalletPicker(); }
+
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function b58(bytes) {
+  const d = [0];
+  for (const byte of bytes) {
+    let c = byte;
+    for (let j = 0; j < d.length; j++) { c += d[j] << 8; d[j] = c % 58; c = (c / 58) | 0; }
+    while (c) { d.push(c % 58); c = (c / 58) | 0; }
+  }
+  let s = "";
+  for (const byte of bytes) { if (byte) break; s += "1"; }
+  for (let i = d.length - 1; i >= 0; i--) s += B58[d[i]];
+  return s;
+}
+
+// Every wallet becomes: { id, name, icon, connect(silent) -> address, signTransaction?(bytes) -> bytes,
+// signAndSend?(bytes) -> signature, onChange(cb), disconnect() }
+function stdAdapter(w) {
+  const f = w.features || {};
+  const acct = () => (w.accounts || []).find((a) => !a.chains || a.chains.includes(WS_CHAIN) || a.chains.some((c) => c.startsWith("solana:"))) || (w.accounts || [])[0];
+  const signTx = f["solana:signTransaction"];
+  const sas = f["solana:signAndSendTransaction"];
+  return {
+    id: "std:" + w.name, name: w.name, icon: w.icon, std: true,
+    async connect(silent) {
+      if (!acct()) {
+        const c = f["standard:connect"];
+        if (!c) throw new Error(w.name + " can't connect here.");
+        await c.connect(silent ? { silent: true } : undefined);
+      }
+      const a = acct();
+      return a ? a.address : null;
+    },
+    signTransaction: signTx ? async (bytes) => {
+      const out = await signTx.signTransaction({ account: acct(), transaction: bytes, chain: WS_CHAIN });
+      return out[0].signedTransaction;
+    } : null,
+    signAndSend: sas ? async (bytes) => {
+      const out = await sas.signAndSendTransaction({ account: acct(), transaction: bytes, chain: WS_CHAIN });
+      return b58(out[0].signature);
+    } : null,
+    onChange(cb) { const ev = f["standard:events"]; return ev ? ev.on("change", (p) => { if (p && "accounts" in p) cb(acct()?.address || null); }) : null; },
+    async disconnect() { try { await f["standard:disconnect"]?.disconnect(); } catch (_) {} }
+  };
+}
+function legacyAdapter(p, name) {
+  const key = (r) => (r?.publicKey || p.publicKey)?.toString() || null;
+  return {
+    id: "legacy:" + name, name, icon: p.icon || null, std: false,
+    async connect(silent) { return key(await p.connect(silent ? { onlyIfTrusted: true } : undefined)); },
+    signTransaction: p.signTransaction ? async (bytes) => {
+      const signed = await p.signTransaction(solanaWeb3.VersionedTransaction.deserialize(bytes));
+      return signed.serialize();
+    } : null,
+    signAndSend: p.signAndSendTransaction ? async (bytes) => {
+      const r = await p.signAndSendTransaction(solanaWeb3.VersionedTransaction.deserialize(bytes));
+      return r?.signature || r;
+    } : null,
+    onChange(cb) {
+      if (!p.on) return null;
+      p._trenchCb = cb; // one listener per provider, always pointing at the latest connection
+      if (!p._trenchBound) {
+        p._trenchBound = true;
+        p.on("accountChanged", (pk) => p._trenchCb?.(pk ? pk.toString() : null));
+        p.on("disconnect", () => p._trenchCb?.(null));
+      }
+      return () => { if (p._trenchCb === cb) p._trenchCb = null; };
+    },
+    async disconnect() { try { await p.disconnect?.(); } catch (_) {} }
+  };
+}
+function legacyName(p) {
+  return p.isPhantom ? "Phantom" : p.isSolflare ? "Solflare" : p.isBackpack ? "Backpack" : p.isJupiter ? "Jupiter" : p.isGlow ? "Glow" : "Browser wallet";
+}
+function walletList() {
+  const out = [];
+  const seen = new Set();
+  for (const w of stdWallets) {
+    const f = w.features || {};
+    const solana = (w.chains || []).some((c) => c.startsWith("solana:"));
+    if (!solana || !f["standard:connect"] || !(f["solana:signTransaction"] || f["solana:signAndSendTransaction"])) continue;
+    if (seen.has(w.name.toLowerCase())) continue;
+    seen.add(w.name.toLowerCase());
+    out.push(stdAdapter(w));
+  }
+  const W = window;
+  const legacy = [];
+  if (W.phantom?.solana) legacy.push(W.phantom.solana);
+  if (W.solflare) legacy.push(W.solflare);
+  if (W.backpack?.solana || W.backpack) legacy.push(W.backpack?.solana || W.backpack);
+  if (W.jupiter?.solana || W.jupiter) legacy.push(W.jupiter?.solana || W.jupiter);
+  if (W.solana && !legacy.includes(W.solana)) legacy.push(W.solana);
+  for (const p of legacy) {
+    if (!p || typeof p.connect !== "function" || !(p.signTransaction || p.signAndSendTransaction)) continue;
+    const n = legacyName(p);
+    // Phantom/Solflare/Backpack also register as Wallet Standard: prefer that one.
+    if (seen.has(n.toLowerCase())) continue;
+    seen.add(n.toLowerCase());
+    out.push(legacyAdapter(p, n));
+  }
+  return out;
+}
+async function waitForWallets(ms) {
+  const end = Date.now() + ms;
+  while (!walletList().length && Date.now() < end) await sleep(50);
+  return walletList();
+}
+
 function isMobile() { return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent); }
 function phantomLink() {
   return "https://phantom.app/ul/browse/" + encodeURIComponent(location.href) + "?ref=" + encodeURIComponent(location.origin);
 }
 
+const WALLET_PREF = "trench-wallet";
 async function connect(silent = false) {
-  const injected = provider();
-  if (!injected) {
-    if (silent) return;
-    if (isMobile()) { location.href = phantomLink(); return; }
-    state.toast = "No Solana wallet found. Install Phantom (phantom.app) or open this page in Phantom's browser.";
-    render();
+  const list = await waitForWallets(silent ? 800 : 300);
+  if (silent) {
+    // Reconnect quietly: last used wallet, or the only one injected (in-app browsers).
+    const pref = localStorage.getItem(WALLET_PREF);
+    const w = list.find((x) => x.id === pref) || (list.length === 1 ? list[0] : null);
+    if (w) return useWallet(w, true);
     return;
   }
+  if (list.length === 1) return useWallet(list[0], false);
+  openWalletPicker();
+}
+
+async function useWallet(w, silent) {
   try {
-    state.provider = injected;
-    const res = await injected.connect(silent ? { onlyIfTrusted: true } : undefined);
-    const key = res?.publicKey || injected.publicKey;
-    if (!key) return;
-    state.wallet = key.toString();
-    state.status = "Wallet " + state.wallet.slice(0, 4) + "…" + state.wallet.slice(-4);
-    if (!injected._trenchBound && injected.on) {
-      injected._trenchBound = true;
-      injected.on("accountChanged", (pk) => {
-        state.wallet = pk ? pk.toString() : null;
-        state.holdings = [];
-        state.sol = 0;
-        if (state.wallet) loadHoldings().catch(() => {});
-        streamSync();
-        render();
-        scheduleQuote(0);
-      });
-      injected.on("disconnect", () => { state.wallet = null; state.holdings = []; state.sol = 0; render(); });
-    }
+    const addr = await w.connect(silent);
+    if (!addr) return;
+    closeWalletPicker();
+    state.provider = w;
+    state.wallet = addr;
+    localStorage.setItem(WALLET_PREF, w.id);
+    state.status = w.name + " " + addr.slice(0, 4) + "…" + addr.slice(-4);
+    if (state.walletOff) state.walletOff();
+    state.walletOff = w.onChange((a) => {
+      if (state.provider?.id !== w.id || a === state.wallet) return;
+      state.wallet = a;
+      state.holdings = [];
+      state.sol = 0;
+      if (!a) state.provider = null;
+      if (a) loadHoldings().catch(() => {});
+      streamSync();
+      render();
+      scheduleQuote(0);
+    }) || null;
     render();
     streamSync();
     await loadHoldings().catch((err) => { state.status = "Balance load failed: " + err.message; });
@@ -484,6 +619,53 @@ async function connect(silent = false) {
     if (!silent) { state.toast = err.message || "Wallet connection rejected"; render(); }
   }
 }
+
+async function disconnectWallet() {
+  const w = state.provider;
+  if (state.walletOff) { try { state.walletOff(); } catch (_) {} state.walletOff = null; }
+  state.provider = null; state.wallet = null; state.holdings = []; state.sol = 0;
+  localStorage.removeItem(WALLET_PREF);
+  closeWalletPicker();
+  if (w) await w.disconnect();
+  streamSync(); render(); scheduleQuote(0);
+}
+
+function walletPickerHtml() {
+  const list = walletList();
+  const icon = (w) => w.icon && /^data:image\/|^https:\/\//.test(w.icon) ? `<img src="${esc(w.icon)}" alt="">` : `<span class="wp-dot">${esc(w.name[0] || "?")}</span>`;
+  const rows = list.map((w, i) => `<button type="button" class="wp-row" data-wp="${i}">${icon(w)}<span>${esc(w.name)}</span>${state.provider?.id === w.id ? `<small>connected</small>` : ""}</button>`).join("");
+  const none = `<div class="k" style="padding:6px 0 12px">No Solana wallet found in this browser.</div>
+    ${isMobile() ? `<a class="go buy wp-link" href="${esc(phantomLink())}">Open in Phantom</a>
+      <div class="k" style="padding:10px 0 0">Jupiter Mobile: open the app, tap the globe icon (top right) and enter this page's address.</div>`
+    : `<div class="k">Install Jupiter Wallet, Phantom, Solflare or Backpack, then reload.</div>`}`;
+  return `<div class="sheet-backdrop" data-wp-close></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="wp-title">
+    <div class="sheet-head"><div class="grab"></div><h2 id="wp-title">Connect wallet</h2>
+      <button type="button" class="sheet-x" data-wp-close aria-label="Close">✕</button></div>
+    <div class="sheet-body" id="wp-body">${list.length ? rows : none}
+      ${state.wallet ? `<button type="button" class="go sell sheet-close-btn" data-wp-disconnect>Disconnect</button>` : ""}</div>
+  </div>`;
+}
+function paintWalletPicker() {
+  const root = document.getElementById("wallet-root");
+  if (root) root.innerHTML = walletPickerHtml();
+}
+function openWalletPicker() {
+  if (document.getElementById("wallet-root")) return paintWalletPicker();
+  const root = document.createElement("div");
+  root.id = "wallet-root";
+  root.className = "sheet-root open";
+  root.innerHTML = walletPickerHtml();
+  document.body.appendChild(root);
+  root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-wp-close]")) return closeWalletPicker();
+    if (e.target.closest("[data-wp-disconnect]")) return disconnectWallet();
+    const r = e.target.closest("[data-wp]");
+    if (r) { const w = walletList()[Number(r.dataset.wp)]; if (w) useWallet(w, false); }
+  });
+}
+function closeWalletPicker() { document.getElementById("wallet-root")?.remove(); }
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeWalletPicker(); });
 
 function sellTokens() {
   const t = state.active;
@@ -548,6 +730,20 @@ function bytesToB64(bytes) {
   return btoa(s);
 }
 
+async function confirmSig(sig) {
+  for (let i = 0; i < 40; i++) {
+    await sleep(1500);
+    try {
+      const r = await fetch(RPC, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSignatureStatuses", params: [[sig], { searchTransactionHistory: false }] }) }).then((x) => x.json());
+      const st = r?.result?.value?.[0];
+      if (st?.err) return { status: "Failed", error: "Transaction failed on-chain", signature: sig };
+      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return { status: "Success", signature: sig };
+    } catch (_) {}
+  }
+  return { status: "Failed", error: "Not confirmed yet, check your wallet", signature: sig };
+}
+
 async function trade() {
   if (!state.wallet) return connect();
   if (state.busy) return;
@@ -560,24 +756,36 @@ async function trade() {
   state.status = "Getting order…";
   render();
   try {
-    if (!state.provider?.signTransaction) throw new Error("This wallet can't sign here. Open the page in Phantom.");
+    const w = state.provider;
+    if (!w?.signTransaction && !w?.signAndSend) throw new Error("This wallet can't sign transactions here.");
     // Orders are single-use and expire fast, so always take a fresh one for the click.
     clearTimeout(quoteTimer);
     const order = await refreshQuote();
     if (!order?.transaction) throw new Error(order?.errorMessage || order?.error || "Jupiter did not return a transaction.");
     state.status = "Confirm in your wallet…";
     paintLive();
-    const tx = solanaWeb3.VersionedTransaction.deserialize(b64ToBytes(order.transaction));
-    // signTransaction (not signAndSend): JupiterZ/gasless routes need Jupiter to add
-    // its signature at /execute, so the wallet must not broadcast it itself.
-    const signed = await state.provider.signTransaction(tx);
-    state.status = "Sending…";
-    paintLive();
-    const done = await jup(SWAP + "/execute", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ signedTransaction: bytesToB64(signed.serialize()), requestId: order.requestId })
-    });
+    const unsigned = b64ToBytes(order.transaction);
+    let done;
+    if (w.signTransaction) {
+      // signTransaction (not signAndSend): JupiterZ/gasless routes need Jupiter to add
+      // its signature at /execute, so the wallet must not broadcast it itself.
+      const signed = await w.signTransaction(unsigned);
+      state.status = "Sending…";
+      paintLive();
+      done = await jup(SWAP + "/execute", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
+      });
+    } else {
+      // Wallet only offers signAndSend: OK unless Jupiter must co-sign (gasless/RFQ).
+      const need = solanaWeb3.VersionedTransaction.deserialize(unsigned).message.header.numRequiredSignatures;
+      if (need > 1) throw new Error(w.name + " can only sign-and-send; this route needs Jupiter to co-sign. Try another wallet or a larger amount.");
+      const sig = await w.signAndSend(unsigned);
+      state.status = "Sent · confirming…";
+      paintLive();
+      done = await confirmSig(sig);
+    }
     if (done.status !== "Success") throw new Error((done.error || "Swap failed") + (done.code != null ? " (code " + done.code + ")" : ""));
     const price = state.prices[t.id] || t.usdPrice;
     if (side === "buy" && price) localStorage.setItem(entryKey(t.id), String(price));
@@ -1416,7 +1624,7 @@ function portfolioView() {
   const top = `<div class="token-head"><div class="tok-name"><div class="sym">Portfolio</div>
       <div class="sub">${w ? `<span>${w.slice(0, 4)}…${w.slice(-4)}</span><button type="button" class="copy" data-copy="${w}" aria-label="Copy">⧉</button>` : `<span>No wallet connected</span>`}</div></div>
       <div class="mc"><div class="px" id="pf-total">${w ? usd(total) : "—"}</div><div class="k">Net worth</div></div></div>`;
-  if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Phantom, Solflare or Backpack) to see your balances.")}</div>`;
+  if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Jupiter, Phantom, Solflare, Backpack…) to see your balances.")}</div>`;
   const solRow = `<div class="row" data-pf-sol><div class="who"><div class="tok-av"><img src="${SOL_ICON}" alt=""></div><div class="meta"><b>SOL</b><span>${usd(solPx)}</span></div></div>
       <div><div class="hold-n">${usd(state.sol * solPx)}</div><div class="hold-q">${solText(state.sol)}</div></div><div></div><div></div></div>`;
   return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
@@ -1691,7 +1899,7 @@ function bind() {
   document.querySelectorAll("[data-connect]").forEach((b) => b.onclick = () => connect());
   document.querySelectorAll("[data-reload-holdings]").forEach((b) => b.onclick = () => loadHoldings().catch(() => {}));
   const c = $("#connect");
-  if (c) c.onclick = () => connect();
+  if (c) c.onclick = () => (state.wallet ? openWalletPicker() : connect());
   const so = $("#search-open");
   if (so) so.onclick = () => { state.searchOpen = true; render(); };
   const q = $("#q");
