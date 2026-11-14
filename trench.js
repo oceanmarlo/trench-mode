@@ -358,14 +358,27 @@ async function datapi(url) {
 }
 
 let candleBusy = false;
-// A seconds-old coin on the 1m default is one candle and hides the launch.
-// Auto (15s under 30 min) until the user picks a timeframe. An old coin stays on 1m.
+// A seconds-old coin on 1m or a saved 1D is one candle and hides the launch.
+// Auto (15s under 30 min) until the user picks a timeframe on that mint.
+// An older coin keeps the saved timeframe.
 function applyDefaultTf(t) {
-  if (state.tfPicked) return;
-  const created = t && t.createdAt;
+  if (!t) return;
+  if (state.tfMint === t.id) return;
+  state.tfMint = t.id;
+  const created = t.createdAt;
   const age = created ? (Date.now() - new Date(created).getTime()) / 1000 : 1e9;
   const young = Number.isFinite(age) && age >= 0 && age < 1800;
-  state.tf = young ? "Auto" : "1m";
+  if (young) {
+    state.tf = "Auto";
+    return;
+  }
+  if (!state.tfPicked) {
+    state.tf = "1m";
+    return;
+  }
+  let saved = "";
+  try { saved = localStorage.getItem("trench-tf") || ""; } catch (_) {}
+  if (saved && (saved === "Auto" || TF_API[saved])) state.tf = saved;
 }
 function resolvedTf() {
   if (state.tf !== "Auto") return TF_API[state.tf] ? state.tf : "1m";
@@ -4581,6 +4594,7 @@ function bind() {
     render();
   });
   document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => {
+    if (state.active) state.tfMint = state.active.id;
     if (state.tf === b.dataset.tf) return;
     state.tf = b.dataset.tf;
     state.tfPicked = true;
