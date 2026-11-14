@@ -1870,8 +1870,6 @@ function render() {
     </div>
     <nav class="nav">
       <button type="button" data-nav="spot" class="${state.view==="spot"?"on":""}"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>Spot</button>
-      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 16l5-6 4 3 7-8"/></svg>Perps</button>
-      <button type="button" data-nav="soon"><svg viewBox="0 0 24 24"><path d="M4 10h16v8H4zM8 10V7a4 4 0 0 1 8 0v3"/></svg>Lend</button>
       <button type="button" data-nav="alpha" class="${state.view==="alpha"?"on":""}"><svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6L20 9.5l-4 4 1 5.8L12 16.6 7 19.3l1-5.8-4-4 5.4-.9z"/></svg>Alpha</button>
       <button type="button" data-nav="portfolio" class="${state.view==="portfolio"?"on":""}"><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
     </nav>
@@ -2928,7 +2926,6 @@ function bind() {
   });
   document.querySelectorAll("[data-nav]").forEach((b) => b.onclick = () => {
     const v = b.dataset.nav;
-    if (v === "soon") { state.toast = "Only Spot, Alpha and Portfolio are in this app. Use jup.ag for the rest."; render(); return; }
     state.view = v;
     render();
     streamSync();
