@@ -2559,14 +2559,25 @@ function pushSeries(series, points, full) {
 }
 function indLayout() { return state.inds.join(","); }
 function paneIds() { return PANE_INDS.filter((id) => state.inds.includes(id)); }
-function ensurePaneRoom() {
+// A saved 260px chart cannot hold RSI and MACD. The resize listener used to
+// snap back to that saved height and crush the candle pane, so the price pill
+// sat on the top edge and the RSI label sat on the volume bars.
+function paneNeedH() {
   const n = paneIds().length;
-  if (!n || state.chartFull) return;
-  const need = clampChartH(230 + n * 76);
-  if (state.chartH >= need) return;
-  state.chartH = need;
+  return n ? 230 + n * 76 : 0;
+}
+function chartHeight() {
+  const h = clampChartH(Math.max(state.chartH || 260, paneNeedH()));
+  state.chartH = h;
+  return h;
+}
+function ensurePaneRoom() {
+  if (state.chartFull) return;
+  const before = state.chartH;
+  const h = chartHeight();
   const wrap = $("#chart-wrap");
-  if (wrap) wrap.style.height = need + "px";
+  if (wrap) wrap.style.height = h + "px";
+  if (h !== before && chartUi.chart) applyPaneHeights();
 }
 function schedulePaneTags() {
   if (chartUi.tagFrame) cancelAnimationFrame(chartUi.tagFrame);
@@ -3032,6 +3043,8 @@ function bindChartResize() {
     if (!chartUi.dragging) return;
     chartUi.dragging = false;
     wrap.classList.remove("resizing");
+    state.chartH = chartHeight();
+    wrap.style.height = state.chartH + "px";
     localStorage.setItem(CHART_H_KEY, String(state.chartH));
     applyPaneHeights();
     if (chartUi.pendingRender) { chartUi.pendingRender = false; render(); }
@@ -3039,14 +3052,23 @@ function bindChartResize() {
   grip.onpointerup = end;
   grip.onpointercancel = end;
   grip.onlostpointercapture = end;
-  grip.ondblclick = () => { state.chartH = 260; localStorage.setItem(CHART_H_KEY, "260"); wrap.style.height = "260px"; };
+  grip.ondblclick = () => {
+    state.chartH = 260;
+    state.chartH = chartHeight();
+    localStorage.setItem(CHART_H_KEY, String(state.chartH));
+    wrap.style.height = state.chartH + "px";
+    applyPaneHeights();
+  };
 }
 // Re-clamp to the viewport on rotation, but keep the user's saved preference.
 window.addEventListener("resize", () => {
-  const pref = Number(localStorage.getItem(CHART_H_KEY)) || state.chartH;
-  state.chartH = clampChartH(pref);
+  if (chartUi.dragging) return;
+  const pref = Number(localStorage.getItem(CHART_H_KEY)) || state.chartH || 260;
+  state.chartH = pref;
+  state.chartH = chartHeight();
   const w = $("#chart-wrap");
-  if (w && !state.chartFull && !chartUi.dragging) w.style.height = state.chartH + "px";
+  if (w && !state.chartFull) w.style.height = state.chartH + "px";
+  if (chartUi.chart) applyPaneHeights();
   parkLogo();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
@@ -3282,7 +3304,7 @@ function tokenHead(t, price, chg) {
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
     <div class="tf"><div class="tf-scroll">${tfButtons()}</div><span class="tf-tools"><button type="button" id="chart-style" class="${state.chartStyle === "line" ? "on" : ""}" aria-label="${state.chartStyle === "line" ? "Show candles" : "Show line"}">${styleIcon()}</button><button type="button" id="fx" class="${state.inds.length ? "on" : ""}" aria-label="Indicators">fx</button><button type="button" class="chart-full-btn" id="chart-full" aria-label="Full screen">⤢</button></span></div>
-    <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
+    <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : chartHeight() + "px"}">
       ${chartToolsHtml()}
       <div id="chart-slot" class="chart-slot"></div>
       <div class="chart-label" id="chart-legend"><div class="lg-sym">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · ${resolvedTf()} · jup.ag</div><div class="lg-ohlc" id="ohlc"></div><div class="lg-inds" id="ind-leg"></div></div>
