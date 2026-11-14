@@ -2181,24 +2181,33 @@ function paintAxisEdge() {
   // Native ticks are painted on the time canvas. Only cover a label that actually starts off the left edge,
   // and never stop in the middle of the next one ("04:00:45" must not become ":45").
   const groups = timeLabelGroups(host);
-  const sliced = groups && groups.length && groups[0][0] <= 6;
+  const first = groups && groups.length ? groups[0] : null;
+  // A tick that starts on the canvas edge is already clipped ("15:03:00" reads
+  // "5:03"). A short group just inside the edge is the same remnant.
+  const firstW = first ? first[1] - first[0] : 0;
+  const sliced = first && (first[0] <= 1 || (first[0] <= 10 && textW && firstW < textW - 6));
   let show = false;
   let cover = 0;
-  if (sliced && label && textW && !(rightClipped && range.from === range.to)) {
-    let end = groups[0][1];
-    let i = 1;
-    // Width must paint past the text. max-width alone leaves the box at the
-    // text width, so the next glyph peeks out ("05:34:30 )").
-    cover = Math.max(textW, end + 6);
-    while (i < groups.length && cover >= groups[i][0] - 3) {
-      end = groups[i][1];
-      i++;
-      cover = Math.max(cover, end + 6);
-    }
-    const room = i < groups.length ? groups[i][0] - 4 : 120;
-    show = cover <= room + 1 && cover <= 120;
+  let text = "";
+  if (sliced && !(rightClipped && range.from === range.to)) {
+    const next = groups.length > 1 ? groups[1][0] - 4 : 120;
+    const hideW = Math.min(first[1] + 6, next, 120);
+    if (label && textW && textW <= next + 1 && textW <= 120) {
+      cover = Math.max(textW, hideW);
+      let i = 1;
+      while (i < groups.length && cover >= groups[i][0] - 3) {
+        cover = Math.max(cover, groups[i][1] + 6);
+        i++;
+      }
+      const room = i < groups.length ? groups[i][0] - 4 : 120;
+      if (cover <= room + 1 && cover <= 120) text = label;
+      else cover = hideW;
+    } else cover = hideW;
+    // An empty node is display:none, so a blank cover would leave the remnant.
+    text = text || "\u00a0";
+    show = cover > 4;
   }
-  bar.textContent = show ? label : "";
+  bar.textContent = show ? text : "";
   bar.style.width = show ? cover + "px" : "";
   bar.style.maxWidth = show ? cover + "px" : "";
   let right = host.querySelector(".axis-edge-r");
