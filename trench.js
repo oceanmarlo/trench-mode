@@ -98,13 +98,33 @@ const usd = (n) => {
   if (a >= 1000) return sign + "$" + (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
   if (a >= 1) return sign + "$" + a.toFixed(2);
   if (a >= 0.01) return sign + "$" + a.toFixed(4);
-  return sign + "$" + a.toPrecision(3);
+  if (!(a > 0)) return sign + "$0.00";
+  const raw = a.toPrecision(3);
+  if (!/[eE]/.test(raw)) return sign + "$" + raw;
+  // 7.37e-8 must not land in Net Vol. Subscript matches the price.
+  const em = raw.match(/^(\d(?:\.\d+)?)[eE]([+-]?\d+)$/);
+  const exp = em ? Number(em[2]) : NaN;
+  const zeros = -exp - 1;
+  if (em && zeros >= 2) {
+    const digits = em[1].replace(".", "").slice(0, 3);
+    return sign + "$0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + digits;
+  }
+  return sign + "$" + a.toFixed(8).replace(/0+$/, "");
 };
 const qty = (n) => {
   if (!n) return "0";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1000) return (n / 1000).toFixed(2) + "K";
-  return n >= 1 ? n.toFixed(2) : n.toPrecision(3);
+  if (n >= 1) return n.toFixed(2);
+  const t = n.toPrecision(3);
+  if (!/[eE]/.test(t)) return t;
+  const em = t.match(/^(\d(?:\.\d+)?)[eE]([+-]?\d+)$/);
+  const zeros = em ? -Number(em[2]) - 1 : -1;
+  if (em && zeros >= 2) {
+    const digits = em[1].replace(".", "").slice(0, 3);
+    return (n < 0 ? "-" : "") + "0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + digits;
+  }
+  return Math.abs(n).toFixed(8).replace(/0+$/, "");
 };
 const solText = (n) => {
   if (!n) return "0";
@@ -1821,6 +1841,7 @@ function ensureChart() {
     paintLegend(bar, vol?.value, param);
     paintPaneTags(param);
     paintCrosshairTime(param);
+    paintScaleClash();
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); paintCrosshairTime(chartUi.cross); });
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
@@ -2051,12 +2072,22 @@ function paintScaleClashNow() {
     const cr = s.canvas.getBoundingClientRect();
     const baseTop = cr.top - hostR.top;
     const left = cr.left - hostR.left;
-    const near = Math.round(4 * (s.W / s.canvas.clientWidth || 1));
+    // 4px left a tick that started just under the pill ("6.00K" sliced by 6.91K).
+    // One label height covers that tick, and the crosshair price label too.
+    const px = s.W / (s.canvas.clientWidth || 1);
+    const near = Math.round(14 * px);
+    let crossY = null;
+    const pt = chartUi.cross && chartUi.cross.point;
+    if (pt && Number.isFinite(pt.y)) {
+      const local = (hostR.top + pt.y - cr.top) * (s.H / (s.canvas.clientHeight || 1));
+      if (local > -near && local < s.H + near) crossY = local;
+    }
     const hide = new Set();
     for (let i = 0; i < s.bands.length; i++) {
       const [y0, y1] = s.bands[i];
       if (y0 <= 1 || y1 >= s.H - 2) hide.add(i);
       if (pill1 >= 0 && y1 >= pill0 - near && y0 <= pill1 + near) hide.add(i);
+      if (crossY != null && y1 >= crossY - near && y0 <= crossY + near) hide.add(i);
     }
     for (const i of hide) {
       const [y0, y1] = s.bands[i];
