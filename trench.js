@@ -1898,12 +1898,25 @@ function parkLogo() {
   logo.style.setProperty("z-index", "8", "important");
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
+function visibleSpansDays() {
+  try {
+    const range = chartUi.chart && chartUi.chart.timeScale().getVisibleRange();
+    if (!range) return false;
+    const a = new Date(Number(range.from) * 1000);
+    const b = new Date(Number(range.to) * 1000);
+    if (!Number.isFinite(a.getTime()) || !Number.isFinite(b.getTime())) return false;
+    return a.toDateString() !== b.toDateString();
+  } catch (_) { return false; }
+}
+function axisDay(d) {
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
   const tf = resolvedTf();
-  // A clock time next to month ticks (Jul 19:00) is the wrong unit.
-  if (tf === "4h" || tf === "1D") return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // A clock beside a day tick (01:00 then Nov 5) is the wrong unit.
+  if (tf === "4h" || tf === "1D" || (tf !== "1s" && tf !== "15s" && visibleSpansDays())) return axisDay(d);
   const sec = tf === "1s" || tf === "15s";
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
 }
@@ -1913,18 +1926,13 @@ function tickMarkText(time, type) {
   const d = new Date(Number(time) * 1000);
   if (!Number.isFinite(d.getTime())) return null;
   const tf = resolvedTf();
-  // A month tick is a UTC boundary. Locally that is often the previous evening
-  // (Nov 1 00:00 UTC is Oct 31 here), so a month-only label sits after a later
-  // day in the same month ("Oct 12" then "Oct"). Always print the day.
-  if (tf === "4h" || tf === "1D") {
-    if (type === 0) return String(d.getFullYear());
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  }
   if (type === 0) return String(d.getFullYear());
-  if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
-  if (type === 2) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // A month tick is a UTC boundary. Locally that is often the previous evening,
+  // so a month-only label sits after a later day ("Oct 12" then "Oct"). Always print the day.
+  if (tf === "4h" || tf === "1D" || type === 1 || type === 2) return axisDay(d);
   const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
   if (type === 4 || tf === "1s" || tf === "15s") return clock + ":" + pad2(d.getSeconds());
+  if (visibleSpansDays()) return axisDay(d);
   return clock;
 }
 function timePaneWidth(host) {
@@ -3475,11 +3483,27 @@ function ageText(h) {
 function pctText(v) {
   if (v == null || !Number.isFinite(Number(v))) return "—";
   const n = Number(v);
+  if (n === 0) return "0%";
   const abs = Math.abs(n);
-  let text = abs >= 100 ? n.toFixed(0) : n.toFixed(1);
-  // -99.96 must not print as -100.0.
-  if (abs < 100 && Math.abs(Number(text)) >= 100) text = n.toFixed(2);
-  return (n >= 0 ? "+" : "") + text + "%";
+  let digits = abs >= 100 ? 0 : 1;
+  let text = n.toFixed(digits);
+  // -99.96 must not print as -100.
+  if (abs < 100 && Math.abs(Number(text)) >= 100) {
+    digits = 2;
+    text = n.toFixed(digits);
+  }
+  // A real move must not print as +0.0% or -0.0%.
+  while (digits < 3 && Number(text) === 0) {
+    digits += 1;
+    text = n.toFixed(digits);
+  }
+  if (Number(text) === 0) {
+    const m = abs.toFixed(12).match(/^0\.(0*)([1-9])/);
+    if (!m) return "—";
+    return (n < 0 ? "-" : "+") + "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2] + "%";
+  }
+  if (n > 0) text = "+" + text;
+  return text + "%";
 }
 
 function alphaRowsHtml() {
