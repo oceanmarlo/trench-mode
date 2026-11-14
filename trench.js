@@ -1887,19 +1887,27 @@ function fmtMcTick(v) {
   if (!(Number(text) > 0)) return "";
   return sign + text + suf;
 }
-// 0.0₆4623 under 0.0₅1246 looks larger. One subscript for the whole price scale.
+// 0.0₆4623 under 0.0₅1246 looks larger. One subscript for the whole price scale,
+// and no decimal: 0.0₅12.00 beside a $0.0₅232 header is the same bug.
 function sharedPriceLabel(a) {
   if (state.chartMode === "mc") return null;
   const { hi, lo } = visibleCandleBounds();
-  if (!(hi > 0) || !(lo < Infinity) || hi >= 0.01 || a < lo * 0.2 || a > hi * 3) return null;
-  const zeros = Math.max(0, Math.floor(-Math.log10(hi)));
+  if (!(hi > 0) || !(lo < Infinity) || hi >= 0.01 || !(a > 0)) return null;
+  if (a < lo * 0.2 || a > hi * 8) return null;
+  const span = Math.max(hi - (lo > 0 ? lo : 0), hi * 0.01);
+  // Autoscale adds room above the high. Size the subscript from that top
+  // so a tick never prints a mantissa of 12.00.
+  const top = hi + span * 0.45;
+  let zeros = Math.floor(-Math.log10(top));
+  if (zeros > 9) return null;
+  if (top >= 10 ** -zeros) zeros -= 1;
   if (zeros < 2 || zeros > 9) return null;
-  const scale = 10 ** (zeros + 1);
-  const step = Math.max((hi - lo) / 6 * scale, 0.001);
-  let dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
-  let text = (a * scale).toFixed(dec);
-  while (dec < 6 && Number(text) === 0) { dec++; text = (a * scale).toFixed(dec); }
-  return "0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + text;
+  const step = span / 6;
+  let digits = 3;
+  while (digits < 5 && step < 2 * 10 ** -(zeros + digits)) digits++;
+  const n = Math.round(a * 10 ** (zeros + digits));
+  if (!(n > 0) || String(n).length > digits) return "";
+  return "0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + String(n).padStart(digits, "0");
 }
 // A $72 scale printed 75.0000 and a pill of 71.9629 beside the header's $71.98.
 function fmtDollarTick(v) {
@@ -1928,7 +1936,7 @@ function fmtAxis(v) {
   if (a >= 1 && state.scaleMode !== "pct") return fmtDollarTick(v);
   if (a >= 1) return v.toFixed(2);
   const shared = a < 0.01 ? sharedPriceLabel(a) : null;
-  if (shared) return shared;
+  if (shared != null) return shared;
   const z = Math.floor(-Math.log10(a));
   if (z >= 4) return "0.0" + String.fromCharCode(8320 + Math.min(9, z)) + Math.round(a * 10 ** (z + 4)).toString().slice(0, 4);
   return v.toPrecision(4);
