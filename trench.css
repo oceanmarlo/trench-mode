@@ -316,7 +316,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
   font-size: 10px; line-height: 14px; white-space: nowrap;
 }
 .axis-edge:empty { display: none; }
-.axis-edge-r { left: auto; right: auto; min-width: 0; width: max-content; justify-content: flex-end; padding-left: 6px; }
+.axis-edge-r { left: auto; right: auto; bottom: 0; min-width: 0; max-width: none; width: max-content; height: 26px; justify-content: flex-end; align-items: center; padding-left: 16px; }
 .ultra { color: var(--green); font-size: 13px; margin-top: 8px; }
 .tcols, .trow { display: grid; grid-template-columns: 34px 78px minmax(0, 1fr) 72px 40px; gap: 4px; align-items: center; }
 .tcols { color: var(--faint); font-size: 12px; padding: 4px 0; }

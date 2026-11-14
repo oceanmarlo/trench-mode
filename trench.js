@@ -1831,11 +1831,12 @@ function paintAxisEdge() {
     host.appendChild(right);
   }
   right.textContent = range && rightClipped ? axisClock(range.to) : "";
-  // Sit on the time pane's right edge, not the price scale. A wide box was covering a clipped tick and spilling into the scale.
+  // Cover the clipped native tick. Measure the label itself — scrollWidth of an already-widened box grows every tick.
   if (right.textContent && paneW) {
     right.style.right = "auto";
-    right.style.minWidth = "0";
-    const cover = Math.max(right.scrollWidth, 46);
+    right.style.width = "auto";
+    const textW = right.scrollWidth || 46;
+    const cover = Math.min(96, Math.max(textW + 36, 80));
     right.style.width = cover + "px";
     right.style.left = Math.max(0, paneW - cover) + "px";
   } else {
@@ -3122,7 +3123,7 @@ function alphaRowsHtml() {
       <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
-      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : compactCount(x.holders)} h</span></span>
+      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : "Hld " + compactCount(x.holders)}</span></span>
       <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : x.top10.toFixed(0) + "%"}</span></span>
     </button>`;
   }).join("");
