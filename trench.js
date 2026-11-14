@@ -921,6 +921,8 @@ function orderParams() {
   if (state.side === "buy") {
     const n = Number(state.amount);
     if (!n || n <= 0) return null;
+    // Buying SOL with SOL is not an order. Don't send it and surface the raw API error.
+    if (t.id === SOL) return null;
     return { inputMint: SOL, outputMint: t.id, amount: raw(n, 9) };
   }
   const held = state.holdings.find((h) => h.mint === t.id);
@@ -928,7 +930,7 @@ function orderParams() {
   const pct = Math.min(100, Math.max(0, Number(state.sellPct) || 0));
   // Use integer base units so 100% sells exactly the balance.
   const amount = pct >= 100 ? String(held.amount) : String(Math.floor(held.amount * pct / 100));
-  if (amount === "0") return null;
+  if (amount === "0" || t.id === SOL) return null;
   return { inputMint: t.id, outputMint: SOL, amount };
 }
 
@@ -1314,7 +1316,12 @@ function scheduleQuote(ms = 400) {
 async function refreshQuote() {
   const params = orderParams();
   const seq = ++quoteSeq;
-  if (!params) { state.quote = null; paintLive(); return null; }
+  if (!params) {
+    state.quote = null;
+    if (state.active?.id === SOL) state.status = "SOL is the pay token";
+    paintLive();
+    return null;
+  }
   state.quoting = true;
   paintLive();
   try {
