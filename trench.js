@@ -126,6 +126,10 @@ const qty = (n) => {
   }
   return Math.abs(n).toFixed(8).replace(/0+$/, "");
 };
+function tradeBal() {
+  if (!state.wallet) return "—";
+  return state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
+}
 const solText = (n) => {
   if (!n) return "0";
   return Number(n).toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
@@ -1884,11 +1888,11 @@ function tickMarkText(time, type) {
   const d = new Date(Number(time) * 1000);
   if (!Number.isFinite(d.getTime())) return null;
   const tf = resolvedTf();
-  // A one-candle 4h or daily chart asks for a clock tick (UTC midnight is 19:00 here).
-  // That unit is wrong next to a date scale. Always print a date.
+  // A month tick is a UTC boundary. Locally that is often the previous evening
+  // (Nov 1 00:00 UTC is Oct 31 here), so a month-only label sits after a later
+  // day in the same month ("Oct 12" then "Oct"). Always print the day.
   if (tf === "4h" || tf === "1D") {
     if (type === 0) return String(d.getFullYear());
-    if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
   if (type === 0) return String(d.getFullYear());
@@ -3787,7 +3791,7 @@ function quoteSummary() {
 function tradePanel() {
   const t = state.active;
   if (!t) return "";
-  const bal = state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
+  const bal = tradeBal();
   const balIcon = iconUrl(state.side === "buy" ? SOL_ICON : t.icon);
   const label = goLabel();
   const engine = state.orderType === "market" ? "Jupiter Swap" : "Jupiter Trigger";
@@ -4932,7 +4936,7 @@ function onStreamPnl(data) {
   } else {
     const balEl = $("#trade-bal");
     if (balEl) {
-      const bal = state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
+      const bal = tradeBal();
       if (balEl.textContent !== bal) balEl.textContent = bal;
     }
     stream.dirty.live = true;
