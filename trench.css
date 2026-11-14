@@ -352,6 +352,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .grid4 button small { display: block; font-weight: 700; }
 .grid4 button small.up { color: var(--green); }
 .grid4 button small.down { color: var(--red); }
+.grid4 button small.flat { color: var(--muted); }
 .grid4 button.on { background: #182028; }
 .sheet-stats { display: grid; grid-template-columns: 1fr 1fr minmax(104px, 34%); gap: 10px 8px; align-items: center; }
 .mix-pill { position: relative; height: 26px; border-radius: 999px; background: #161b22; overflow: hidden; display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; font-size: 12px; font-weight: 750; white-space: nowrap; }

@@ -1758,7 +1758,7 @@ function ensureChart() {
     autoSize: true,
     layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
     grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.06)" } },
-    rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.22 } },
+    rightPriceScale: { borderVisible: false, entireTextOnly: true, scaleMargins: { top: 0.12, bottom: 0.22 } },
     timeScale: {
       borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4,
       tickMarkFormatter: (time, type) => tickMarkText(time, type)
@@ -1772,7 +1772,19 @@ function ensureChart() {
   const autoscaleInfoProvider = (original) => {
     const res = original();
     if (!res || !res.priceRange || state.scaleMode === "pct") return res;
-    if (res.priceRange.minValue < 0) res.priceRange.minValue = 0;
+    let { minValue, maxValue } = res.priceRange;
+    if (minValue < 0) minValue = 0;
+    const mid = (maxValue + minValue) / 2;
+    const span = maxValue - minValue;
+    // A one-tick coin otherwise pins every label to the same string (2.1827K)
+    // and the top tick is drawn on top of the next one.
+    const floor = Math.max(Math.abs(mid) * 0.008, 1e-9);
+    if (!(span > floor)) {
+      minValue = Math.max(0, mid - floor / 2);
+      maxValue = mid + floor / 2;
+    }
+    res.priceRange.minValue = minValue;
+    res.priceRange.maxValue = maxValue;
     return res;
   };
   const candles = chart.addSeries(L.CandlestickSeries, {
@@ -3712,7 +3724,11 @@ function solAmt(n) {
   if (a >= 100) return a.toFixed(1);
   if (a >= 1) return a.toFixed(2);
   if (a >= 0.01) return a.toFixed(3);
-  return a.toFixed(6).replace(/0+$/, "");
+  if (a >= 0.001) return a.toFixed(4).replace(/0+$/, "");
+  // The header cell clips "0.000157" to "0.0000". Use the price subscript so a real fee is not a fake zero.
+  const m = a.toFixed(12).match(/^0\.(0*)([1-9]\d{0,2})/);
+  if (m && m[1].length >= 2) return "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
+  return a.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 function deltaText(n) {
   if (n == null || !Number.isFinite(Number(n))) return "-";
@@ -3848,12 +3864,13 @@ function sheetVals() {
   const buys = s.numBuys, sells = s.numSells;
   const tradeN = (Number(buys) || 0) + (Number(sells) || 0);
   const buyPct = volSum ? Math.round(100 * buy / volSum) : null;
-  const sellPct = buys == null && sells == null ? null : (tradeN ? Math.round(100 * sells / tradeN) : 0);
+  // A missing sell count must not become NaN% (100 * undefined). Unknown stays an em dash.
+  const sellPct = sells == null || !Number.isFinite(Number(sells)) ? null : (tradeN ? Math.round(100 * Number(sells) / tradeN) : 0);
   const curveOn = onCurve(t);
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
-    price: usd(state.prices[t.id] || t.usdPrice), fdv: usd(t.fdv || t.mcap), liq: usd(t.liquidity),
+    price: priceLabel(state.prices[t.id] || t.usdPrice), fdv: usd(t.fdv || t.mcap), liq: usd(t.liquidity),
     holders: t.holderCount != null ? Number(t.holderCount).toLocaleString() : "—",
     fees: solAmt(t.fees),
     curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
@@ -3871,9 +3888,14 @@ function sheetVals() {
     dev: audit.devBalancePercentage != null ? audit.devBalancePercentage.toFixed(2) + "%" : "—",
     snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
-    freeze: audit.freezeAuthorityDisabled ? "No" : "Yes", freezeCls: audit.freezeAuthorityDisabled ? "up" : "down",
-    mint: audit.mintAuthorityDisabled ? "No" : "Yes", mintCls: audit.mintAuthorityDisabled ? "up" : "down",
-    wins: Object.fromEntries(["5m", "1h", "6h", "24h"].map((w) => [w, stat(w).priceChange || 0]))
+    freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
+    freezeCls: audit.freezeAuthorityDisabled == null ? "flat" : (audit.freezeAuthorityDisabled ? "up" : "down"),
+    mint: audit.mintAuthorityDisabled == null ? "—" : (audit.mintAuthorityDisabled ? "No" : "Yes"),
+    mintCls: audit.mintAuthorityDisabled == null ? "flat" : (audit.mintAuthorityDisabled ? "up" : "down"),
+    wins: Object.fromEntries(["5m", "1h", "6h", "24h"].map((w) => {
+      const n = stat(w).priceChange;
+      return [w, n == null || !Number.isFinite(Number(n)) ? null : Number(n)];
+    }))
   };
 }
 function sheetHtml() {
@@ -3947,9 +3969,9 @@ function paintSheet() {
   });
   root.querySelectorAll("[data-sw]").forEach((el) => {
     const pc = v.wins[el.dataset.sw];
-    const txt = signed(pc) + "%";
+    const txt = pc == null ? "—" : signed(pc) + "%";
     if (el.textContent !== txt) el.textContent = txt;
-    el.className = cls(pc);
+    el.className = pc == null ? "flat" : cls(pc);
   });
   root.querySelectorAll("[data-win]").forEach((b) => b.classList.toggle("on", b.dataset.win === state.infoWin));
   drawNetTrend();
