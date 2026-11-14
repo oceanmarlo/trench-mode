@@ -1728,8 +1728,16 @@ function mcSpan() {
 function fmtMcTick(v) {
   const a = Math.abs(Number(v));
   const sign = v < 0 ? "-" : "";
-  if (!Number.isFinite(a)) return "";
-  if (a === 0) return "0";
+  if (!Number.isFinite(a) || v < 0) return "";
+  // Bottom margin leaves room for volume, and that gutter crosses 0.
+  // A 0 there is not a market-cap tick when every candle is far above it.
+  let lo = Infinity;
+  const k = chartScale();
+  for (const c of state.candles || []) {
+    const l = Number(c.low);
+    if (l > 0 && l * k < lo) lo = l * k;
+  }
+  if (!(a > 0) || (lo < Infinity && a < lo * 0.5)) return "";
   let unit = 1, suf = "";
   if (a >= 1e9) { unit = 1e9; suf = "B"; }
   else if (a >= 1e6) { unit = 1e6; suf = "M"; }
@@ -1742,7 +1750,7 @@ function fmtAxis(v) {
   if (state.scaleMode !== "pct" && v < 0) return "";
   const a = Math.abs(v);
   if (state.chartMode === "mc" && chartScale() !== 1) return fmtMcTick(v);
-  if (a === 0) return "0";
+  if (a === 0) return "";
   if (a >= 1) return a >= 1000 ? usd(v).replace("$", "") : v.toFixed(4);
   const z = Math.floor(-Math.log10(a));
   if (z >= 4) return "0.0" + String.fromCharCode(8320 + Math.min(9, z)) + Math.round(a * 10 ** (z + 4)).toString().slice(0, 4);
@@ -1792,8 +1800,8 @@ function ensureChart() {
     priceFormat, autoscaleInfoProvider, title: "", lastValueVisible: true
   });
   const line = chart.addSeries(L.LineSeries, { color: "#c7f284", lineWidth: 2, priceFormat, autoscaleInfoProvider, visible: false, priceLineVisible: true, title: "" });
-  const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false, title: "" });
-  volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "custom", formatter: () => "", minMove: 1 }, lastValueVisible: false, priceLineVisible: false, title: "" });
+  volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 }, borderVisible: false, ticksVisible: false });
   const draw = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   draw.setAttribute("class", "draw-layer off");
   host.appendChild(draw);
