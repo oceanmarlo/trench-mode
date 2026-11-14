@@ -308,7 +308,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .quote-detail { color: var(--muted); font-size: 11px; line-height: 1.35; padding: 2px 0 0; }
 .quote-detail[hidden] { display: none; }
 #est-more { background: none; border: 0; color: var(--muted); font: inherit; padding: 0 0 0 2px; line-height: 1; }
-.lwc-host #tv-attr-logo { left: 1px !important; right: auto !important; top: 1px !important; bottom: auto !important; z-index: 8; }
+.lwc-host #tv-attr-logo { z-index: 8; pointer-events: auto; }
 .axis-edge {
   position: absolute; left: 0; bottom: 1px; z-index: 5; pointer-events: none;
   width: max-content; max-width: 64px; height: 14px; padding: 0 4px 0 2px;
@@ -316,7 +316,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
   font-size: 10px; line-height: 14px; white-space: nowrap;
 }
 .axis-edge:empty { display: none; }
-.axis-edge-r { left: auto; right: 2px; min-width: 78px; justify-content: flex-end; padding-left: 8px; }
+.axis-edge-r { left: auto; right: auto; min-width: 0; width: max-content; justify-content: flex-end; padding-left: 6px; }
 .ultra { color: var(--green); font-size: 13px; margin-top: 8px; }
 .tcols, .trow { display: grid; grid-template-columns: 34px 78px minmax(0, 1fr) 72px 40px; gap: 4px; align-items: center; }
 .tcols { color: var(--faint); font-size: 12px; padding: 4px 0; }

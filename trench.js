@@ -1742,9 +1742,23 @@ function ensureChart() {
   requestAnimationFrame(watchDraw);
   return chart;
 }
+// Keep the TradingView mark a child of the chart library. Reparenting it makes
+// lightweight-charts throw removeChild when a pane is added or removed.
 function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
-  if (logo && chartUi.host && logo.parentNode !== chartUi.host) chartUi.host.appendChild(logo);
+  const host = chartUi.host;
+  if (!logo || !host || !host.isConnected) return;
+  const r = host.getBoundingClientRect();
+  const onScreen = r.width > 2 && r.bottom > 0 && r.top < window.innerHeight;
+  logo.style.setProperty("visibility", onScreen ? "visible" : "hidden", "important");
+  if (!onScreen) return;
+  logo.style.setProperty("position", "fixed", "important");
+  logo.style.setProperty("left", Math.round(r.left + 1) + "px", "important");
+  logo.style.setProperty("top", Math.round(r.top + 1) + "px", "important");
+  logo.style.setProperty("right", "auto", "important");
+  logo.style.setProperty("bottom", "auto", "important");
+  logo.style.setProperty("margin", "0", "important");
+  logo.style.setProperty("z-index", "8", "important");
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
 function axisClock(ts) {
@@ -1765,6 +1779,13 @@ function tickMarkText(time, type) {
   if (type === 4 || state.tf === "1s" || state.tf === "15s") return clock + ":" + pad2(d.getSeconds());
   return clock;
 }
+function timePaneWidth(host) {
+  let w = 0;
+  for (const c of host.querySelectorAll("canvas")) {
+    if (c.clientHeight > 8 && c.clientHeight < 48 && c.clientWidth > w) w = c.clientWidth;
+  }
+  return w || host.querySelector("canvas")?.clientWidth || 0;
+}
 function paintAxisEdge() {
   const host = chartUi.host;
   const chart = chartUi.chart;
@@ -1778,8 +1799,8 @@ function paintAxisEdge() {
   const range = chart.timeScale().getVisibleRange();
   const x = range ? chart.timeScale().timeToCoordinate(range.from) : null;
   const toX = range ? chart.timeScale().timeToCoordinate(range.to) : null;
-  const paneW = host.querySelector("canvas")?.clientWidth || 0;
-  const rightClipped = toX != null && paneW && toX > paneW - 36;
+  const paneW = timePaneWidth(host);
+  const rightClipped = toX != null && paneW && toX > paneW - 28;
   // Cover a clipped left tick. Skip when that tick is already drawn under the overlay, or the two labels stack.
   const show = (x == null ? !!range : x < 8 || x > 56) && !(rightClipped && range.from === range.to);
   bar.textContent = range && show ? axisClock(range.from) : "";
@@ -1790,6 +1811,18 @@ function paintAxisEdge() {
     host.appendChild(right);
   }
   right.textContent = range && rightClipped ? axisClock(range.to) : "";
+  // Sit on the time pane's right edge, not the price scale. A wide box was covering a clipped tick and spilling into the scale.
+  if (right.textContent && paneW) {
+    right.style.right = "auto";
+    right.style.minWidth = "0";
+    const cover = Math.max(right.scrollWidth, 46);
+    right.style.width = cover + "px";
+    right.style.left = Math.max(0, paneW - cover) + "px";
+  } else {
+    right.style.left = "";
+    right.style.width = "";
+  }
+  parkLogo();
 }
 
 function paintLegend(bar, vol, param) {
@@ -2407,6 +2440,7 @@ window.addEventListener("resize", () => {
   state.chartH = clampChartH(pref);
   const w = $("#chart-wrap");
   if (w && !state.chartFull && !chartUi.dragging) w.style.height = state.chartH + "px";
+  parkLogo();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
 
@@ -3991,6 +4025,7 @@ function bind() {
   if (sc) sc.onclick = () => { state.searchOpen = false; state.searchQ = ""; state.results = []; state.searching = false; render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   bindChartResize();
+  $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
   const cf = $("#chart-full");
   if (cf) cf.onclick = () => { state.chartFull = !state.chartFull; render(); };
   const cm = $("#chart-mode");
