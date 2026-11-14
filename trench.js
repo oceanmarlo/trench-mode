@@ -1786,6 +1786,19 @@ function timePaneWidth(host) {
   }
   return w || host.querySelector("canvas")?.clientWidth || 0;
 }
+function nextOnscreenX(chart, range) {
+  if (!chart || !range) return null;
+  const from = Number(range.from);
+  let best = null;
+  for (const c of state.candles) {
+    const t = Number(c.time);
+    if (!(t > from)) continue;
+    const cx = chart.timeScale().timeToCoordinate(c.time);
+    if (cx == null || cx < 6) continue;
+    if (best == null || cx < best) best = cx;
+  }
+  return best;
+}
 function paintAxisEdge() {
   const host = chartUi.host;
   const chart = chartUi.chart;
@@ -1801,9 +1814,17 @@ function paintAxisEdge() {
   const toX = range ? chart.timeScale().timeToCoordinate(range.to) : null;
   const paneW = timePaneWidth(host);
   const rightClipped = toX != null && paneW && toX > paneW - 28;
-  // Cover a clipped left tick. Skip when that tick is already drawn under the overlay, or the two labels stack.
-  const show = (x == null ? !!range : x < 8 || x > 56) && !(rightClipped && range.from === range.to);
-  bar.textContent = range && show ? axisClock(range.from) : "";
+  const clipped = x != null && x < 2;
+  // Only cover a start tick that is actually off the left edge, and never paint over the next visible tick.
+  let show = !!(range && clipped && !(rightClipped && range.from === range.to));
+  bar.textContent = show ? axisClock(range.from) : "";
+  if (show) {
+    const next = nextOnscreenX(chart, range);
+    const w = bar.scrollWidth || (bar.textContent.length * 6 + 8);
+    if (next != null && next < w + 6) bar.textContent = "";
+    else if (next != null) bar.style.maxWidth = Math.max(28, next - 4) + "px";
+    else bar.style.maxWidth = "";
+  } else bar.style.maxWidth = "";
   let right = host.querySelector(".axis-edge-r");
   if (!right) {
     right = document.createElement("div");
