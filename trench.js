@@ -1791,6 +1791,10 @@ function ensureChart() {
       minValue = Math.max(0, mid - floor / 2);
       maxValue = mid + floor / 2;
     }
+    // The last-price pill is centered on the high. Without headroom the chart edge cuts it in half.
+    const room = Math.max(maxValue - minValue, floor) * 0.18;
+    maxValue += room;
+    if (minValue > 0) minValue = Math.max(0, minValue - room * 0.25);
     res.priceRange.minValue = minValue;
     res.priceRange.maxValue = maxValue;
     return res;
