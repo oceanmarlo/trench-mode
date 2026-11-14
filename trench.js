@@ -1766,7 +1766,7 @@ function ensureChart() {
     autoSize: true,
     layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
     grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.06)" } },
-    rightPriceScale: { borderVisible: false, entireTextOnly: true, scaleMargins: { top: 0.12, bottom: 0.22 } },
+    rightPriceScale: { borderVisible: false, entireTextOnly: true, alignLabels: false, scaleMargins: { top: 0.12, bottom: 0.22 } },
     timeScale: {
       borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4,
       tickMarkFormatter: (time, type) => tickMarkText(time, type)
@@ -1991,6 +1991,7 @@ function paintScaleClashNow() {
   if (!host || !host.isConnected) return;
   host.querySelectorAll(".scale-cut").forEach((n) => n.remove());
   const hostR = host.getBoundingClientRect();
+  const scales = [];
   for (const canvas of host.querySelectorAll("canvas")) {
     if (canvas.clientWidth < 36 || canvas.clientWidth > 110 || canvas.clientHeight < 48) continue;
     const ctx = canvas.getContext("2d");
@@ -2016,30 +2017,42 @@ function paintScaleClashNow() {
         if (R < 210 && sum > 320 && sum < 560 && Math.abs(R - G) < 40 && Math.abs(G - B) < 40) tick++;
       }
       if (color > 8) { if (y < pill0) pill0 = y; pill1 = y; }
-      if (tick > 4) ticks.push(y);
+      if (tick > 2) ticks.push(y);
     }
-    if (pill1 < 0 || !ticks.length) continue;
     const bands = [];
     for (const y of ticks) {
       const last = bands[bands.length - 1];
-      if (last && y - last[1] <= 2) last[1] = y;
+      if (last && y - last[1] <= 4) last[1] = y;
       else bands.push([y, y]);
     }
-    const sy = canvas.clientHeight / H;
-    const cr = canvas.getBoundingClientRect();
+    scales.push({ canvas, W, H, pill0, pill1, bands });
+  }
+  // The last-price pill and the tick it collides with are often on different stacked canvases.
+  let pill0 = Infinity, pill1 = -1;
+  for (const s of scales) {
+    if (s.pill1 >= 0) { pill0 = Math.min(pill0, s.pill0); pill1 = Math.max(pill1, s.pill1); }
+  }
+  for (const s of scales) {
+    if (!s.bands.length) continue;
+    const sy = s.canvas.clientHeight / s.H;
+    const cr = s.canvas.getBoundingClientRect();
     const baseTop = cr.top - hostR.top;
     const left = cr.left - hostR.left;
-    for (const [y0, y1] of bands) {
-      if (y1 < pill0 - 1 || y0 > pill1 + 1) continue;
-      let c0 = y0, c1 = y1;
-      if (c0 < pill0) c1 = Math.min(c1, pill0 + 1);
-      else if (c1 > pill1) c0 = Math.max(c0, pill1 - 1);
+    const near = Math.round(4 * (s.W / s.canvas.clientWidth || 1));
+    const hide = new Set();
+    for (let i = 0; i < s.bands.length; i++) {
+      const [y0, y1] = s.bands[i];
+      if (y0 <= 1 || y1 >= s.H - 2) hide.add(i);
+      if (pill1 >= 0 && y1 >= pill0 - near && y0 <= pill1 + near) hide.add(i);
+    }
+    for (const i of hide) {
+      const [y0, y1] = s.bands[i];
       const cut = document.createElement("div");
       cut.className = "scale-cut";
-      cut.style.top = Math.max(0, baseTop + c0 * sy - 1) + "px";
-      cut.style.height = ((c1 - c0 + 1) * sy + 2) + "px";
+      cut.style.top = Math.max(0, baseTop + y0 * sy - 1) + "px";
+      cut.style.height = ((y1 - y0 + 1) * sy + 2) + "px";
       cut.style.left = left + "px";
-      cut.style.width = canvas.clientWidth + "px";
+      cut.style.width = s.canvas.clientWidth + "px";
       host.appendChild(cut);
     }
   }
@@ -2401,8 +2414,8 @@ function applyScale() {
   const mode = state.scaleMode === "log" ? L.PriceScaleMode.Logarithmic
     : state.scaleMode === "pct" ? L.PriceScaleMode.Percentage
     : L.PriceScaleMode.Normal;
-  try { chartUi.chart.priceScale("right").applyOptions({ mode, autoScale: true }); }
-  catch (_) { try { chartUi.chart.priceScale("right").applyOptions({ mode: L.PriceScaleMode.Normal, autoScale: true }); } catch (__) {} }
+  try { chartUi.chart.priceScale("right").applyOptions({ mode, autoScale: true, alignLabels: false }); }
+  catch (_) { try { chartUi.chart.priceScale("right").applyOptions({ mode: L.PriceScaleMode.Normal, autoScale: true, alignLabels: false }); } catch (__) {} }
 }
 function loadMarks(id) {
   try {
