@@ -311,7 +311,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .lwc-host #tv-attr-logo { z-index: 8; pointer-events: auto; }
 .axis-edge {
   position: absolute; left: 0; bottom: 0; z-index: 5; pointer-events: none;
-  width: max-content; max-width: 78px; height: 26px; padding: 0 4px 0 2px;
+  width: max-content; max-width: none; height: 26px; padding: 0 4px 0 2px;
   display: flex; align-items: center; background: #07090e; color: #8b939e;
   font-size: 10px; line-height: 14px; white-space: nowrap;
 }
@@ -320,9 +320,9 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .axis-cross { left: auto; max-width: none; z-index: 7; justify-content: center; padding: 0 4px; background: #1a2028; color: #f3f5f7; border-radius: 4px; }
 .axis-cut { position: absolute; bottom: 0; height: 26px; background: #07090e; z-index: 5; pointer-events: none; }
 .ultra { color: var(--green); font-size: 13px; margin-top: 8px; }
-.tcols, .trow { display: grid; grid-template-columns: 34px 78px minmax(0, 1fr) 72px 40px; gap: 4px; align-items: center; }
+.tcols, .trow { display: grid; grid-template-columns: 48px 78px minmax(0, 1fr) 72px 40px; gap: 4px; align-items: center; }
 .tcols { color: var(--faint); font-size: 12px; padding: 4px 0; }
-.tcols button { background: none; border: 0; color: inherit; font: inherit; padding: 0; text-align: left; }
+.tcols button { background: none; border: 0; color: inherit; font: inherit; padding: 0; text-align: left; white-space: nowrap; }
 .tcols > :nth-child(4), .tcols > :nth-child(5) { text-align: right; }
 .trow { font-size: 12px; padding: 7px 0; }
 .trow > span, .trow > a { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

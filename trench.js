@@ -1915,15 +1915,19 @@ function paintAxisEdge() {
   if (sliced && label && textW && !(rightClipped && range.from === range.to)) {
     let end = groups[0][1];
     let i = 1;
-    while (i < groups.length && textW > groups[i][0] - 4) {
+    // Width must paint past the text. max-width alone leaves the box at the
+    // text width, so the next glyph peeks out ("05:34:30 )").
+    cover = Math.max(textW, end + 6);
+    while (i < groups.length && cover >= groups[i][0] - 3) {
       end = groups[i][1];
       i++;
+      cover = Math.max(cover, end + 6);
     }
-    const room = i < groups.length ? groups[i][0] - 4 : 90;
-    cover = Math.max(textW, end + 3);
-    show = cover <= room + 1;
+    const room = i < groups.length ? groups[i][0] - 4 : 120;
+    show = cover <= room + 1 && cover <= 120;
   }
   bar.textContent = show ? label : "";
+  bar.style.width = show ? cover + "px" : "";
   bar.style.maxWidth = show ? cover + "px" : "";
   let right = host.querySelector(".axis-edge-r");
   if (!right) {
