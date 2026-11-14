@@ -3472,7 +3472,15 @@ function ageText(h) {
   if (h < 24 * 60) return Math.round(h / 24) + "d";
   return Math.round(h / 24 / 30) + "mo";
 }
-function pctText(v) { return v == null ? "—" : (v >= 0 ? "+" : "") + (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)) + "%"; }
+function pctText(v) {
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  const n = Number(v);
+  const abs = Math.abs(n);
+  let text = abs >= 100 ? n.toFixed(0) : n.toFixed(1);
+  // -99.96 must not print as -100.0.
+  if (abs < 100 && Math.abs(Number(text)) >= 100) text = n.toFixed(2);
+  return (n >= 0 ? "+" : "") + text + "%";
+}
 
 function alphaRowsHtml() {
   const a = state.alpha;
@@ -3928,6 +3936,18 @@ function solAmt(n) {
   if (m && m[1].length >= 2) return "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
   return a.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
+function shareText(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  if (v === 0) return "0.00%";
+  if (Math.abs(v) < 0.01) return "<0.01%";
+  return v.toFixed(2) + "%";
+}
+function shareShown(n) {
+  if (n == null || !Number.isFinite(Number(n))) return null;
+  const v = Number(n);
+  return Math.abs(v) < 0.01 ? 0 : Number(v.toFixed(2));
+}
 function sheetPct(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const v = Number(n);
@@ -4091,8 +4111,10 @@ function sheetVals() {
     volD: deltaText(s.volumeChange), volDCls: deltaCls(s.volumeChange),
     liqD: deltaText(s.liquidityChange), liqDCls: deltaCls(s.liquidityChange),
     holdD: deltaText(s.holderChange), holdDCls: deltaCls(s.holderChange),
-    top10: audit.topHoldersPercentage != null ? audit.topHoldersPercentage.toFixed(2) + "%" : "—",
-    dev: audit.devBalancePercentage != null ? audit.devBalancePercentage.toFixed(2) + "%" : "—",
+    top10: shareText(audit.topHoldersPercentage),
+    top10Cls: shareShown(audit.topHoldersPercentage) > 0 ? "down" : "flat",
+    dev: shareText(audit.devBalancePercentage),
+    devCls: shareShown(audit.devBalancePercentage) == null ? "flat" : (shareShown(audit.devBalancePercentage) > 0 ? "down" : "up"),
     snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
     freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
@@ -4132,8 +4154,8 @@ function sheetHtml() {
         <div><div class="k">Holders %Δ</div><div class="v" data-sf="holdD"></div></div>
       </div>
       <div class="tiles">
-        <div class="tile"><b class="down" data-sf="top10"></b>Top 10 H.</div>
-        <div class="tile"><b class="up" data-sf="dev"></b>Dev H.</div>
+        <div class="tile"><b data-sf="top10"></b>Top 10 H.</div>
+        <div class="tile"><b data-sf="dev"></b>Dev H.</div>
         <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers H.</div>
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
@@ -4156,6 +4178,8 @@ function paintSheet() {
   });
   const net = root.querySelector('[data-sf="net"]');
   if (net) net.className = "v " + v.netCls;
+  const t10 = root.querySelector('[data-sf="top10"]'); if (t10) t10.className = v.top10Cls || "";
+  const dv = root.querySelector('[data-sf="dev"]'); if (dv) dv.className = v.devCls || "";
   const fr = root.querySelector('[data-sf="freeze"]'); if (fr) fr.className = v.freezeCls;
   const mi = root.querySelector('[data-sf="mint"]'); if (mi) mi.className = v.mintCls;
   for (const k of ["volD", "liqD", "holdD"]) {
