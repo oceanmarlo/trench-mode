@@ -212,9 +212,18 @@ async function loadToken(query) {
   datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(hit.id)).then((extra) => {
     const row = (extra || []).find((t) => t.id === hit.id);
     if (row && state.active === hit) {
-      ["fees", "launchpad", "metaLaunchpad", "twitter", "primaryTwitter", "website", "telegram", "discord", "isVerified"].forEach((k) => {
+      ["fees", "launchpad", "metaLaunchpad", "twitter", "primaryTwitter", "website", "telegram", "discord", "isVerified", "bondingCurve", "graduatedAt", "graduatedPool", "dexPaidAt"].forEach((k) => {
         if (row[k] != null && hit[k] == null) hit[k] = row[k];
       });
+      ["stats5m", "stats1h", "stats6h", "stats24h"].forEach((k) => {
+        if (row[k] && (hit[k] == null || !Object.keys(hit[k]).length)) hit[k] = row[k];
+      });
+      if (row.audit) {
+        hit.audit = hit.audit || {};
+        for (const [k, val] of Object.entries(row.audit)) {
+          if (hit.audit[k] == null && val != null) hit.audit[k] = val;
+        }
+      }
       render();
     }
   }).catch(() => {});
@@ -2470,22 +2479,180 @@ function holdersPanel() {
 }
 
 // ---- Token Info sheet: a persistent overlay outside #app, so re-renders never touch it ----
+// Change fields from datapi (stats5m/1h/6h/24h) are already percent points, not fractions.
+// fees is SOL. bondingCurve is a 0–100 percent; graduated tokens are not still on the curve.
+const netTrend = { mint: "", samples: { "5m": [], "1h": [], "6h": [], "24h": [] } };
+let netTrendTimer = 0;
+function onCurve(t) {
+  if (!t || t.bondingCurve == null || !Number.isFinite(Number(t.bondingCurve))) return false;
+  if (t.graduatedAt || t.graduatedPool) return false;
+  return Number(t.bondingCurve) < 100;
+}
+function solAmt(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const a = Math.abs(Number(n));
+  if (a >= 1e6) return (a / 1e6).toFixed(2) + "M";
+  if (a >= 1000) return (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
+  if (a >= 100) return a.toFixed(1);
+  return a.toFixed(2);
+}
+function deltaText(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "-";
+  return signed(Number(n)) + "%";
+}
+function deltaCls(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "v flat";
+  return "v " + cls(Number(n));
+}
+function noteNetTrend() {
+  const t = state.active;
+  if (!t || !document.getElementById("sheet-root")) return;
+  if (netTrend.mint !== t.id) {
+    netTrend.mint = t.id;
+    netTrend.samples = { "5m": [], "1h": [], "6h": [], "24h": [] };
+  }
+  const now = Date.now();
+  for (const w of ["5m", "1h", "6h", "24h"]) {
+    const s = t["stats" + w];
+    if (!s || (s.buyVolume == null && s.sellVolume == null)) continue;
+    const v = (Number(s.buyVolume) || 0) - (Number(s.sellVolume) || 0);
+    if (!Number.isFinite(v)) continue;
+    const arr = netTrend.samples[w];
+    const last = arr[arr.length - 1];
+    if (last && last.v === v && now - last.t < 3000) continue;
+    arr.push({ t: now, v });
+    if (arr.length > 80) arr.shift();
+  }
+}
+function armNetTrend() {
+  if (netTrendTimer) return;
+  netTrendTimer = setInterval(() => {
+    if (!document.getElementById("sheet-root")) { stopNetTrend(); return; }
+    noteNetTrend();
+    drawNetTrend();
+  }, 3000);
+}
+function stopNetTrend() {
+  if (netTrendTimer) { clearInterval(netTrendTimer); netTrendTimer = 0; }
+}
+function drawNetTrend() {
+  const box = document.getElementById("net-trend");
+  if (!box) return;
+  const arr = netTrend.samples[state.infoWin] || [];
+  if (arr.length < 2) {
+    if (!box.querySelector(".collecting")) box.innerHTML = '<div class="collecting">collecting…</div>';
+    return;
+  }
+  const w = Math.max(120, box.clientWidth || 320);
+  const h = 96;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  let canvas = box.querySelector("canvas");
+  if (!canvas) {
+    box.innerHTML = "";
+    canvas = document.createElement("canvas");
+    box.appendChild(canvas);
+  }
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const vals = arr.map((p) => p.v);
+  const rawLo = Math.min(...vals), rawHi = Math.max(...vals);
+  let lo = rawLo, hi = rawHi;
+  if (lo === hi) {
+    const pad = Math.max(Math.abs(lo) * 0.05, 1);
+    lo -= pad;
+    hi += pad;
+  }
+  const crosses = rawLo < 0 && rawHi > 0;
+  if (crosses) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  const top = 16, bot = h - 16;
+  const yOf = (v) => top + (hi - v) / (hi - lo) * (bot - top);
+  const xOf = (i) => (i / (arr.length - 1)) * (w - 8) + 4;
+  const zeroY = crosses ? yOf(0) : bot;
+  ctx.save();
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = "rgba(255,255,255,.18)";
+  ctx.beginPath();
+  ctx.moveTo(0, top); ctx.lineTo(w, top);
+  ctx.moveTo(0, bot); ctx.lineTo(w, bot);
+  if (crosses) { ctx.moveTo(0, zeroY); ctx.lineTo(w, zeroY); }
+  ctx.stroke();
+  ctx.restore();
+  ctx.beginPath();
+  arr.forEach((p, i) => { const x = xOf(i), y = yOf(p.v); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+  ctx.lineTo(xOf(arr.length - 1), zeroY);
+  ctx.lineTo(xOf(0), zeroY);
+  ctx.closePath();
+  if (!crosses) {
+    const up = vals[vals.length - 1] >= 0;
+    const grad = ctx.createLinearGradient(0, top, 0, bot);
+    grad.addColorStop(0, up ? "rgba(61,220,132,.40)" : "rgba(255,77,141,.08)");
+    grad.addColorStop(1, up ? "rgba(61,220,132,.04)" : "rgba(255,77,141,.40)");
+    ctx.fillStyle = grad;
+    ctx.fill();
+  } else {
+    const zy = yOf(0);
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = "rgba(61,220,132,.32)";
+    ctx.fillRect(0, 0, w, zy);
+    ctx.fillStyle = "rgba(255,77,141,.32)";
+    ctx.fillRect(0, zy, w, h - zy);
+    ctx.restore();
+  }
+  ctx.lineWidth = 1.6;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  for (let i = 1; i < arr.length; i++) {
+    ctx.strokeStyle = (vals[i - 1] + vals[i]) / 2 >= 0 ? "#3DDC84" : "#ff4d8d";
+    ctx.beginPath();
+    ctx.moveTo(xOf(i - 1), yOf(vals[i - 1]));
+    ctx.lineTo(xOf(i), yOf(vals[i]));
+    ctx.stroke();
+  }
+  ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
+  ctx.fillStyle = "rgba(243,245,247,.8)";
+  ctx.textBaseline = "top";
+  ctx.fillText(usd(vals[vals.length - 1]), 2, 1);
+  ctx.textBaseline = "bottom";
+  ctx.fillText(usd(rawLo), 2, h - 1);
+}
 function sheetVals() {
   const t = state.active || {};
   const audit = t.audit || {};
   const s = stat(state.infoWin);
-  const buy = s.buyVolume || 0, sell = s.sellVolume || 0;
+  const buy = Number(s.buyVolume) || 0, sell = Number(s.sellVolume) || 0;
+  const volSum = buy + sell;
+  const buys = s.numBuys, sells = s.numSells;
+  const tradeN = (Number(buys) || 0) + (Number(sells) || 0);
+  const buyPct = volSum ? Math.round(100 * buy / volSum) : null;
+  const sellPct = buys == null && sells == null ? null : (tradeN ? Math.round(100 * sells / tradeN) : 0);
+  const curveOn = onCurve(t);
+  const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
     price: usd(state.prices[t.id] || t.usdPrice), fdv: usd(t.fdv || t.mcap), liq: usd(t.liquidity),
     holders: t.holderCount != null ? Number(t.holderCount).toLocaleString() : "—",
-    org: t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1),
-    vol: usd(buy + sell), net: usd(buy - sell), netCls: cls(buy - sell),
-    buyPct: (buy + sell ? Math.round(100 * buy / (buy + sell)) : 0) + "%",
+    fees: solAmt(t.fees),
+    curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
+    curveOn,
+    vol: usd(volSum), net: usd(buy - sell), netCls: cls(buy - sell),
+    buyPct, sellPct,
+    buyTxt: buyPct == null ? "—" : buyPct + "% Buy",
+    sellTxt: sellPct == null ? "—" : sellPct + "% Sell",
     traders: s.numTraders != null ? Number(s.numTraders).toLocaleString() : "—",
     netBuyers: s.numNetBuyers != null ? Number(s.numNetBuyers).toLocaleString() : "—",
+    volD: deltaText(s.volumeChange), volDCls: deltaCls(s.volumeChange),
+    liqD: deltaText(s.liquidityChange), liqDCls: deltaCls(s.liquidityChange),
+    holdD: deltaText(s.holderChange), holdDCls: deltaCls(s.holderChange),
     top10: audit.topHoldersPercentage != null ? audit.topHoldersPercentage.toFixed(2) + "%" : "—",
     dev: audit.devBalancePercentage != null ? audit.devBalancePercentage.toFixed(2) + "%" : "—",
+    snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
+    snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
     freeze: audit.freezeAuthorityDisabled ? "No" : "Yes", freezeCls: audit.freezeAuthorityDisabled ? "up" : "down",
     mint: audit.mintAuthorityDisabled ? "No" : "Yes", mintCls: audit.mintAuthorityDisabled ? "up" : "down",
     wins: Object.fromEntries(["5m", "1h", "6h", "24h"].map((w) => [w, stat(w).priceChange || 0]))
@@ -2498,12 +2665,29 @@ function sheetHtml() {
     <div class="sheet-head" id="sheet-head"><div class="grab"></div><h2 id="sheet-title" data-sf="title"></h2>
       <button type="button" class="sheet-x" data-sheet-close aria-label="Close">✕</button></div>
     <div class="sheet-body" id="sheet-body">
-      <div class="grid3">${f("price", "Price")}${f("fdv", "FDV")}${f("liq", "Liquidity")}${f("holders", "Holders")}${f("org", "Org Score")}</div>
+      <div class="grid3">${f("price", "Price")}${f("fdv", "FDV")}${f("liq", "Liquidity")}${f("holders", "Holders")}
+        <div><div class="k">Fees Paid</div><div class="v fee-sol"><img class="fee-ico" alt="" width="14" height="14" src="${SOL_ICON}"><span data-sf="fees"></span></div></div>
+        <div data-sf-curve hidden><div class="k">B. Curve</div><div class="v up" data-sf="curve"></div></div>
+      </div>
       <div class="grid4">${["5m", "1h", "6h", "24h"].map((w) => `<button type="button" data-win="${w}">${w}<small data-sw="${w}"></small></button>`).join("")}</div>
-      <div class="grid3"><div><div class="k"><span data-sf="win"></span> Vol</div><div class="v" data-sf="vol"></div></div>${f("net", "Net Vol")}${f("buyPct", "Buy", "up")}${f("traders", "Traders")}${f("netBuyers", "Net Buyers")}</div>
+      <div class="sheet-stats">
+        <div><div class="k"><span data-sf="win"></span> Vol</div><div class="v" data-sf="vol"></div></div>
+        ${f("net", "Net Vol")}
+        <div class="mix-pill buy"><span class="mix-fill" data-sfw="buyPct"></span><span class="lab" data-sf="buyTxt"></span></div>
+        <div><div class="k"><span data-sf="win"></span> Traders</div><div class="v" data-sf="traders"></div></div>
+        <div><div class="k">Net Buyers</div><div class="v pink" data-sf="netBuyers"></div></div>
+        <div class="mix-pill sell"><span class="mix-fill" data-sfw="sellPct"></span><span class="lab" data-sf="sellTxt"></span></div>
+      </div>
+      <div class="trend-box"><div class="k"><span data-sf="win"></span> Net Buy Trend</div><div class="trend" id="net-trend"></div></div>
+      <div class="delta3">
+        <div><div class="k">Vol %Δ</div><div class="v" data-sf="volD"></div></div>
+        <div><div class="k">Liquidity %Δ</div><div class="v" data-sf="liqD"></div></div>
+        <div><div class="k">Holders %Δ</div><div class="v" data-sf="holdD"></div></div>
+      </div>
       <div class="tiles">
         <div class="tile"><b class="down" data-sf="top10"></b>Top 10 H.</div>
         <div class="tile"><b class="up" data-sf="dev"></b>Dev H.</div>
+        <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers H.</div>
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
       </div>
@@ -2515,6 +2699,8 @@ function sheetHtml() {
 function paintSheet() {
   const root = document.getElementById("sheet-root");
   if (!root) return;
+  noteNetTrend();
+  armNetTrend();
   const v = sheetVals();
   root.querySelectorAll("[data-sf]").forEach((el) => {
     const k = el.dataset.sf;
@@ -2525,6 +2711,22 @@ function paintSheet() {
   if (net) net.className = "v " + v.netCls;
   const fr = root.querySelector('[data-sf="freeze"]'); if (fr) fr.className = v.freezeCls;
   const mi = root.querySelector('[data-sf="mint"]'); if (mi) mi.className = v.mintCls;
+  for (const k of ["volD", "liqD", "holdD"]) {
+    const el = root.querySelector(`[data-sf="${k}"]`);
+    if (el) el.className = v[k + "Cls"];
+  }
+  const snip = root.querySelector('[data-sf="snip"]');
+  if (snip) snip.className = v.snipCls || "";
+  const curve = root.querySelector("[data-sf-curve]");
+  if (curve) curve.hidden = !v.curveOn;
+  const snipTile = root.querySelector("[data-sf-snip]");
+  if (snipTile) snipTile.hidden = !v.snipOn;
+  const ico = root.querySelector(".fee-ico");
+  if (ico) ico.hidden = v.fees === "—";
+  root.querySelectorAll("[data-sfw]").forEach((el) => {
+    const n = v[el.dataset.sfw];
+    el.style.width = n == null ? "0%" : Math.max(0, Math.min(100, n)) + "%";
+  });
   root.querySelectorAll("[data-sw]").forEach((el) => {
     const pc = v.wins[el.dataset.sw];
     const txt = signed(pc) + "%";
@@ -2532,6 +2734,7 @@ function paintSheet() {
     el.className = cls(pc);
   });
   root.querySelectorAll("[data-win]").forEach((b) => b.classList.toggle("on", b.dataset.win === state.infoWin));
+  drawNetTrend();
 }
 let sheetPrevOverflow = null;
 function openSheet() {
@@ -2563,6 +2766,7 @@ function openSheet() {
 }
 function closeSheet() {
   state.infoOpen = false;
+  stopNetTrend();
   const root = document.getElementById("sheet-root");
   if (root) root.remove();
   if (sheetPrevOverflow) {
@@ -3325,8 +3529,17 @@ function onStreamAssets(list) {
     if (!t?.id) continue;
     if (a && t.id === a.id) {
       const fees = a.fees;
+      const curve = a.bondingCurve, gradAt = a.graduatedAt, gradPool = a.graduatedPool;
+      const sniper = a.audit && a.audit.sniperPct;
       Object.assign(a, t);
       if (fees != null && t.fees == null) a.fees = fees;
+      if (curve != null && t.bondingCurve == null) a.bondingCurve = curve;
+      if (gradAt != null && t.graduatedAt == null) a.graduatedAt = gradAt;
+      if (gradPool != null && t.graduatedPool == null) a.graduatedPool = gradPool;
+      if (sniper != null && (!a.audit || a.audit.sniperPct == null)) {
+        a.audit = a.audit || {};
+        a.audit.sniperPct = sniper;
+      }
       if (t.usdPrice > 0) notePrice(t.id, t.usdPrice, t.priceBlockId || t.blockId, "asset");
       if (state.prices[a.id]) a.usdPrice = state.prices[a.id];
       feedMark("tokenStatsStream");
