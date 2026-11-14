@@ -3076,6 +3076,14 @@ function revealTab() {
   if (!sc || !tabs) return;
   sc.scrollTop = Math.max(0, tabs.offsetTop - 2);
 }
+function revealQuote() {
+  const sc = document.querySelector(".scroll");
+  const dock = document.getElementById("trade-dock");
+  if (!sc || !dock || state.view !== "spot") return;
+  const gap = 8;
+  const overflow = dock.getBoundingClientRect().bottom - (sc.getBoundingClientRect().bottom - gap);
+  if (overflow > 1) sc.scrollTop += overflow;
+}
 function render() {
   if (chartUi.dragging) { chartUi.pendingRender = true; return; }
   const prevScroll = document.querySelector(".scroll");
@@ -3124,7 +3132,9 @@ function render() {
   if (sc) {
     if (jumpTab) revealTab();
     else if (keep) sc.scrollTop = keep;
+    if (state.revealQuote) revealQuote();
   }
+  state.revealQuote = false;
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
   if (state.marketOpen) placeOrderMenu();
 }
@@ -4569,6 +4579,7 @@ function bind() {
     state.marketOpen = false;
     state.quote = null;
     saveOrderPrefs();
+    state.revealQuote = state.orderType !== "market";
     render();
     scheduleQuote(0);
   });
