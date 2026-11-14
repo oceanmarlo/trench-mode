@@ -1973,6 +1973,76 @@ function paintAxisEdge() {
     right.style.width = "";
   }
   parkLogo();
+  paintScaleClash();
+}
+// The last-price pill is painted on the scale canvas. A tick that sits on it
+// shows as a sliced label (800.00M under the pill). Cover that tick only.
+function paintScaleClash() {
+  if (chartUi.scaleClash) return;
+  chartUi.scaleClash = requestAnimationFrame(() => {
+    chartUi.scaleClash = requestAnimationFrame(() => {
+      chartUi.scaleClash = 0;
+      paintScaleClashNow();
+    });
+  });
+}
+function paintScaleClashNow() {
+  const host = chartUi.host;
+  if (!host || !host.isConnected) return;
+  host.querySelectorAll(".scale-cut").forEach((n) => n.remove());
+  const hostR = host.getBoundingClientRect();
+  for (const canvas of host.querySelectorAll("canvas")) {
+    if (canvas.clientWidth < 36 || canvas.clientWidth > 110 || canvas.clientHeight < 48) continue;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    let img;
+    try { img = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (_) { continue; }
+    const d = img.data;
+    const W = canvas.width;
+    const H = canvas.height;
+    if (!W || !H) continue;
+    let pill0 = Infinity, pill1 = -1;
+    const ticks = [];
+    for (let y = 0; y < H; y++) {
+      let tick = 0, color = 0;
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        const R = d[i], G = d[i + 1], B = d[i + 2], A = d[i + 3];
+        if (A < 30) continue;
+        const red = R > 180 && G < 140 && B < 160 && R > G + 50;
+        const green = G > 140 && R < 140 && G > R + 30 && B < 200;
+        if (red || green) { color++; continue; }
+        const sum = R + G + B;
+        if (R < 210 && sum > 320 && sum < 560 && Math.abs(R - G) < 40 && Math.abs(G - B) < 40) tick++;
+      }
+      if (color > 8) { if (y < pill0) pill0 = y; pill1 = y; }
+      if (tick > 4) ticks.push(y);
+    }
+    if (pill1 < 0 || !ticks.length) continue;
+    const bands = [];
+    for (const y of ticks) {
+      const last = bands[bands.length - 1];
+      if (last && y - last[1] <= 2) last[1] = y;
+      else bands.push([y, y]);
+    }
+    const sy = canvas.clientHeight / H;
+    const cr = canvas.getBoundingClientRect();
+    const baseTop = cr.top - hostR.top;
+    const left = cr.left - hostR.left;
+    for (const [y0, y1] of bands) {
+      if (y1 < pill0 - 1 || y0 > pill1 + 1) continue;
+      let c0 = y0, c1 = y1;
+      if (c0 < pill0) c1 = Math.min(c1, pill0 + 1);
+      else if (c1 > pill1) c0 = Math.max(c0, pill1 - 1);
+      const cut = document.createElement("div");
+      cut.className = "scale-cut";
+      cut.style.top = Math.max(0, baseTop + c0 * sy - 1) + "px";
+      cut.style.height = ((c1 - c0 + 1) * sy + 2) + "px";
+      cut.style.left = left + "px";
+      cut.style.width = canvas.clientWidth + "px";
+      host.appendChild(cut);
+    }
+  }
 }
 
 // The library's crosshair time is painted on the tick canvas, so it slices the
