@@ -15,7 +15,7 @@ const ALPHA_LIST_MS = 5000;    // datapi list re-rank; row values stream live in
 const TF_SEC = { "Auto": 60, "15s": 15, "1m": 60, "3m": 180, "15m": 900, "1h": 3600, "4h": 14400, "1D": 86400 };
 
 const state = {
-  tab: "trade",
+  tab: "holders",
   view: "spot",
   holdingsLoading: false,
   holdingsError: "",
@@ -95,6 +95,15 @@ const moveLabel = (pct) => {
   const mult = Math.abs(1 + n / 100);
   const digits = mult >= 10 ? 0 : 2;
   return (n >= 0 ? "▲ " : "▼ ") + mult.toFixed(digits) + "x (24h)";
+};
+const SUB = "₀₁₂₃₄₅₆₇₈₉";
+const priceLabel = (n) => {
+  const v = Number(n);
+  if (!(v > 0)) return v === 0 ? "$0" : "—";
+  if (v >= 0.01) return usd(v);
+  const m = v.toFixed(18).match(/^0\.(0*)([1-9]\d{0,2})/);
+  if (!m || m[1].length < 2) return usd(v);
+  return "$0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
 };
 const raw = (ui, decimals) => Math.round(Number(ui) * 10 ** decimals).toString();
 const ui = (amount, decimals) => Number(amount) / 10 ** decimals;
@@ -198,7 +207,12 @@ async function loadToken(query) {
   heliusTrack(hit);
   datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(hit.id)).then((extra) => {
     const row = (extra || []).find((t) => t.id === hit.id);
-    if (row && row.fees != null && state.active === hit) { hit.fees = row.fees; render(); }
+    if (row && state.active === hit) {
+      ["fees", "launchpad", "metaLaunchpad", "twitter", "primaryTwitter", "website", "telegram", "discord", "isVerified"].forEach((k) => {
+        if (row[k] != null && hit[k] == null) hit[k] = row[k];
+      });
+      render();
+    }
   }).catch(() => {});
   state.tapeIds = new Set();
   streamSync();
@@ -843,7 +857,10 @@ function paintLive() {
   const est = $("#est");
   const stat = $("#status");
   const mc = $("#mc");
-  if (mc && t) mc.textContent = usd(t.mcap || (t.circSupply || 0) * (state.prices[t.id] || 0));
+  if (mc && t) {
+    const px = state.prices[t.id] || t.usdPrice || 0;
+    mc.textContent = usd((t.circSupply || 0) * px || t.mcap || 0);
+  }
   if (chg && t) {
     const c = t.stats24h?.priceChange || 0;
     chg.textContent = moveLabel(c);
@@ -1154,8 +1171,9 @@ function render() {
     <div class="scroll">
       ${state.view === "portfolio" ? portfolioView() : state.view === "alpha" ? alphaView() : `
       ${t ? tokenHead(t, price, chg) : `<div class="panel">${esc(state.status || "Search a token to trade.")}</div>`}
+      ${t ? `<div class="panel trade-dock" id="trade-dock">${tradePanel()}</div>` : ""}
       <div class="tabs" role="tablist" aria-label="Token details">
-        ${[["trade","Overview"],["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" && t?.holderCount ? ` <span class="tab-n">${compactCount(t.holderCount)}</span>` : ""}</button>`).join("")}
+        ${[["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" && t?.holderCount ? ` <span class="tab-n">${compactCount(t.holderCount)}</span>` : ""}</button>`).join("")}
       </div>
       <div class="panel">${panel()}</div>`}
     </div>
@@ -1178,6 +1196,7 @@ function render() {
   if (state.infoOpen) openSheet(); else if (document.getElementById("sheet-root")) closeSheet();
   drawChart();
   if (state.view === "spot" && state.tab === "holders") drawMap();
+  if (state.view === "spot" && state.active) rcWant([state.active.id]);
 }
 
 function tokenAge(iso) {
@@ -1188,25 +1207,80 @@ function tokenAge(iso) {
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
 }
+function starList() {
+  try { return JSON.parse(localStorage.getItem("trench-stars")) || []; } catch (_) { return []; }
+}
+function isStarred(id) { return starList().includes(id); }
+function toggleStar(id) {
+  const list = starList().filter((x) => x !== id);
+  if (!isStarred(id)) list.push(id);
+  localStorage.setItem("trench-stars", JSON.stringify(list.slice(-200)));
+}
+function socialHref(kind, raw) {
+  const v = String(raw || "").trim();
+  if (!v) return "";
+  if (/^https?:\/\//i.test(v)) return v;
+  if (kind === "x") return "https://x.com/" + v.replace(/^@/, "");
+  if (kind === "tg") return "https://t.me/" + v.replace(/^@/, "");
+  return "";
+}
+function socialsHtml(t) {
+  const x = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 10.3 22 2h-2.2l-6.2 7.1L8.2 2H2l7.7 11.1L2 22h2.2l6.8-7.8L15.6 22H22z"/></svg>`;
+  const web = `<svg class="stroke" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.8 3.8 6 3.8 9s-1.3 6.2-3.8 9c-2.5-2.8-3.8-6-3.8-9s1.3-6.2 3.8-9z"/></svg>`;
+  const tg = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4 3 11.5l6.2 2.1L18 7.5l-7 7.2.2 4.3 3-3.2L19 18z"/></svg>`;
+  const items = [
+    ["x", t.twitter || t.primaryTwitter, "X", x],
+    ["web", t.website, "Website", web],
+    ["tg", t.telegram, "Telegram", tg]
+  ];
+  return items.map(([kind, raw, label, svg]) => {
+    const href = socialHref(kind, raw);
+    return href ? `<a class="soc" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="${label}">${svg}</a>` : "";
+  }).join("");
+}
+function rcView(t) {
+  const r = t && rcGet(t.id);
+  if (!r || r.missing) return { cls: "wait", mark: "…", label: "RugCheck loading" };
+  if (r.level === "danger") return { cls: "bad", mark: "✕", label: "RugCheck danger" };
+  return { cls: "ok", mark: "✓", label: "RugCheck safe" };
+}
+function rcLineInner(t) {
+  const r = rcGet(t.id);
+  const a = t.audit || {};
+  const score = r && !r.missing && r.score != null ? String(Math.round(r.score)) : "…";
+  const lp = r && !r.missing && r.lp != null ? Math.round(r.lp) + "%" : "…";
+  const auth = (off) => off == null ? "—" : (off ? `<span class="ok">off</span>` : `<span class="bad">on</span>`);
+  const top = a.topHoldersPercentage == null ? "—" : Math.round(a.topHoldersPercentage) + "%";
+  return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
+}
 function tokenHead(t, price, chg) {
   const s1 = t.stats1h || {};
+  const mint = t.id || "";
+  const short = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : "";
+  const starred = isStarred(mint);
   return `<div class="token-head">
-      <div class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" width="36" height="36">` : "●"}</div>
+      <div class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" width="42" height="42">` : "●"}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
       <div class="tok-name">
-        <div class="sym">${esc(t.symbol)} <span style="font-weight:500;color:var(--muted)">${esc(t.name || "")}</span></div>
-        <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span>${(t.id || "").slice(0, 4)}…${(t.id || "").slice(-4)}</span><button type="button" class="copy" data-copy="${t.id}" aria-label="Copy">⧉</button><button type="button" class="copy" id="token-search" aria-label="Search">⌕</button></div>
+        <div class="sym">${esc(t.symbol)} <span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
+        <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
       </div>
-      <div class="mc">
-        <div class="px" id="mc">${usd(t.mcap || 0)}</div>
-        <div class="chg ${cls(t.stats24h?.priceChange || 0)}" id="chg">${moveLabel(t.stats24h?.priceChange || 0)}</div>
+      <div class="tok-actions">
+        <button type="button" class="round" id="share" aria-label="Share"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg></button>
+        <button type="button" class="round star ${starred ? "on" : ""}" id="star" aria-label="${starred ? "Unstar" : "Star"}" aria-pressed="${starred}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.6 5.6L20 9.5l-4 4 1 5.8L12 16.6 7 19.3l1-5.8-4-4 5.4-.9z"/></svg></button>
       </div>
     </div>
+    <div class="rc-line" id="rc-line">${rcLineInner(t)}</div>
+    <div class="mc-line">
+      <span class="px" id="mc">${usd(t.mcap || (t.circSupply || 0) * price || 0)}</span>
+      <span class="chg ${cls(t.stats24h?.priceChange || 0)}" id="chg">${moveLabel(t.stats24h?.priceChange || 0)}</span>
+    </div>
     <div class="stats">
-      <div><div class="k">Price</div><div class="v">${usd(price)}</div></div>
+      <div><div class="k">Price</div><div class="v">${priceLabel(price)}</div></div>
       <div><div class="k">Liquidity</div><div class="v">${usd(t.liquidity || 0)}</div></div>
       <div><div class="k">1h Vol</div><div class="v">${usd((s1.buyVolume || 0) + (s1.sellVolume || 0))}</div></div>
       <div><div class="k">Fees Paid</div><div class="v">${t.fees == null ? "—" : usd(t.fees)}</div></div>
-      <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)} <button id="info">⌄</button></div></div>
+      <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
+      <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
     <div class="tf">${["Auto","15s","1m","3m","15m","1h","4h","1D"].map((x)=>`<button data-tf="${x}" class="${state.tf===x?"on":""}">${x}</button>`).join("")}<span class="tf-tools"><button type="button" id="ind" aria-label="Indicators">▦</button><button type="button" id="chart-set" aria-label="Chart settings">⚙</button></span></div>
     <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
@@ -1220,11 +1294,9 @@ function tokenHead(t, price, chg) {
 }
 
 function panel() {
-  if (state.tab === "trade") return tradePanel();
   if (state.tab === "tx") return txPanel();
-  if (state.tab === "holders") return holdersPanel();
   if (state.tab === "holdings") return holdingsPanel();
-  return tradePanel();
+  return holdersPanel();
 }
 
 function connectPrompt(text) {
@@ -1323,7 +1395,21 @@ function rcSave() {
 }
 function rcRepaint() {
   clearTimeout(rc.paintTimer);
-  rc.paintTimer = setTimeout(() => { if (state.view === "alpha") paintAlphaList(); }, 300);
+  rc.paintTimer = setTimeout(() => {
+    if (state.view === "alpha") paintAlphaList();
+    paintRcHead();
+  }, 300);
+}
+function paintRcHead() {
+  const t = state.active;
+  const badge = document.getElementById("rc-badge");
+  if (!t || !badge) return;
+  const v = rcView(t);
+  badge.className = "badge rc " + v.cls;
+  badge.textContent = v.mark;
+  badge.setAttribute("aria-label", v.label);
+  const line = document.getElementById("rc-line");
+  if (line) line.innerHTML = rcLineInner(t);
 }
 function rcWant(mints) {
   for (const m of mints) {
@@ -1546,7 +1632,7 @@ function paintAlphaList() {
   box.innerHTML = alphaRowsHtml();
   box.querySelectorAll("[data-alpha-open]").forEach((b) => b.onclick = () => {
     state.view = "spot";
-    state.tab = "trade";
+    state.tab = "holders";
     render();
     loadToken(b.dataset.alphaOpen).catch((err) => { state.status = err.message; render(); });
   });
@@ -1673,7 +1759,7 @@ function tradePanel() {
   const balIcon = state.side === "buy" ? SOL_ICON : t.icon;
   const label = state.wallet ? (state.side === "buy" ? "Buy" : "Sell") : "Connect";
   return `<div class="trade-top">
-      <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> ${bal} <button class="pencil" type="button" aria-label="Edit">✎</button></span>
+      <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> <span id="trade-bal">${bal}</span> <button class="pencil" type="button" aria-label="Edit">✎</button></span>
       <span class="trade-right"><span class="market-wrap"><button class="market" type="button" id="market">Market <span>▾</span></button>${state.marketOpen ? `<div class="market-menu"><button type="button" class="on">Market</button></div>` : ""}</span>
       <div class="seg">
         <button class="buy ${state.side==="buy"?"on":""}" data-side="buy">Buy</button>
@@ -1887,23 +1973,42 @@ function bind() {
   if (ind) ind.onclick = () => { state.showInd = !state.showInd; render(); };
   const tokenSearch = $("#token-search");
   if (tokenSearch) tokenSearch.onclick = () => { state.searchOpen = true; render(); };
+  const share = $("#share");
+  if (share) share.onclick = () => {
+    const t = state.active;
+    if (!t) return;
+    const url = location.origin + location.pathname + "?token=" + encodeURIComponent(t.id);
+    const done = () => { state.toast = "Link copied"; render(); };
+    if (navigator.share) navigator.share({ title: t.symbol || "Token", url }).catch(() => {});
+    else navigator.clipboard.writeText(url).then(done).catch(() => {});
+  };
+  const star = $("#star");
+  if (star) star.onclick = () => {
+    const t = state.active;
+    if (!t) return;
+    toggleStar(t.id);
+    render();
+  };
   document.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
   const info = $("#info");
   if (info) info.onclick = (e) => { e.stopPropagation(); state.infoOpen = true; openSheet(); };
+  const rcBadge = $("#rc-badge");
+  if (rcBadge) rcBadge.onclick = (e) => { e.stopPropagation(); state.infoOpen = true; openSheet(); };
   document.querySelectorAll("[data-sell]").forEach((b) => b.onclick = async (e) => {
     e.stopPropagation();
     const mint = b.dataset.sell;
     state.side = "sell";
-    state.tab = "trade";
+    if (state.tab === "trade") state.tab = "holders";
     state.sellPct = 100;
     state.view = "spot";
     await loadToken(mint).catch((err) => { state.status = err.message; render(); });
+    document.getElementById("trade-dock")?.scrollIntoView({ block: "nearest" });
   });
   document.querySelectorAll("[data-mint]").forEach((r) => r.onclick = (e) => {
     if (e.target.closest("[data-sell]")) return;
-    state.tab = "trade";
+    state.tab = "holders";
     state.view = "spot";
     loadToken(r.dataset.mint).catch((err) => { state.status = err.message; render(); });
   });
@@ -2413,10 +2518,18 @@ function onStreamPnl(data) {
   }
   if (!changed) return;
   // Balance screens re-render at most twice a second; elsewhere just repaint live numbers.
-  if (state.view === "portfolio" || state.tab === "holdings" || state.tab === "trade") {
+  if (state.view === "portfolio" || state.tab === "holdings") {
     clearTimeout(pnlRenderTimer);
     pnlRenderTimer = setTimeout(() => render(), 500);
-  } else { stream.dirty.live = true; streamFlush(); }
+  } else {
+    const balEl = $("#trade-bal");
+    if (balEl) {
+      const bal = state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
+      if (balEl.textContent !== bal) balEl.textContent = bal;
+    }
+    stream.dirty.live = true;
+    streamFlush();
+  }
 }
 function onStreamUserTrades(list) {
   feedMark("walletTradesStream");
@@ -2584,7 +2697,7 @@ function paintHeadStats() {
   const st = document.querySelectorAll(".stats .v");
   if (!t || st.length < 3) return;
   const s1 = t.stats1h || {};
-  st[0].textContent = usd(state.prices[t.id] || t.usdPrice || 0);
+  st[0].textContent = priceLabel(state.prices[t.id] || t.usdPrice || 0);
   st[1].textContent = usd(t.liquidity || 0);
   st[2].textContent = usd((s1.buyVolume || 0) + (s1.sellVolume || 0));
 }
