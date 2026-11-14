@@ -1061,6 +1061,20 @@ function orderMenu() {
   const opt = (id, label) => `<button type="button" data-otype="${id}" class="${state.orderType === id ? "on" : ""}">${label}</button>`;
   return `<div class="market-menu">${opt("market", "Market")}${opt("msl", "Market + SL")}${opt("trail", "Trailing Stop")}</div>`;
 }
+function placeOrderMenu() {
+  const menu = document.querySelector(".market-menu");
+  const btn = document.getElementById("market");
+  if (!menu || !btn) return;
+  const r = btn.getBoundingClientRect();
+  const w = menu.offsetWidth || 148;
+  const h = menu.offsetHeight || 112;
+  let top = r.top - h - 8;
+  if (top < 8) top = Math.min(r.bottom + 6, window.innerHeight - h - 8);
+  let left = r.right - w;
+  left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+}
 function orderFields() {
   if (state.orderType === "market") return "";
   const p = orderPreview();
@@ -1724,7 +1738,7 @@ function ensureChart() {
       borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4,
       tickMarkFormatter: (time, type) => tickMarkText(time, type)
     },
-    crosshair: { mode: L.CrosshairMode.Normal },
+    crosshair: { mode: L.CrosshairMode.Normal, vertLine: { labelVisible: false } },
     localization: { priceFormatter: fmtAxis, timeFormatter: (time) => tickMarkText(time, (resolvedTf() === "1s" || resolvedTf() === "15s") ? 4 : 3) },
     handleScale: { axisPressedMouseMove: true, pinch: true, mouseWheel: true },
     handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
@@ -1750,12 +1764,14 @@ function ensureChart() {
   tags.className = "pane-tags";
   host.appendChild(tags);
   chart.subscribeCrosshairMove((param) => {
+    chartUi.cross = param;
     const bar = param?.seriesData?.get(candles) || param?.seriesData?.get(line);
     const vol = param?.seriesData?.get(volume);
     paintLegend(bar, vol?.value, param);
     paintPaneTags(param);
+    paintCrosshairTime(param);
   });
-  chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); });
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); paintCrosshairTime(chartUi.cross); });
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
   bindDraw(draw);
   parkLogo();
@@ -1906,6 +1922,48 @@ function paintAxisEdge() {
     right.style.width = "";
   }
   parkLogo();
+}
+
+// The library's crosshair time is painted on the tick canvas, so it slices the
+// tick beside it ("06" left of "06:17:45"). Draw the time ourselves and cover
+// any tick the pill would cut.
+function paintCrosshairTime(param) {
+  const host = chartUi.host;
+  const chart = chartUi.chart;
+  if (!host || !chart) return;
+  let el = host.querySelector(".axis-cross");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "axis-edge axis-cross";
+    host.appendChild(el);
+  }
+  host.querySelectorAll(".axis-cut").forEach((n) => n.remove());
+  const time = param && param.time;
+  const ts = typeof time === "number" ? time : time && time.timestamp;
+  const x = ts != null ? chart.timeScale().timeToCoordinate(ts) : null;
+  const label = x != null ? axisClock(ts) : "";
+  if (!label || !Number.isFinite(x)) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = label;
+  const textW = el.scrollWidth || label.length * 6 + 8;
+  const left = Math.max(0, Math.round(x - textW / 2));
+  el.style.left = left + "px";
+  el.style.width = textW + "px";
+  const right = left + textW;
+  const groups = timeLabelGroups(host) || [];
+  for (const g of groups) {
+    const overlap = Math.min(g[1], right) - Math.max(g[0], left);
+    if (overlap < 4) continue;
+    if (g[0] >= left - 1 && g[1] <= right + 1) continue;
+    const cut = document.createElement("div");
+    cut.className = "axis-cut";
+    const cLeft = Math.max(0, g[0] - 2);
+    cut.style.left = cLeft + "px";
+    cut.style.width = (g[1] + 3 - cLeft) + "px";
+    host.appendChild(cut);
+  }
 }
 
 function paintLegend(bar, vol, param) {
@@ -2672,6 +2730,7 @@ function render() {
     else if (keep) sc.scrollTop = keep;
   }
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
+  if (state.marketOpen) placeOrderMenu();
 }
 
 function tokenAge(iso) {
@@ -3985,6 +4044,8 @@ function bind() {
   };
   const market = $("#market");
   if (market) market.onclick = (e) => { e.stopPropagation(); state.marketOpen = !state.marketOpen; render(); };
+  const scMenu = document.querySelector(".scroll");
+  if (scMenu) scMenu.addEventListener("scroll", () => { if (state.marketOpen) placeOrderMenu(); }, { passive: true });
   document.querySelectorAll("[data-otype]").forEach((b) => b.onclick = (e) => {
     e.stopPropagation();
     state.orderType = b.dataset.otype;
@@ -4070,7 +4131,7 @@ function bind() {
   document.querySelector(".tf-scroll .on")?.scrollIntoView({ inline: "center", block: "nearest" });
   if (chartUi.draw) chartUi.draw.classList.toggle("off", state.tool === "cross");
   const tokenSearch = $("#token-search");
-  if (tokenSearch) tokenSearch.onclick = () => { state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
+  if (tokenSearch) tokenSearch.onclick = () => { state.infoOpen = false; state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
   const share = $("#share");
   if (share) share.onclick = () => {
     const t = state.active;
@@ -4091,9 +4152,9 @@ function bind() {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
   const info = $("#info");
-  if (info) info.onclick = (e) => { e.stopPropagation(); state.infoOpen = true; openSheet(); };
+  if (info) info.onclick = (e) => { e.stopPropagation(); state.searchOpen = false; document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
   const rcBadge = $("#rc-badge");
-  if (rcBadge) rcBadge.onclick = (e) => { e.stopPropagation(); state.infoOpen = true; openSheet(); };
+  if (rcBadge) rcBadge.onclick = (e) => { e.stopPropagation(); state.searchOpen = false; document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
   document.querySelectorAll("[data-sell]").forEach((b) => b.onclick = async (e) => {
     e.stopPropagation();
     const mint = b.dataset.sell;
@@ -4124,7 +4185,7 @@ function bind() {
   const c = $("#connect");
   if (c) c.onclick = () => (state.wallet ? openWalletPicker() : connect());
   const so = $("#search-open");
-  if (so) so.onclick = () => { state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
+  if (so) so.onclick = () => { state.infoOpen = false; state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
   const q = $("#q");
   if (q) {
     q.oninput = () => search(q.value.trim());
