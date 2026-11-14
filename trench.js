@@ -1796,6 +1796,35 @@ function mcSpan() {
   }
   return hi > lo ? (hi - lo) * chartScale() : 0;
 }
+function visibleCandleBounds() {
+  let from = -Infinity, to = Infinity;
+  try {
+    const range = chartUi.chart && chartUi.chart.timeScale().getVisibleRange();
+    if (range) { from = Number(range.from); to = Number(range.to); }
+  } catch (_) {}
+  let hi = -Infinity, lo = Infinity, n = 0;
+  const take = (c) => {
+    const h = Number(c.high), l = Number(c.low);
+    if (h > hi) hi = h;
+    if (l > 0 && l < lo) lo = l;
+    n++;
+  };
+  for (const c of state.candles || []) {
+    const time = Number(c.time);
+    if (time < from || time > to) continue;
+    take(c);
+  }
+  if (!n) for (const c of state.candles || []) take(c);
+  return { hi, lo };
+}
+function mcScaleHigh() {
+  const k = chartScale();
+  const { hi } = visibleCandleBounds();
+  let top = hi > 0 ? hi * k : 0;
+  const px = livePrice(state.active);
+  if (px > 0 && px * k > top) top = px * k;
+  return top;
+}
 // usd() rounds a tight new-coin scale to one label ("2.69K" on every tick).
 function fmtMcTick(v) {
   const a = Math.abs(Number(v));
@@ -1805,18 +1834,39 @@ function fmtMcTick(v) {
   // A 0 there is not a market-cap tick when every candle is far above it.
   let lo = Infinity;
   const k = chartScale();
-  for (const c of state.candles || []) {
-    const l = Number(c.low);
-    if (l > 0 && l * k < lo) lo = l * k;
-  }
+  const bounds = visibleCandleBounds();
+  if (bounds.lo < Infinity) lo = bounds.lo * k;
   if (!(a > 0) || (lo < Infinity && a < lo * 0.5)) return "";
   let unit = 1, suf = "";
   if (a >= 1e9) { unit = 1e9; suf = "B"; }
   else if (a >= 1e6) { unit = 1e6; suf = "M"; }
   else if (a >= 1e3) { unit = 1e3; suf = "K"; }
+  // 800.00 under 1.60K reads as the bigger number. A tick on that scale
+  // shares the K/M/B unit. A MACD value far below the candles does not.
+  const hi = mcScaleHigh();
+  const scaleUnit = hi >= 1e9 ? 1e9 : hi >= 1e6 ? 1e6 : hi >= 1e3 ? 1e3 : 1;
+  const scaleSuf = scaleUnit >= 1e9 ? "B" : scaleUnit >= 1e6 ? "M" : scaleUnit >= 1e3 ? "K" : "";
+  if (a < 1e3 && scaleUnit >= 1e3 && a > hi * 0.05) { unit = scaleUnit; suf = scaleSuf; }
   const step = (mcSpan() || a * 0.01) / 6 / unit;
-  const dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
-  return sign + (a / unit).toFixed(dec) + suf;
+  let dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
+  let text = (a / unit).toFixed(dec);
+  while (dec < 6 && a > 0 && Number(text) === 0) { dec++; text = (a / unit).toFixed(dec); }
+  if (!(Number(text) > 0)) return "";
+  return sign + text + suf;
+}
+// 0.0₆4623 under 0.0₅1246 looks larger. One subscript for the whole price scale.
+function sharedPriceLabel(a) {
+  if (state.chartMode === "mc") return null;
+  const { hi, lo } = visibleCandleBounds();
+  if (!(hi > 0) || !(lo < Infinity) || hi >= 0.01 || a < lo * 0.2 || a > hi * 3) return null;
+  const zeros = Math.max(0, Math.floor(-Math.log10(hi)));
+  if (zeros < 2 || zeros > 9) return null;
+  const scale = 10 ** (zeros + 1);
+  const step = Math.max((hi - lo) / 6 * scale, 0.001);
+  let dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
+  let text = (a * scale).toFixed(dec);
+  while (dec < 6 && Number(text) === 0) { dec++; text = (a * scale).toFixed(dec); }
+  return "0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + text;
 }
 function fmtAxis(v) {
   if (state.scaleMode !== "pct" && v < 0) return "";
@@ -1824,6 +1874,8 @@ function fmtAxis(v) {
   if (state.chartMode === "mc" && chartScale() !== 1) return fmtMcTick(v);
   if (a === 0) return "";
   if (a >= 1) return a >= 1000 ? usd(v).replace("$", "") : v.toFixed(4);
+  const shared = a < 0.01 ? sharedPriceLabel(a) : null;
+  if (shared) return shared;
   const z = Math.floor(-Math.log10(a));
   if (z >= 4) return "0.0" + String.fromCharCode(8320 + Math.min(9, z)) + Math.round(a * 10 ** (z + 4)).toString().slice(0, 4);
   return v.toPrecision(4);
