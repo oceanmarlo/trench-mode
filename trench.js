@@ -3898,7 +3898,7 @@ function solAmt(n) {
   if (m && m[1].length >= 2) return "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
   return a.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
-function pctText(n) {
+function sheetPct(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const v = Number(n);
   if (v === 0) return "0.00%";
@@ -3909,7 +3909,7 @@ function pctText(n) {
 }
 function deltaText(n) {
   if (n == null || !Number.isFinite(Number(n))) return "-";
-  return pctText(n);
+  return sheetPct(n);
 }
 function deltaCls(n) {
   if (n == null || !Number.isFinite(Number(n))) return "v flat";
@@ -4146,7 +4146,7 @@ function paintSheet() {
   });
   root.querySelectorAll("[data-sw]").forEach((el) => {
     const pc = v.wins[el.dataset.sw];
-    const txt = pc == null ? "—" : pctText(pc);
+    const txt = pc == null ? "—" : sheetPct(pc);
     if (el.textContent !== txt) el.textContent = txt;
     el.className = pc == null ? "flat" : cls(pc);
   });
