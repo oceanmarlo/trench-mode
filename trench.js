@@ -6,7 +6,7 @@ const SOL_ICON = "https://static.datapi.jup.ag/token-icons/79a96c7b893fd89951241
 const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
 const SEARCH = "https://api.jup.ag/tokens/v2/search";
-const RPC = window.HELIUS_API_KEY ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(window.HELIUS_API_KEY) : "https://solana-rpc.publicnode.com";
+const RPC = (window.HELIUS_API_KEY && !/[?&]nohelius=1/.test(location.search)) ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(window.HELIUS_API_KEY) : "https://solana-rpc.publicnode.com";
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VeKKdPT7yHdmnMvEGB4ryFHSZH9Ee"];
 const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
 const QUOTE_EVERY_MS = 12000;  // background order refresh
@@ -745,6 +745,19 @@ async function confirmSig(sig) {
   return { status: "Failed", error: "Not confirmed yet, check your wallet", signature: sig };
 }
 
+async function heliusSendSigned(signed) {
+  if (!HKEY || !signed) return null;
+  let tx;
+  try { tx = solanaWeb3.VersionedTransaction.deserialize(signed); }
+  catch (_) { return null; }
+  const need = tx.message.header.numRequiredSignatures;
+  const have = tx.signatures.filter((s) => s.some((b) => b)).length;
+  if (have < need) return null; // Jupiter still has to co-sign; /execute is the only path
+  const sig = await helRpc("sendTransaction", [bytesToB64(signed), { encoding: "base64", skipPreflight: true, maxRetries: 0 }]);
+  if (!sig || typeof sig !== "string") throw new Error("Helius send returned no signature");
+  return confirmSig(sig);
+}
+
 async function trade() {
   if (!state.wallet) return connect();
   if (state.busy) return;
@@ -773,11 +786,18 @@ async function trade() {
       const signed = await w.signTransaction(unsigned);
       state.status = "Sending…";
       paintLive();
-      done = await jup(SWAP + "/execute", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
-      });
+      done = null;
+      if (HKEY) {
+        try { done = await heliusSendSigned(signed); }
+        catch (_) { done = null; }
+      }
+      if (!done) {
+        done = await jup(SWAP + "/execute", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
+        });
+      }
     } else {
       // Wallet only offers signAndSend: OK unless Jupiter must co-sign (gasless/RFQ).
       const need = solanaWeb3.VersionedTransaction.deserialize(unsigned).message.header.numRequiredSignatures;
@@ -1985,7 +2005,7 @@ const PD = (() => {
   const tokenAmount = (b) => u64(b, 64); // SPL token account amount
   return { pools, tokenAmount, b58, u64 };
 })();
-const HKEY = window.HELIUS_API_KEY || "";
+const HKEY = (/[?&]nohelius=1/.test(location.search) ? "" : (window.HELIUS_API_KEY || ""));
 const HRPC = HKEY ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(HKEY) : "";
 const HWS = HKEY ? "wss://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(HKEY) : "";
 const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
@@ -2188,17 +2208,28 @@ document.addEventListener("visibilitychange", () => {
   else if (hel.tracks.length && !hel.ws) heliusConnect();
 });
 
-// Merge rule: Helius accountSubscribe (context.slot) and Jupiter (blockId) are the same
-// Solana slot. The screen keeps whichever price has the newer slot. A slot-less update
-// (trade print, asset blob) is a fallback and must not clobber a live Helius price.
+// Merge rule: Helius accountSubscribe context.slot and Jupiter price blockId are the
+// same Solana slot. The screen keeps whichever of those two is newer. Jupiter stream
+// and the keyed price poll stay as fallbacks. A print with no slot must not clobber
+// a slotted price. With no Helius key, helLive is false and this path is Jupiter-only.
 const priceSlot = {};
+function actionSlot(x) {
+  const direct = Number(x && (x.blockId || x.priceBlockId)) || 0;
+  if (direct > 1e8) return direct;
+  const id = String((x && x.actionId) || "");
+  if (!/^\d{16,}$/.test(id)) return 0;
+  return Number(id.slice(0, id.length - 9)) || 0;
+}
 function notePrice(mint, price, slot, source) {
   if (!mint || !(price > 0)) return false;
   const s = Number(slot) || 0;
   const prev = priceSlot[mint] || 0;
   if (s && prev && s < prev) return false;
-  const helLive = HKEY && hel.tracks.some((t) => t.mint === mint) && hel.lastAt && Date.now() - hel.lastAt < 8000;
-  if (!s && prev && helLive) return false;
+  if (!s && prev) {
+    const fallback = source === "poll" || source === "holdings";
+    const helLive = !!(HKEY && hel.lastAt && Date.now() - hel.lastAt < 8000 && hel.tracks.some((t) => t.mint === mint));
+    if (!fallback || helLive || streamPricesLive()) return false;
+  }
   if (s) priceSlot[mint] = s;
   state.prices[mint] = price;
   if (state.active && state.active.id === mint) hel.shown = { slot: s || prev, source: source || "", at: Date.now() };
@@ -2244,9 +2275,24 @@ window.__helius = () => {
   const l = [...hel.leads].sort((x, y) => x - y);
   const q = (f) => (l.length ? Math.round(l[Math.min(l.length - 1, Math.floor(l.length * f))]) : null);
   return { on: hel.tracks.length > 0, open: hel.open, reason: hel.reason, shown: hel.shown,
+    mint: state.active?.id || "", symbol: state.active?.symbol || "",
+    price: state.active ? (state.prices[state.active.id] || 0) : 0,
     pools: hel.tracks.map((t) => ({ type: t.type, pool: t.pool.slice(0, 6), recentTrades: t.trades, updates: t.n })),
     subs: hel.subs.size, creditsToday: Math.round(helCredits() * 10) / 10, bytesToday: helUsage.b,
     tradeLeadMs: { n: l.length, median: q(0.5), p10: q(0.1), p90: q(0.9), heliusFirstPct: l.length ? Math.round(l.filter((x) => x > 0).length / l.length * 100) : null } };
+};
+window.__priceMerge = () => {
+  const id = state.active?.id;
+  if (!id) return { ok: false, why: "no token" };
+  const set = notePrice(id, 1.23, 500000100, "jup");
+  const older = notePrice(id, 9.99, 500000050, "helius");
+  const newer = notePrice(id, 1.5, 500000200, "helius");
+  const slotless = notePrice(id, 7.77, 0, "trade");
+  const same = notePrice(id, 1.25, 500000200, "jup");
+  return {
+    ok: set === true && older === false && newer === true && slotless === false && same === true && state.prices[id] === 1.25,
+    set, older, newer, slotless, same, shown: state.prices[id]
+  };
 };
 
 const feeds = {};
@@ -2458,7 +2504,7 @@ function onStreamActions(list) {
     state.tape.unshift(x);
     vol += Number(x.usdVolume) || 0;
     heliusNoteJupTx(x.txHash);
-    if (x.usdPrice > 0) notePrice(a.id, x.usdPrice, x.blockId, "trade");
+    if (x.usdPrice > 0) notePrice(a.id, x.usdPrice, actionSlot(x), "trade");
     added++;
   }
   if (!added) return;
@@ -2483,7 +2529,7 @@ function onStreamAssets(list) {
       const fees = a.fees;
       Object.assign(a, t);
       if (fees != null && t.fees == null) a.fees = fees;
-      if (t.usdPrice > 0) notePrice(t.id, t.usdPrice, t.blockId, "asset");
+      if (t.usdPrice > 0) notePrice(t.id, t.usdPrice, t.priceBlockId || t.blockId, "asset");
       if (state.prices[a.id]) a.usdPrice = state.prices[a.id];
       feedMark("tokenStatsStream");
       stream.dirty.live = true;
