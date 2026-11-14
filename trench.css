@@ -151,7 +151,7 @@ button { font: inherit; }
 .al button { width: 22px; height: 16px; border-radius: 3px; border: 0; background: #1c222b; color: #fff; font-weight: 700; font-size: 10px; padding: 0; }
 .al button.on { background: #fff; color: #111; }
 .avg { position: absolute; right: 44px; top: 108px; font-size: 11px; font-weight: 650; color: var(--green); background: #07090ecc; padding: 1px 4px; border-radius: 4px; }
-canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
+canvas.chart { width: 100%; height: 100%; display: block; }
 .chart-label {
   position: absolute; left: 28px; top: 2px; font-size: 11px; font-weight: 650; line-height: 14px;
   white-space: nowrap;
@@ -227,7 +227,24 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
 }
 .nav button.on { color: var(--text); }
 .nav svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.map-tools { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin: 6px 0; }
+.holder-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bubblemaps {
+  flex: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px;
+  color: var(--text); text-decoration: none; font-size: 12px; font-weight: 650;
+}
+.hcols, .hrow {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) 58px 64px; gap: 6px; align-items: center;
+}
+.hcols { color: var(--faint); font-size: 11px; padding: 6px 0 2px; }
+.hrow { font-size: 13px; padding: 8px 0; border-top: 1px solid var(--line); }
+.hrank { color: var(--faint); font-size: 12px; }
+.hwho { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.haddr { color: var(--text); text-decoration: none; font-weight: 650; }
+.htag { flex: none; font-size: 10px; font-weight: 750; border-radius: 6px; padding: 1px 4px; }
+.htag.lp { color: #e6c84a; background: #3a3214; }
+.htag.dev { color: #7ec8ff; background: #142433; }
+.hpct, .hamt { text-align: right; font-variant-numeric: tabular-nums; }
+.hamt { color: var(--muted); }
 .trade-top, .presets, .amt-row { display: flex; align-items: center; gap: 8px; }
 .trade-top { justify-content: space-between; color: var(--text); font-size: 14px; margin-bottom: 10px; }
 .trade-right { display: flex; align-items: center; gap: 8px; }
@@ -300,18 +317,13 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
   border: 1px solid var(--line); border-radius: 12px; padding: 10px 8px; text-align: center; font-size: 12px; color: var(--muted);
 }
 .tile b { display: block; font-size: 16px; margin-bottom: 2px; }
-.map-wrap { height: 280px; position: relative; background: #070b12; border-radius: 12px; overflow: hidden; }
-.map-note {
-  position: absolute; left: 0; right: 0; bottom: 28px; text-align: center; color: #fff; font-size: 16px;
-}
 .filters { display: flex; gap: 3px; overflow: hidden; padding: 8px 0; }
-.filters button, .boost {
+.filters button {
   flex: none;
   border: 0; border-radius: 12px; padding: 6px 5px; background: #1a2028; color: var(--text); font-size: 10px;
   white-space: nowrap;
 }
 .filters button.on { background: #2a3340; }
-.boost { background: var(--pink); color: #fff; font-weight: 800; }
 .holder-stats { font-size: 13px; line-height: 1.7; color: #d5dbe2; }
 .toast {
   position: absolute; left: 16px; right: 16px; top: 78px; z-index: 9;

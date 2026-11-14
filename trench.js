@@ -40,7 +40,8 @@ const state = {
   quote: null,
   quoting: false,
   busy: false,
-  mapReady: false,
+  holdersLoading: false,
+  holdersError: "",
   prices: {},
   samples: [],
   tokens: [],
@@ -201,7 +202,8 @@ async function loadToken(query) {
   state.candles = [];
   state.tape = [];
   state.holders = [];
-  state.mapReady = false;
+  state.holdersLoading = true;
+  state.holdersError = "";
   state.quote = null;
   state.samples = [hit.usdPrice];
   state.status = "Live · Jupiter";
@@ -298,13 +300,19 @@ async function loadTape(force = false) {
 async function loadHolders() {
   const t = state.active;
   if (!t) return;
-  const data = await datapi(`https://datapi.jup.ag/v1/holders/${t.id}?limit=40`);
-  if (state.active !== t) return;
-  state.holders = data.holders || [];
-  state.mapReady = true;
-  if ($("#map")) drawMap();
-  const note = $("#map-note");
-  if (note) note.textContent = "";
+  state.holdersLoading = true;
+  state.holdersError = "";
+  try {
+    const data = await datapi(`https://datapi.jup.ag/v1/holders/${t.id}?limit=40`);
+    if (state.active !== t) return;
+    state.holders = data.holders || [];
+  } catch (_) {
+    if (state.active !== t) return;
+    state.holdersError = "Couldn't load holders.";
+  } finally {
+    if (state.active === t) state.holdersLoading = false;
+  }
+  paintHolders();
 }
 
 let searchTimer = 0;
@@ -1734,57 +1742,66 @@ window.addEventListener("resize", () => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
 
 
-function drawMap() {
-  const c = $("#map");
-  if (!c) return;
-  const dpr = 2;
-  const w = c.clientWidth || 360;
-  const h = c.clientHeight || 280;
-  c.width = w * dpr;
-  c.height = h * dpr;
-  const g = c.getContext("2d");
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.fillStyle = "#070b12";
-  g.fillRect(0, 0, w, h);
-  g.strokeStyle = "rgba(160,180,200,.28)";
-  for (let i = 0; i < 36; i++) {
-    const x = (i * 83) % w;
-    const y = (i * 47) % h;
-    g.beginPath();
-    g.arc(x, y, 5 + (i % 7), 0, 7);
-    g.stroke();
+function shortAddr(a) {
+  if (!a || a.length < 8) return a || "—";
+  return a.slice(0, 4) + "…" + a.slice(-4);
+}
+function holderAmt(n) {
+  const v = Number(n) || 0;
+  const a = Math.abs(v);
+  if (a >= 1e12) return (v / 1e12).toFixed(2) + "T";
+  if (a >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  return qty(v);
+}
+function holderPct(h, token) {
+  const supply = Number(token.circSupply || token.totalSupply || 0);
+  const amt = Number(h.amount);
+  if (!(supply > 0) || !(amt > 0)) return null;
+  return (amt / supply) * 100;
+}
+function holderPctText(p) {
+  if (p == null || !Number.isFinite(p)) return "—";
+  if (p > 0 && p < 0.01) return "<0.01%";
+  return p.toFixed(2) + "%";
+}
+// LP and Dev only when the payload proves it. Rank is not proof.
+function holderMarks(h, token) {
+  const blobs = [];
+  for (const raw of h.tags || []) {
+    if (typeof raw === "string") blobs.push(raw);
+    else if (raw) blobs.push(raw.id || "", raw.name || "");
   }
-  const hs = state.holders.slice(0, 28);
-  if (hs.length) {
-    const maxA = Math.max(...hs.map((h) => h.amount || 0), 1);
-    const pts = hs.map((holder, i) => {
-      const n = [...(holder.address || "x")].reduce((s, ch) => s + ch.charCodeAt(0), 0);
-      return {
-        x: 28 + (n % 15) * ((w - 56) / 15),
-        y: 24 + ((n * 3) % 9) * ((h - 48) / 9),
-        r: 4 + 14 * Math.sqrt((holder.amount || 0) / maxA),
-        i
-      };
-    });
-    const link = (group, color) => {
-      g.strokeStyle = color;
-      g.lineWidth = 1.2;
-      g.beginPath();
-      group.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)));
-      g.stroke();
-    };
-    link(pts.slice(0, 6), "#e6c84a");
-    link(pts.slice(6, 12), "#3DDC84");
-    pts.forEach((p) => {
-      g.fillStyle = p.i < 6 ? "#e6c84a" : p.i < 12 ? "#3DDC84" : "rgba(160,180,200,.35)";
-      g.globalAlpha = p.i < 12 ? 0.95 : 0.55;
-      g.beginPath();
-      g.arc(p.x, p.y, p.r, 0, 7);
-      g.fill();
-      g.globalAlpha = 1;
-    });
-    return;
+  for (const raw of h.holderTags || []) blobs.push(String(raw));
+  const pool = typeof token.graduatedPool === "string" ? token.graduatedPool : "";
+  const lp = (pool && h.address === pool) || blobs.some((s) => {
+    const v = String(s).toLowerCase();
+    return v === "pool" || v === "lp" || v.includes("liquidity pool");
+  });
+  const dev = (token.dev && h.address === token.dev) || blobs.some((s) => /^dev(eloper)?$/i.test(String(s)));
+  return [lp ? "LP" : "", dev ? "Dev" : ""].filter(Boolean);
+}
+function holderRows() {
+  const t = state.active || {};
+  if (!state.holders.length) {
+    const msg = state.holdersError || (state.holdersLoading ? "Loading holders…" : "No holders yet.");
+    return `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
   }
+  return state.holders.slice(0, 40).map((h, i) => {
+    const addr = h.address || "";
+    const tags = holderMarks(h, t).map((tag) => `<span class="htag ${tag === "LP" ? "lp" : "dev"}">${tag}</span>`).join("");
+    const who = addr
+      ? `<a class="haddr" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" data-copy="${esc(addr)}">${esc(shortAddr(addr))}</a>${tags}`
+      : `<span class="haddr">—</span>`;
+    return `<div class="hrow"><span class="hrank">${i + 1}</span><span class="hwho">${who}</span><span class="hpct">${holderPctText(holderPct(h, t))}</span><span class="hamt">${holderAmt(h.amount)}</span></div>`;
+  }).join("");
+}
+function paintHolders() {
+  const box = $("#holder-list");
+  if (!box || state.view !== "spot" || state.tab !== "holders") return;
+  box.innerHTML = holderRows();
+  box.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
+    navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
+  });
 }
 
 function stat(win) {
@@ -1831,7 +1848,6 @@ function render() {
   if (state.view === "alpha") bindAlpha();
   if (state.infoOpen) openSheet(); else if (document.getElementById("sheet-root")) closeSheet();
   drawChart();
-  if (state.view === "spot" && state.tab === "holders") drawMap();
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
 }
 
@@ -2441,15 +2457,16 @@ function holdersPanel() {
   const t = state.active || {};
   const audit = t.audit || {};
   const top = audit.topHoldersPercentage;
-  return `<div class="holder-stats">
-      <div>Holders: ${(t.holderCount || 0).toLocaleString()} &nbsp; Top 10 holders: <span class="down">${top != null ? top.toFixed(2) + "%" : "—"}</span></div>
+  const mint = t.id || "";
+  const bubble = mint
+    ? `<a class="bubblemaps" href="https://app.bubblemaps.io/sol/token/${esc(mint)}" target="_blank" rel="noopener noreferrer">Bubblemaps</a>`
+    : "";
+  return `<div class="holder-stats holder-head">
+      <div>Holders: ${(t.holderCount || 0).toLocaleString()} &nbsp; Top 10: <span class="down">${top != null ? top.toFixed(2) + "%" : "—"}</span></div>
+      ${bubble}
     </div>
-    <div class="filters">
-      ${["All","Dev","Followed","Sniper","Insider"].map((f,i)=>`<button class="${i===0?"on":""}">${f}</button>`).join("")}
-      <button class="boost">⚡ BOOST</button>
-    </div>
-    <div class="map-tools"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="">` : "●"}</span><span>just now</span></div>
-    <div class="map-wrap"><canvas class="map" id="map"></canvas><div class="map-note" id="map-note">${state.mapReady ? "" : "Enhancing map…"}</div></div>`;
+    <div class="hcols"><span>#</span><span>Address</span><span>Supply</span><span>Amount</span></div>
+    <div id="holder-list">${holderRows()}</div>`;
 }
 
 // ---- Token Info sheet: a persistent overlay outside #app, so re-renders never touch it ----
