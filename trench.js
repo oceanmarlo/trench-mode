@@ -1901,12 +1901,32 @@ function sharedPriceLabel(a) {
   while (dec < 6 && Number(text) === 0) { dec++; text = (a * scale).toFixed(dec); }
   return "0.0" + String(zeros).replace(/\d/g, (d) => SUB[d]) + text;
 }
+// A $72 scale printed 75.0000 and a pill of 71.9629 beside the header's $71.98.
+function fmtDollarTick(v) {
+  const a = Math.abs(Number(v));
+  if (!(a > 0)) return "";
+  if (a >= 1000) return usd(v).replace("$", "");
+  const { hi, lo } = visibleCandleBounds();
+  const span = hi > lo ? hi - lo : 0;
+  const step = span > 0 ? span / 6 : 1;
+  let dec = 2;
+  if (step < 0.005) dec = 4;
+  else if (step < 0.05) dec = 3;
+  let text = a.toFixed(dec);
+  if (dec > 2) {
+    text = text.replace(/0+$/, "");
+    const frac = text.split(".")[1] || "";
+    if (frac.length < 2) text += "0".repeat(2 - frac.length);
+  }
+  return (v < 0 ? "-" : "") + text;
+}
 function fmtAxis(v) {
   if (state.scaleMode !== "pct" && v < 0) return "";
   const a = Math.abs(v);
   if (state.chartMode === "mc" && chartScale() !== 1) return fmtMcTick(v);
   if (a === 0) return "";
-  if (a >= 1) return a >= 1000 ? usd(v).replace("$", "") : v.toFixed(4);
+  if (a >= 1 && state.scaleMode !== "pct") return fmtDollarTick(v);
+  if (a >= 1) return v.toFixed(2);
   const shared = a < 0.01 ? sharedPriceLabel(a) : null;
   if (shared) return shared;
   const z = Math.floor(-Math.log10(a));
@@ -3650,6 +3670,21 @@ function alphaRowsHtml() {
   }).join("");
 }
 
+function lpBadgeNum(lp) {
+  if (lp == null || !Number.isFinite(Number(lp))) return "?";
+  const v = Number(lp);
+  const a = Math.abs(v);
+  if (!(a > 0)) return "0";
+  if (a < 0.05) return "<0.1";
+  if (a < 10) return v.toFixed(1).replace(/\.0$/, "");
+  // 99.9 and 99.96 must not print as 100. A real 100 stays 100.
+  if (a < 100 && Math.abs(Number(v.toFixed(0))) >= 100) {
+    let d = 1;
+    while (d < 4 && Math.abs(Number(v.toFixed(d))) >= 100) d++;
+    return v.toFixed(d).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return String(Math.round(v));
+}
 function lpBadge(mint) {
   const r = rcGet(mint);
   if (!r) return rc.queued.has(mint) ? `<i class="b wait" title="Checking RugCheck">LP…</i>` : "";
@@ -3657,7 +3692,7 @@ function lpBadge(mint) {
   const lp = r.lp;
   const lpCls = lp == null ? "wait" : lp >= 90 ? "ok" : lp >= 50 ? "mid" : "bad";
   const tip = `LP locked/burned ${lp == null ? "unknown" : lp.toFixed(1) + "%"} · RugCheck ${r.score ?? "?"}${r.risks?.length ? " · " + r.risks.map((x) => x.name).join(", ") : ""}`;
-  return `<i class="b ${lpCls}" title="${esc(tip)}">LP${lp == null ? "?" : Math.round(lp)}</i><i class="b ${r.level === "danger" ? "bad" : r.level === "warn" ? "mid" : "ok"}" title="${esc(tip)}">RC${r.score ?? "?"}</i>`;
+  return `<i class="b ${lpCls}" title="${esc(tip)}">LP${lpBadgeNum(lp)}</i><i class="b ${r.level === "danger" ? "bad" : r.level === "warn" ? "mid" : "ok"}" title="${esc(tip)}">RC${r.score ?? "?"}</i>`;
 }
 
 function paintAlphaList() {
