@@ -1989,6 +1989,9 @@ function ensureChart() {
   const tags = document.createElement("div");
   tags.className = "pane-tags";
   host.appendChild(tags);
+  if (chartUi.tagObs) chartUi.tagObs.disconnect();
+  chartUi.tagObs = new ResizeObserver(() => schedulePaneTags());
+  chartUi.tagObs.observe(host);
   chart.subscribeCrosshairMove((param) => {
     chartUi.cross = param;
     const bar = param?.seriesData?.get(candles) || param?.seriesData?.get(line);
@@ -2499,12 +2502,19 @@ function ensurePaneRoom() {
   const wrap = $("#chart-wrap");
   if (wrap) wrap.style.height = need + "px";
 }
+function schedulePaneTags() {
+  if (chartUi.tagFrame) cancelAnimationFrame(chartUi.tagFrame);
+  chartUi.tagFrame = requestAnimationFrame(() => paintPaneTags(chartUi.cross));
+  clearTimeout(chartUi.tagTimer);
+  chartUi.tagTimer = setTimeout(() => paintPaneTags(chartUi.cross), 60);
+}
 function applyPaneHeights() {
   if (!chartUi.chart) return;
   const panes = chartUi.chart.panes();
   for (let i = 1; i < panes.length; i++) {
     try { panes[i].setHeight(68); } catch (_) {}
   }
+  schedulePaneTags();
 }
 function paintPaneTags(param) {
   const box = chartUi.tags;
@@ -2583,7 +2593,7 @@ function buildIndSeries() {
   }
   chartUi.volume.applyOptions({ visible: want.has("vol") });
   chartUi.indLayout = indLayout();
-  requestAnimationFrame(() => { applyPaneHeights(); paintPaneTags(); });
+  requestAnimationFrame(() => applyPaneHeights());
 }
 function fillIndicators(full) {
   if (!chartUi.chart) return;
