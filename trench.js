@@ -2,6 +2,20 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const app = $("#app");
 const SOL = "So11111111111111111111111111111111111111112";
 const SOL_ICON = "https://static.datapi.jup.ag/token-icons/79a96c7b893fd899512411dd07a8adf6f9e26dd135989f51d46ddb50f0b8bb6c.webp";
+// ipfs.io sends Cross-Origin-Resource-Policy: same-origin, so the phone blocks the image.
+function iconUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw || raw.startsWith("data:") || /gateway\.pinata\.cloud\/ipfs\//i.test(raw)) return raw;
+  let cid = "";
+  const path = raw.match(/\/ipfs\/([A-Za-z0-9]+)/i);
+  if (path) cid = path[1];
+  else if (/^ipfs:\/\//i.test(raw)) cid = raw.replace(/^ipfs:\/\//i, "").split(/[/?#]/)[0];
+  else {
+    const sub = raw.match(/^https?:\/\/([a-z0-9]{46,})\.ipfs\./i);
+    if (sub) cid = sub[1];
+  }
+  return cid ? "https://gateway.pinata.cloud/ipfs/" + cid : raw;
+}
 // Swap API V2 (/order + /execute). Same request/response shape as Ultra v1, which Jupiter no longer maintains.
 const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
@@ -1792,18 +1806,32 @@ function timePaneWidth(host) {
   }
   return w || host.querySelector("canvas")?.clientWidth || 0;
 }
-function nextOnscreenX(chart, range) {
-  if (!chart || !range) return null;
-  const from = Number(range.from);
-  let best = null;
-  for (const c of state.candles) {
-    const t = Number(c.time);
-    if (!(t > from)) continue;
-    const cx = chart.timeScale().timeToCoordinate(c.time);
-    if (cx == null || cx < 6) continue;
-    if (best == null || cx < best) best = cx;
+function timeLabelGroups(host) {
+  const canvas = [...host.querySelectorAll("canvas")].find((c) => c.clientHeight > 8 && c.clientHeight < 48 && c.clientWidth > 80);
+  if (!canvas) return null;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  let img;
+  try { img = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch (_) { return null; }
+  const d = img.data;
+  const scale = canvas.clientWidth / canvas.width;
+  const xs = [];
+  for (let x = 0; x < canvas.width; x++) {
+    let ink = 0;
+    for (let y = 0; y < canvas.height; y++) {
+      const i = (y * canvas.width + x) * 4;
+      if (d[i] + d[i + 1] + d[i + 2] > 180) ink++;
+    }
+    if (ink > 2) xs.push(x * scale);
   }
-  return best;
+  if (!xs.length) return [];
+  const groups = [[xs[0], xs[0]]];
+  for (const x of xs) {
+    const g = groups[groups.length - 1];
+    if (x - g[1] > 12) groups.push([x, x]);
+    else g[1] = x;
+  }
+  return groups;
 }
 function paintAxisEdge() {
   const host = chartUi.host;
@@ -1816,21 +1844,32 @@ function paintAxisEdge() {
     host.appendChild(bar);
   }
   const range = chart.timeScale().getVisibleRange();
-  const x = range ? chart.timeScale().timeToCoordinate(range.from) : null;
   const toX = range ? chart.timeScale().timeToCoordinate(range.to) : null;
   const paneW = timePaneWidth(host);
   const rightClipped = toX != null && paneW && toX > paneW - 28;
-  const clipped = x != null && x < 2;
-  // Only cover a start tick that is actually off the left edge, and never paint over the next visible tick.
-  let show = !!(range && clipped && !(rightClipped && range.from === range.to));
-  bar.textContent = show ? axisClock(range.from) : "";
-  if (show) {
-    const next = nextOnscreenX(chart, range);
-    const w = bar.scrollWidth || (bar.textContent.length * 6 + 8);
-    if (next != null && next < w + 6) bar.textContent = "";
-    else if (next != null) bar.style.maxWidth = Math.max(28, next - 4) + "px";
-    else bar.style.maxWidth = "";
-  } else bar.style.maxWidth = "";
+  const label = range ? axisClock(range.from) : "";
+  bar.textContent = label;
+  bar.style.maxWidth = "";
+  const textW = label ? (bar.scrollWidth || label.length * 6 + 6) : 0;
+  // Native ticks are painted on the time canvas. Only cover a label that actually starts off the left edge,
+  // and never stop in the middle of the next one ("04:00:45" must not become ":45").
+  const groups = timeLabelGroups(host);
+  const sliced = groups && groups.length && groups[0][0] <= 6;
+  let show = false;
+  let cover = 0;
+  if (sliced && label && textW && !(rightClipped && range.from === range.to)) {
+    let end = groups[0][1];
+    let i = 1;
+    while (i < groups.length && textW > groups[i][0] - 4) {
+      end = groups[i][1];
+      i++;
+    }
+    const room = i < groups.length ? groups[i][0] - 4 : 90;
+    cover = Math.max(textW, end + 3);
+    show = cover <= room + 1;
+  }
+  bar.textContent = show ? label : "";
+  bar.style.maxWidth = show ? cover + "px" : "";
   let right = host.querySelector(".axis-edge-r");
   if (!right) {
     right = document.createElement("div");
@@ -1838,13 +1877,26 @@ function paintAxisEdge() {
     host.appendChild(right);
   }
   right.textContent = range && rightClipped ? axisClock(range.to) : "";
-  // Cover the clipped native tick. Measure the label itself — scrollWidth of an already-widened box grows every tick.
+  // Cover the clipped native tick, and swallow any label the cover would otherwise cut in half.
   if (right.textContent && paneW) {
     right.style.right = "auto";
     right.style.width = "auto";
     const textW = right.scrollWidth || 46;
-    // Wide enough to swallow the next tick too. A short cover bisects that label into junk like "0|".
-    const cover = Math.min(140, Math.max(textW + 64, 108));
+    let cover = Math.max(textW + 8, 72);
+    if (groups && groups.length) {
+      let i = groups.length - 1;
+      cover = Math.max(cover, paneW - groups[i][0] + 4);
+      while (i > 0) {
+        const prev = groups[i - 1];
+        const coverLeft = paneW - cover;
+        if (coverLeft < prev[1] + 2) {
+          i--;
+          cover = Math.max(cover, paneW - groups[i][0] + 4);
+        } else break;
+      }
+      const earlier = i > 0 ? groups[i - 1][1] + 6 : 0;
+      cover = Math.min(160, cover, paneW - earlier);
+    } else cover = Math.min(160, cover);
     right.style.width = cover + "px";
     right.style.left = Math.max(0, paneW - cover) + "px";
   } else {
@@ -2674,7 +2726,7 @@ function tokenHead(t, price, chg) {
   const short = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : "";
   const starred = isStarred(mint);
   return `<div class="token-head">
-      <div class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" width="42" height="42">` : "●"}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
+      <div class="tok-av">${t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="" width="42" height="42">` : "●"}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
       <div class="tok-name">
         <div class="sym">${esc(t.symbol)} <span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
         <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
@@ -2731,7 +2783,7 @@ function holdingsPanel() {
       ? `<b>—</b><span>—</span>`
       : `<b class="${cls(value - h.ui * entry)}">${signed(value - h.ui * entry)}</b><span class="${cls(((price - entry) / entry) * 100)}">${price >= entry ? "▲" : "▼"} ${Math.abs(((price - entry) / entry) * 100).toFixed(2)}%</span>`;
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(h.icon)}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
+      <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(iconUrl(h.icon))}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
@@ -3143,7 +3195,7 @@ function alphaRowsHtml() {
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${alphaLiqState(t)}">
-      <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
+      <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="" loading="lazy">` : "●"}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : "Hld " + compactCount(x.holders)}</span></span>
@@ -3466,7 +3518,7 @@ function quoteSummary() {
   const outUsd = Number.isFinite(qUsd) ? qUsd : (state.side === "buy" ? outUi * tokPx : outUi * solPx);
   const inUsd = Number.isFinite(inQuote) ? inQuote : (state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx);
   const pct = inUsd ? ((outUsd - inUsd) / inUsd) * 100 : 0;
-  const icon = state.side === "buy" ? (t.icon ? `<img src="${esc(t.icon)}" alt="">` : "●") : `<img src="${SOL_ICON}" alt="">`;
+  const icon = state.side === "buy" ? (t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="">` : "●") : `<img src="${SOL_ICON}" alt="">`;
   const more = quoteBits(state.quote).line
     ? `<button type="button" id="est-more" aria-label="Route details" aria-expanded="${state.quoteOpen}"><span class="chev">${state.quoteOpen ? "⌄" : "›"}</span></button>`
     : "";
@@ -3476,7 +3528,7 @@ function tradePanel() {
   const t = state.active;
   if (!t) return "";
   const bal = state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
-  const balIcon = state.side === "buy" ? SOL_ICON : t.icon;
+  const balIcon = iconUrl(state.side === "buy" ? SOL_ICON : t.icon);
   const label = goLabel();
   const engine = state.orderType === "market" ? "Jupiter Swap" : "Jupiter Trigger";
   return `<div class="trade-top">
