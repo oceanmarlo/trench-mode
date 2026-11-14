@@ -6,7 +6,7 @@ const SOL_ICON = "https://static.datapi.jup.ag/token-icons/79a96c7b893fd89951241
 const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
 const SEARCH = "https://api.jup.ag/tokens/v2/search";
-const RPC = "https://solana-rpc.publicnode.com";
+const RPC = window.HELIUS_API_KEY ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(window.HELIUS_API_KEY) : "https://solana-rpc.publicnode.com";
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VeKKdPT7yHdmnMvEGB4ryFHSZH9Ee"];
 const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
 const QUOTE_EVERY_MS = 12000;  // background order refresh
@@ -195,6 +195,7 @@ async function loadToken(query) {
   state.samples = [hit.usdPrice];
   state.status = "Live · Jupiter";
   render();
+  heliusTrack(hit);
   datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(hit.id)).then((extra) => {
     const row = (extra || []).find((t) => t.id === hit.id);
     if (row && row.fees != null && state.active === hit) { hit.fees = row.fees; render(); }
@@ -324,7 +325,7 @@ async function pollPrices(force = false) {
   for (let i = 0; i < all.length; i += 50) {
     const data = await jup(PRICE + "?ids=" + all.slice(i, i + 50).join(","));
     for (const [mint, row] of Object.entries(data || {})) {
-      if (row?.usdPrice) state.prices[mint] = row.usdPrice;
+      if (row?.usdPrice) notePrice(mint, row.usdPrice, row.blockId, "poll");
     }
   }
   if (state.active && state.prices[state.active.id]) {
@@ -408,7 +409,7 @@ async function loadHoldings() {
     for (let i = 0; i < ids.length; i += 50) {
       try {
         const data = await jup(PRICE + "?ids=" + ids.slice(i, i + 50).join(","));
-        for (const [m, r] of Object.entries(data || {})) if (r?.usdPrice) state.prices[m] = r.usdPrice;
+        for (const [m, r] of Object.entries(data || {})) if (r?.usdPrice) notePrice(m, r.usdPrice, r.blockId, "holdings");
       } catch (_) {}
     }
     rows = rows.map((h) => ({ h, v: h.ui * (state.prices[h.mint] || 0) })).sort((x, y) => y.v - x.v).slice(0, MAX_TRACKED).map((x) => x.h);
@@ -1938,6 +1939,316 @@ const stream = {
   sent: { prices: new Set(), txns: new Set(), assets: new Set(), pnl: new Set(), "user-trades": new Set(), recent: false },
   dirty: { live: false, tape: false, alpha: false }, raf: 0, alphaAt: 0
 };
+
+// ---- Helius: pool-account pushes (processed) for the open token's main pool ----
+// Pool decoders: Uint8Array account data -> what we need. Shared by node test + trench.js.
+const PD = (() => {
+  const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  function b58(bytes) {
+    const d = [0];
+    for (const byte of bytes) { let c = byte; for (let j = 0; j < d.length; j++) { c += d[j] << 8; d[j] = c % 58; c = (c / 58) | 0; } while (c) { d.push(c % 58); c = (c / 58) | 0; } }
+    let s = ""; for (const byte of bytes) { if (byte) break; s += "1"; }
+    for (let i = d.length - 1; i >= 0; i--) s += B58[d[i]];
+    return s;
+  }
+  const u64 = (b, o) => { let v = 0n; for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(b[o + i]); return v; };
+  const u128 = (b, o) => (u64(b, o + 8) << 64n) | u64(b, o);
+  const u16 = (b, o) => b[o] | (b[o + 1] << 8);
+  const i32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24));
+  const i128 = (b, o) => { const v = u128(b, o); return v >= (1n << 127n) ? v - (1n << 128n) : v; };
+  const pk = (b, o) => b58(b.subarray(o, o + 32));
+  const sqrtToPrice = (sq) => { const x = Number(sq) / 2 ** 64; return x * x; }; // token1 per token0, raw units
+  // Each returns { mintA, mintB, vaults?:[vA,vB], raw?: () => price of A in B (raw units) }
+  const pools = {
+    // pump.fun bonding curve: virtual reserves in the account; quote is always SOL
+    // (datapi gives the mint as the pool id; the account is PDA ["bonding-curve", mint] of the pump program)
+    "pumpfun": (b) => ({ curve: true, vTok: u64(b, 8), vSol: u64(b, 16), complete: !!b[48], quoteMint: b.length >= 115 ? pk(b, 83) : null }),
+    // PumpSwap: reserves live in the two vault token accounts
+    // effective quote = quote vault + virtual_quote_reserves (signed i128; fees kept in the vault are netted out)
+    "pumpfun-amm": (b) => ({ mintA: pk(b, 43), mintB: pk(b, 75), vaults: [pk(b, 139), pk(b, 171)], adj: [0n, b.length >= 261 ? i128(b, 245) : 0n] }),
+    // Raydium AMM v4
+    "raydium": (b) => ({ mintA: pk(b, 400), mintB: pk(b, 432), vaults: [pk(b, 336), pk(b, 368)] }),
+    // Raydium CPMM
+    // vaults also hold protocol, fund and creator fees: subtract them
+    "raydium-cp-swaps": (b) => {
+      const cr = b.length >= 413;
+      return { mintA: pk(b, 168), mintB: pk(b, 200), vaults: [pk(b, 72), pk(b, 104)],
+        adj: [-(u64(b, 341) + u64(b, 357) + (cr ? u64(b, 397) : 0n)), -(u64(b, 349) + u64(b, 365) + (cr ? u64(b, 405) : 0n))] };
+    },
+    // Raydium CLMM: sqrtPriceX64 of token1 per token0
+    "raydium-clmm": (b) => ({ mintA: pk(b, 73), mintB: pk(b, 105), decA: b[233], decB: b[234], ratio: sqrtToPrice(u128(b, 253)) }),
+    // Orca Whirlpool
+    "orca-whirlpool": (b) => ({ mintA: pk(b, 101), mintB: pk(b, 181), ratio: sqrtToPrice(u128(b, 65)) }),
+    // Meteora DLMM: price per bin = (1 + binStep/1e4)^activeId (Y per X, raw)
+    "meteora-dlmm": (b) => ({ mintA: pk(b, 88), mintB: pk(b, 120), ratio: Math.pow(1 + u16(b, 80) / 10000, i32(b, 76)) }),
+  };
+  const tokenAmount = (b) => u64(b, 64); // SPL token account amount
+  return { pools, tokenAmount, b58, u64 };
+})();
+const HKEY = window.HELIUS_API_KEY || "";
+const HRPC = HKEY ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(HKEY) : "";
+const HWS = HKEY ? "wss://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(HKEY) : "";
+const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const USD_QUOTES = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 6, Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: 6 };
+const HEL_POOLS = 2;               // follow the 2 busiest pools of the open token (<= 6 account subs)
+const HEL_DAY_CREDITS = 20000;     // websocket: 2 credits / 0.1 MB -> <= 1 GB/day, far inside 1M/month
+const HEL_TEST = /[?&]heltest=1/.test(location.search); // adds a logsSubscribe to measure per-trade lead
+const hel = { ws: null, open: false, backoff: 1000, reqId: 1, req: new Map(), subs: new Map(), tracks: [], seq: 0,
+  lastAt: 0, jupPx: 0, jupSlot: 0, shown: null, reason: HKEY ? "" : "no key", rpcAt: 0, hiddenAt: 0, helSig: new Map(), jupSig: new Map(), leads: [] };
+const helToday = () => new Date().toISOString().slice(0, 10);
+const helUsage = (() => { try { const u = JSON.parse(localStorage.getItem("trench-helius") || "{}"); return u.d === helToday() ? u : { d: helToday(), b: 0 }; } catch (_) { return { d: helToday(), b: 0 }; } })();
+function helCredits() { if (helUsage.d !== helToday()) { helUsage.d = helToday(); helUsage.b = 0; } return helUsage.b / 1e5 * 2; }
+setInterval(() => { try { localStorage.setItem("trench-helius", JSON.stringify(helUsage)); } catch (_) {} }, 10000);
+
+// Helius RPC, serialized at <= 5 RPS (free plan allows 10).
+let helRpcChain = Promise.resolve();
+function helRpc(method, params) {
+  const run = async () => {
+    const wait = hel.rpcAt + 200 - Date.now();
+    if (wait > 0) await sleep(wait);
+    hel.rpcAt = Date.now();
+    const r = await fetch(HRPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error.message || "Helius RPC error");
+    return d.result;
+  };
+  const p = helRpcChain.then(run, run);
+  helRpcChain = p.catch(() => {});
+  return p;
+}
+const b64bytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+const POOL_PROGRAMS = {
+  pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA: "pumpfun-amm",
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "pumpfun",
+  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "raydium",
+  CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C: "raydium-cp-swaps",
+  CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK: "raydium-clmm",
+  whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc: "orca-whirlpool",
+  LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo: "meteora-dlmm"
+};
+function curvePda(mint) {
+  return solanaWeb3.PublicKey.findProgramAddressSync([new TextEncoder().encode("bonding-curve"), new solanaWeb3.PublicKey(mint).toBytes()], new solanaWeb3.PublicKey(PUMP_PROGRAM))[0].toBase58();
+}
+// Price moves first where people trade (routes spread over pools): rank pools by trade
+// count in the token's last 100 swaps (keyless datapi), not by liquidity.
+async function heliusCandidates(token) {
+  const counts = new Map();
+  try {
+    const tx = await datapi("https://datapi.jup.ag/v1/txs/" + token.id + "?limit=100");
+    for (const x of tx?.txs || []) if (x.poolId) counts.set(x.poolId, (counts.get(x.poolId) || 0) + 1);
+  } catch (_) {}
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id).slice(0, 6);
+  // Busiest pools can be prop AMMs we can't decode: Jupiter's main pool is the fallback.
+  const d = await datapi("https://datapi.jup.ag/v1/pools?assetIds=" + token.id).catch(() => null);
+  const main = (d?.pools || []).find((p) => p.baseAsset?.id === token.id);
+  if (main && !ranked.includes(main.id)) ranked.push(main.id);
+  return { ranked, counts };
+}
+async function heliusTrack(token, keep = false) {
+  const seq = ++hel.seq;
+  if (!keep) { heliusUnsubAll(); hel.tracks = []; hel.lastAt = 0; hel.jupPx = 0; hel.jupSlot = 0; hel.helSig.clear(); hel.jupSig.clear(); }
+  if (!HKEY || !token) return;
+  if (helCredits() >= HEL_DAY_CREDITS) { hel.reason = "daily credit cap reached"; return; }
+  try {
+    const { ranked, counts } = await heliusCandidates(token);
+    if (seq !== hel.seq) return;
+    if (!ranked.length) { hel.reason = "no pool"; return; }
+    const accts = ranked.map((id) => (id === token.id ? curvePda(token.id) : id));
+    const info = await helRpc("getMultipleAccounts", [accts, { encoding: "base64", commitment: "processed" }]);
+    if (seq !== hel.seq) return;
+    const picked = [];
+    for (let i = 0; i < accts.length && picked.length < HEL_POOLS; i++) {
+      const v = info.value[i];
+      const type = v && POOL_PROGRAMS[v.owner];
+      if (!type) continue;
+      const t = await heliusBuild(token, type, accts[i], b64bytes(v.data[0]), seq);
+      if (seq !== hel.seq) return;
+      if (t) { t.trades = counts.get(ranked[i]) || 0; picked.push(t); }
+    }
+    if (!picked.length) { if (!keep) hel.reason = "no decodable pool among the active ones"; return; }
+    if (keep && picked.map((t) => t.pool).join() === hel.tracks.map((t) => t.pool).join()) return;
+    heliusUnsubAll();
+    hel.tracks = picked; hel.reason = "";
+    heliusConnect();
+    heliusSubAll();
+  } catch (e) {
+    if (seq === hel.seq && !keep) hel.reason = "setup failed: " + (e.message || e);
+  }
+}
+async function heliusBuild(token, type, acct, poolBytes, seq) {
+  const spec = PD.pools[type](poolBytes);
+  const t = { mint: token.id, type, pool: acct, dec: token.decimals ?? 6, data: { [acct]: poolBytes }, accts: [acct], n: 0, bad: 0, calcT: 0 };
+  if (spec.curve) {
+    if (spec.complete) return null;
+    if (spec.quoteMint && spec.quoteMint !== "11111111111111111111111111111111" && spec.quoteMint !== SOL) return null;
+    t.quote = SOL; t.qdec = 9;
+  } else {
+    if (spec.mintA !== token.id && spec.mintB !== token.id) return null;
+    t.baseIsA = spec.mintA === token.id;
+    t.quote = t.baseIsA ? spec.mintB : spec.mintA;
+    t.qdec = t.quote === SOL ? 9 : USD_QUOTES[t.quote];
+    if (t.qdec == null) return null;
+    if (spec.vaults) {
+      const va = await helRpc("getMultipleAccounts", [spec.vaults, { encoding: "base64", commitment: "processed" }]);
+      if (seq !== hel.seq) return null;
+      spec.vaults.forEach((v, i) => { t.data[v] = b64bytes(va.value[i].data[0]); });
+      t.vaults = spec.vaults;
+      // AMM v4 reserves come from the vaults only; the others also need the pool (fees / virtual reserves).
+      t.accts = type === "raydium" ? spec.vaults.slice() : [acct, ...spec.vaults];
+    }
+  }
+  for (let i = 0; i < 50 && t.quote === SOL && !(state.prices[SOL] > 0); i++) await sleep(100); // first boot: SOL price not in yet
+  const px = helPrice(t);
+  const ref = hel.jupPx || state.prices[token.id];
+  if (!(px > 0)) return null;
+  if (ref > 0 && Math.abs(px / ref - 1) > 0.08) return null; // wrong decode or a stale side pool
+  return t;
+}
+// Follow the flow: re-rank every 2 min while a token is open (1 keyless datapi call + 1-3 RPC calls).
+setInterval(() => { if (HKEY && state.active && !document.hidden && helCredits() < HEL_DAY_CREDITS) heliusTrack(state.active, true); }, 120000);
+
+function helPrice(t) {
+  const spec = PD.pools[t.type](t.data[t.pool]);
+  let baseInQuote;
+  if (spec.curve) baseInQuote = (Number(spec.vSol) / 1e9) / (Number(spec.vTok) / 10 ** t.dec);
+  else {
+    const decA = t.baseIsA ? t.dec : t.qdec, decB = t.baseIsA ? t.qdec : t.dec;
+    let bPerA;
+    if (t.vaults) {
+      const amt = t.vaults.map((v, i) => Number(PD.tokenAmount(t.data[v]) + (spec.adj ? spec.adj[i] : 0n)));
+      bPerA = amt[1] / amt[0];
+    } else bPerA = spec.ratio;
+    const aInB = bPerA * 10 ** (decA - decB);
+    baseInQuote = t.baseIsA ? aInB : 1 / aInB;
+  }
+  const q = t.quote === SOL ? state.prices[SOL] : 1;
+  return q > 0 && isFinite(baseInQuote) ? baseInQuote * q : 0;
+}
+
+function heliusConnect() {
+  if (!HKEY || (hel.ws && hel.ws.readyState <= 1)) return;
+  let ws;
+  try { ws = new WebSocket(HWS); } catch (_) { return; }
+  hel.ws = ws;
+  ws.onopen = () => { hel.open = true; hel.backoff = 1000; heliusSubAll(); };
+  ws.onmessage = (ev) => {
+    helUsage.b += ev.data.length;
+    let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+    if (m.id != null && hel.req.has(m.id)) {
+      const target = hel.req.get(m.id); hel.req.delete(m.id);
+      if (typeof m.result === "number" && target) hel.subs.set(m.result, target);
+      return;
+    }
+    if (m.method === "logsNotification") { heliusNoteSig(m.params?.result?.value?.signature); return; }
+    if (m.method !== "accountNotification") return;
+    const target = hel.subs.get(m.params?.subscription);
+    if (!target || !target.t || !hel.tracks.includes(target.t)) return;
+    const t = target.t;
+    t.data[target.acct] = b64bytes(m.params.result.value.data[0]);
+    t.slot = m.params?.result?.context?.slot || t.slot || 0;
+    // A swap touches pool + both vaults: let them all land before pricing (no half-updated tick).
+    clearTimeout(t.calcT);
+    t.calcT = setTimeout(() => heliusApply(t), t.vaults ? 25 : 0);
+    if (helCredits() >= HEL_DAY_CREDITS) { hel.reason = "daily credit cap reached"; heliusClose(); }
+  };
+  ws.onclose = () => {
+    hel.open = false; hel.subs.clear(); hel.req.clear();
+    if (hel.ws !== ws) return;
+    hel.ws = null;
+    if (!hel.tracks.length || document.hidden || helCredits() >= HEL_DAY_CREDITS) return;
+    setTimeout(heliusConnect, hel.backoff);
+    hel.backoff = Math.min(hel.backoff * 2, 30000);
+  };
+  ws.onerror = () => {};
+}
+function heliusSend(method, params, target) {
+  if (!hel.ws || hel.ws.readyState !== 1) return;
+  const id = hel.reqId++;
+  hel.req.set(id, target || null);
+  hel.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+}
+function heliusSubAll() {
+  if (!hel.tracks.length || !hel.open || hel.subs.size || hel.req.size) return;
+  for (const t of hel.tracks) {
+    for (const a of t.accts) heliusSend("accountSubscribe", [a, { encoding: "base64", commitment: "processed" }], { t, acct: a });
+    if (HEL_TEST) heliusSend("logsSubscribe", [{ mentions: [t.pool] }, { commitment: "processed" }], { t, logs: true });
+  }
+}
+function heliusUnsubAll() {
+  for (const [id, target] of hel.subs) heliusSend(target.logs ? "logsUnsubscribe" : "accountUnsubscribe", [id]);
+  hel.subs.clear();
+}
+function heliusClose() { heliusUnsubAll(); const ws = hel.ws; hel.ws = null; hel.open = false; try { ws?.close(); } catch (_) {} }
+// Idle keepalive (Helius drops silent sockets). Browser WebSocket cannot send ping
+// frames, so a getHealth request every 30 s is the ping. Pause in background tabs.
+setInterval(() => { if (hel.open) heliusSend("getHealth", []); }, 30000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { hel.hiddenAt = Date.now(); setTimeout(() => { if (document.hidden && Date.now() - hel.hiddenAt >= 30000) heliusClose(); }, 30500); }
+  else if (hel.tracks.length && !hel.ws) heliusConnect();
+});
+
+// Merge rule: Helius accountSubscribe (context.slot) and Jupiter (blockId) are the same
+// Solana slot. The screen keeps whichever price has the newer slot. A slot-less update
+// (trade print, asset blob) is a fallback and must not clobber a live Helius price.
+const priceSlot = {};
+function notePrice(mint, price, slot, source) {
+  if (!mint || !(price > 0)) return false;
+  const s = Number(slot) || 0;
+  const prev = priceSlot[mint] || 0;
+  if (s && prev && s < prev) return false;
+  const helLive = HKEY && hel.tracks.some((t) => t.mint === mint) && hel.lastAt && Date.now() - hel.lastAt < 8000;
+  if (!s && prev && helLive) return false;
+  if (s) priceSlot[mint] = s;
+  state.prices[mint] = price;
+  if (state.active && state.active.id === mint) hel.shown = { slot: s || prev, source: source || "", at: Date.now() };
+  return true;
+}
+function heliusApply(t) {
+  try {
+    const a = state.active;
+    if (!a || a.id !== t.mint || !hel.tracks.includes(t)) return;
+    const px = helPrice(t);
+    if (!(px > 0)) return;
+    // Safety net: a decode gone wrong must not drive the UI. Compare with Jupiter's latest.
+    if (hel.jupPx > 0 && Math.abs(px / hel.jupPx - 1) > 0.15) {
+      if (++t.bad >= 5) { hel.tracks = hel.tracks.filter((x) => x !== t); hel.reason = "pool price drifted from Jupiter"; heliusUnsubAll(); hel.subs.clear(); heliusSubAll(); }
+      return;
+    }
+    t.bad = 0; t.n++;
+    hel.lastAt = Date.now();
+    if (!notePrice(a.id, px, t.slot || 0, "helius")) return;
+    a.usdPrice = px;
+    if (a.circSupply) a.mcap = a.circSupply * px;
+    feedMark("heliusPrice");
+    stream.dirty.live = true;
+    streamFlush();
+  } catch (_) { hel.reason = "decode failed"; }
+}
+// Per-trade lead (heltest only): the same signature seen by Helius logs vs Jupiter's txns stream.
+function heliusNoteSig(sig) {
+  if (!sig) return;
+  const now = performance.now();
+  if (hel.jupSig.has(sig)) { hel.leads.push(-(now - hel.jupSig.get(sig))); hel.jupSig.delete(sig); return; }
+  hel.helSig.set(sig, now);
+  if (hel.helSig.size > 500) hel.helSig.delete(hel.helSig.keys().next().value);
+}
+function heliusNoteJupTx(sig) {
+  if (!sig || !HEL_TEST) return;
+  const now = performance.now();
+  if (hel.helSig.has(sig)) { hel.leads.push(now - hel.helSig.get(sig)); hel.helSig.delete(sig); return; }
+  hel.jupSig.set(sig, now);
+  if (hel.jupSig.size > 500) hel.jupSig.delete(hel.jupSig.keys().next().value);
+}
+window.__helius = () => {
+  const l = [...hel.leads].sort((x, y) => x - y);
+  const q = (f) => (l.length ? Math.round(l[Math.min(l.length - 1, Math.floor(l.length * f))]) : null);
+  return { on: hel.tracks.length > 0, open: hel.open, reason: hel.reason, shown: hel.shown,
+    pools: hel.tracks.map((t) => ({ type: t.type, pool: t.pool.slice(0, 6), recentTrades: t.trades, updates: t.n })),
+    subs: hel.subs.size, creditsToday: Math.round(helCredits() * 10) / 10, bytesToday: helUsage.b,
+    tradeLeadMs: { n: l.length, median: q(0.5), p10: q(0.1), p90: q(0.9), heliusFirstPct: l.length ? Math.round(l.filter((x) => x > 0).length / l.length * 100) : null } };
+};
+
 const feeds = {};
 function feedMark(name) {
   const f = feeds[name] || (feeds[name] = { n: 0, last: 0, gaps: [] });
@@ -2118,7 +2429,12 @@ function onStreamPrices(list) {
   const a = state.active;
   for (const p of list) {
     if (!p?.assetId || !(p.price > 0)) continue;
-    state.prices[p.assetId] = p.price;
+    const slot = Number(p.blockId) || 0;
+    if (a && p.assetId === a.id && (!hel.jupSlot || !slot || slot >= hel.jupSlot)) {
+      hel.jupPx = p.price;
+      if (slot) hel.jupSlot = slot;
+    }
+    if (!notePrice(p.assetId, p.price, slot, "jup")) continue;
     if (a && p.assetId === a.id) {
       a.usdPrice = p.price;
       if (a.circSupply) a.mcap = a.circSupply * p.price;
@@ -2141,7 +2457,8 @@ function onStreamActions(list) {
     state.tapeIds.add(id);
     state.tape.unshift(x);
     vol += Number(x.usdVolume) || 0;
-    if (x.usdPrice > 0) state.prices[a.id] = x.usdPrice;
+    heliusNoteJupTx(x.txHash);
+    if (x.usdPrice > 0) notePrice(a.id, x.usdPrice, x.blockId, "trade");
     added++;
   }
   if (!added) return;
@@ -2166,7 +2483,8 @@ function onStreamAssets(list) {
       const fees = a.fees;
       Object.assign(a, t);
       if (fees != null && t.fees == null) a.fees = fees;
-      if (t.usdPrice > 0) state.prices[t.id] = t.usdPrice;
+      if (t.usdPrice > 0) notePrice(t.id, t.usdPrice, t.blockId, "asset");
+      if (state.prices[a.id]) a.usdPrice = state.prices[a.id];
       feedMark("tokenStatsStream");
       stream.dirty.live = true;
     }
