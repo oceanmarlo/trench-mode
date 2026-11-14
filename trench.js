@@ -173,6 +173,22 @@ const moveLabel = (pct) => {
   return (n >= 0 ? "▲ " : "▼ ") + text + "x (24h)";
 };
 const SUB = "₀₁₂₃₄₅₆₇₈₉";
+function livePrice(t) {
+  if (!t) return null;
+  const live = Number(state.prices[t.id]);
+  if (live > 0) return live;
+  const p = Number(t.usdPrice);
+  return p > 0 ? p : null;
+}
+function mcapText(t) {
+  if (!t) return "—";
+  const listed = Number(t.mcap);
+  if (listed > 0) return usd(listed);
+  const px = livePrice(t);
+  const supply = Number(t.circSupply);
+  if (px > 0 && supply > 0) return usd(supply * px);
+  return "—";
+}
 const priceLabel = (n) => {
   const v = Number(n);
   if (!(v > 0)) return v === 0 ? "$0" : "—";
@@ -1517,9 +1533,11 @@ function paintLive() {
   const est = $("#est");
   const stat = $("#status");
   const mc = $("#mc");
-  if (mc && t) {
-    const px = state.prices[t.id] || t.usdPrice || 0;
-    mc.textContent = usd((t.circSupply || 0) * px || t.mcap || 0);
+  if (mc && t) mc.textContent = mcapText(t);
+  const pxEl = $("#stat-px");
+  if (pxEl && t) {
+    const px = livePrice(t);
+    pxEl.textContent = px == null ? "—" : priceLabel(px);
   }
   const feeEl = $("#stat-fees");
   if (feeEl && t) {
@@ -2824,10 +2842,17 @@ function holderAmt(n) {
   return qty(v);
 }
 function holderPct(h, token) {
-  const supply = Number(token.circSupply || token.totalSupply || 0);
   const amt = Number(h.amount);
-  if (!(supply > 0) || !(amt > 0)) return null;
-  return (amt / supply) * 100;
+  if (!(amt > 0)) return null;
+  const total = Number(token.totalSupply);
+  const circ = Number(token.circSupply);
+  // Amounts are shares of total supply. circSupply on a bonding curve is only
+  // the sold float, so amount/circ prints over 100% for the curve escrow.
+  const supply = total > 0 ? total : circ;
+  if (!(supply > 0)) return null;
+  const p = (amt / supply) * 100;
+  if (!(p > 0) || p > 100.05) return null;
+  return p;
 }
 function holderPctText(p) {
   if (p == null || !Number.isFinite(p)) return "—";
@@ -3009,11 +3034,11 @@ function tokenHead(t, price, chg) {
     </div>
     <div class="rc-line" id="rc-line">${rcLineInner(t)}</div>
     <div class="mc-line">
-      <span class="px" id="mc">${usd(t.mcap || (t.circSupply || 0) * price || 0)}</span>
+      <span class="px" id="mc">${mcapText(t)}</span>
       <span class="chg ${t.stats24h?.priceChange == null ? "" : cls(t.stats24h.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
     </div>
     <div class="stats">
-      <div><div class="k">Price</div><div class="v">${priceLabel(price)}</div></div>
+      <div><div class="k">Price</div><div class="v" id="stat-px">${livePrice(t) == null ? "—" : priceLabel(livePrice(t))}</div></div>
       <div><div class="k">Liquidity</div><div class="v">${t.liquidity == null ? "—" : usd(t.liquidity)}</div></div>
       <div><div class="k">1h Vol</div><div class="v">${t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null) ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0)) : "—"}</div></div>
       <div><div class="k">Fees Paid</div><div class="v fee-sol" id="stat-fees">${feeHtml(t.fees)}</div></div>
@@ -3784,16 +3809,21 @@ function quoteSummary() {
   const outUi = ui(state.quote.outAmount, outDec);
   const qUsd = Number(state.quote.outUsdValue);
   const inQuote = Number(state.quote.inUsdValue);
-  const solPx = state.prices[SOL] || 0;
-  const tokPx = state.prices[t.id] || t.usdPrice || 0;
-  const outUsd = Number.isFinite(qUsd) ? qUsd : (state.side === "buy" ? outUi * tokPx : outUi * solPx);
-  const inUsd = Number.isFinite(inQuote) ? inQuote : (state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx);
-  const pct = inUsd ? ((outUsd - inUsd) / inUsd) * 100 : 0;
+  const solPx = Number(state.prices[SOL]) || 0;
+  const tokPx = livePrice(t) || 0;
+  // A missing token price makes Jupiter report $0 out. That is not a -100% fill.
+  let outUsd = qUsd > 0 ? qUsd : 0;
+  if (!(outUsd > 0)) outUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
+  let inUsd = inQuote > 0 ? inQuote : 0;
+  if (!(inUsd > 0)) inUsd = state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx;
+  const pct = outUsd > 0 && inUsd > 0 ? ((outUsd - inUsd) / inUsd) * 100 : null;
   const icon = state.side === "buy" ? (t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="">` : "●") : `<img src="${SOL_ICON}" alt="">`;
   const more = quoteBits(state.quote).line
     ? `<button type="button" id="est-more" aria-label="Route details" aria-expanded="${state.quoteOpen}"><span class="chev">${state.quoteOpen ? "⌄" : "›"}</span></button>`
     : "";
-  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usd(outUsd)}</span> <span class="${cls(pct)}">(${signed(pct)}%)</span>${more}`;
+  const usdBit = outUsd > 0 ? usd(outUsd) : "—";
+  const pctBit = pct == null ? `<span class="est-usd">—</span>` : `<span class="${cls(pct)}">(${signed(pct)}%)</span>`;
+  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usdBit}</span> ${pctBit}${more}`;
 }
 function tradePanel() {
   const t = state.active;
@@ -4047,7 +4077,7 @@ function sheetVals() {
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
-    price: priceLabel(state.prices[t.id] || t.usdPrice), fdv: usd(t.fdv || t.mcap), liq: usd(t.liquidity),
+    price: (() => { const px = livePrice(t); return px == null ? "—" : priceLabel(px); })(), fdv: t.fdv > 0 ? usd(t.fdv) : (t.mcap > 0 ? usd(t.mcap) : "—"), liq: usd(t.liquidity),
     holders: t.holderCount != null ? Number(t.holderCount).toLocaleString() : "—",
     fees: solAmt(t.fees),
     curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
@@ -5130,7 +5160,8 @@ function paintHeadStats() {
   const t = state.active;
   const st = document.querySelectorAll(".stats .v");
   if (!t || st.length < 3) return;
-  st[0].textContent = priceLabel(state.prices[t.id] || t.usdPrice || 0);
+  const px = livePrice(t);
+  st[0].textContent = px == null ? "—" : priceLabel(px);
   st[1].textContent = t.liquidity == null ? "—" : usd(t.liquidity);
   st[2].textContent = t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null)
     ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0))
