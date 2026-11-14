@@ -1127,11 +1127,23 @@ function placeOrderMenu() {
   const w = menu.offsetWidth || 148;
   const h = menu.offsetHeight || 112;
   const host = document.querySelector(".lwc-host");
-  const axisTop = host ? host.getBoundingClientRect().bottom - 30 : r.top - 8;
-  let top = Math.min(r.top - h - 8, axisTop - h - 4);
-  if (top < 8) top = Math.min(r.bottom + 6, window.innerHeight - h - 8);
-  let left = r.right - w;
-  left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+  const axisBottom = host ? host.getBoundingClientRect().bottom : 0;
+  const est = document.getElementById("est");
+  const ultra = document.querySelector(".trade .ultra, .ultra");
+  const quote = est ? est.getBoundingClientRect() : null;
+  const floorEl = ultra && ultra.getBoundingClientRect().height > 2 ? ultra : est;
+  const floor = floorEl ? floorEl.getBoundingClientRect() : null;
+  let left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8));
+  const hitsQuote = (top) => floor && floor.width > 2
+    && top < floor.bottom - 2 && top + h > (quote ? quote.top : floor.top) + 2
+    && left + w > floor.left + 4 && left < floor.right - 4;
+  // Prefer above the button, and above the time axis, so Est. Received stays readable.
+  let top = r.top - h - 8;
+  if (host && axisBottom > 40 && r.top > axisBottom && top + h > axisBottom - 18) top = axisBottom - h - 18;
+  if (top < 8 || hitsQuote(top)) {
+    const under = floor && floor.bottom > 8 ? floor.bottom + 6 : r.bottom + 6;
+    top = under + h <= window.innerHeight - 4 ? under : Math.max(8, window.innerHeight - h - 8);
+  }
   menu.style.left = left + "px";
   menu.style.top = top + "px";
 }
