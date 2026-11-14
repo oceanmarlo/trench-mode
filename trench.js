@@ -1068,7 +1068,9 @@ function placeOrderMenu() {
   const r = btn.getBoundingClientRect();
   const w = menu.offsetWidth || 148;
   const h = menu.offsetHeight || 112;
-  let top = r.top - h - 8;
+  const host = document.querySelector(".lwc-host");
+  const axisTop = host ? host.getBoundingClientRect().bottom - 30 : r.top - 8;
+  let top = Math.min(r.top - h - 8, axisTop - h - 4);
   if (top < 8) top = Math.min(r.bottom + 6, window.innerHeight - h - 8);
   let left = r.right - w;
   left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
