@@ -11,7 +11,6 @@ const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQd
 const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
 const QUOTE_EVERY_MS = 12000;  // background order refresh
 const FEED_EVERY_MS = 1000;    // datapi chart refresh (separate host, no key budget); trades poll only if stream is down
-const ALPHA_LIST_MS = 5000;    // datapi list re-rank; row values stream live in between
 const TFS = ["Auto", "1s", "15s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1D"];
 const TF_SEC = { "Auto": 60, "1s": 1, "15s": 15, "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1D": 86400 };
 const TF_API = { "1s": "1_SECOND", "15s": "15_SECOND", "1m": "1_MINUTE", "3m": "3_MINUTE", "5m": "5_MINUTE", "15m": "15_MINUTE", "30m": "30_MINUTE", "1h": "1_HOUR", "4h": "4_HOUR", "1D": "1_DAY" };
@@ -2009,12 +2008,17 @@ function holdingsPanel() {
   return head + rows;
 }
 
-// ---------------- Alpha: trending / new token screener ----------------
-// Trending, Organic and Top traded come from datapi.jup.ag (no key, no budget).
-// New comes from Tokens v2 /recent through the shared 1 RPS queue, at most once a minute.
+// ---------------- Alpha: Jupiter AlphaScan (New / Graduating / Graduated) ----------------
+// Same feed as jup.ag/spot/alphascan (jup.ag/alpha is a 404). Snapshot: POST
+// api.jup.ag/_datapi/v1/assets/gems (no key, same as their page, not the 1 RPS budget).
+// Live: subscribe:assets,recent on the existing Jupiter stream. PumpPortal is only a
+// fallback for the New column if that feed fails. Extra filters stay client-side.
 const ALPHA_KEY = "trench-alpha";
 const ALPHA_PRESETS_KEY = "trench-alpha-presets";
-const ALPHA_SOURCES = [["toptrending", "Trending"], ["toporganicscore", "Organic"], ["toptraded", "Top traded"], ["recent", "New"]];
+const ALPHA_SOURCES = [["recent", "New"], ["aboutToGraduate", "Graduating"], ["graduated", "Graduated"]];
+const ALPHA_COL_KEYS = ["recent", "aboutToGraduate", "graduated"];
+const GEMS_URL = "https://api.jup.ag/_datapi/v1/assets/gems";
+const GEMS_BODY = JSON.stringify({ recent: { timeframe: "24h" }, aboutToGraduate: { timeframe: "24h" }, graduated: { timeframe: "24h" } });
 const ALPHA_IVS = ["5m", "1h", "6h", "24h"];
 const ALPHA_NUM = [
   ["mcapMin", "MCap min"], ["mcapMax", "MCap max"], ["liqMin", "Liquidity min"], ["volMin", "24h vol min"],
@@ -2031,10 +2035,12 @@ const ALPHA_BUILTIN = {
   "Movers": { chgMin: "20", volMin: "100k", liqMin: "50k" }
 };
 const alphaSaved = (() => { try { return JSON.parse(localStorage.getItem(ALPHA_KEY)) || {}; } catch (_) { return {}; } })();
+const alphaSrcOk = (s) => ALPHA_SOURCES.some(([k]) => k === s);
 state.alpha = {
-  src: alphaSaved.src || "toptrending", iv: alphaSaved.iv || "1h",
-  sort: alphaSaved.sort || "vol", dir: alphaSaved.dir || "desc",
-  f: alphaSaved.f || {}, open: false, rows: [], loading: false, err: "", at: 0, recentAt: 0, recent: []
+  src: alphaSrcOk(alphaSaved.src) ? alphaSaved.src : "recent", iv: alphaSaved.iv || "24h",
+  sort: alphaSaved.sort || "feed", dir: alphaSaved.dir || "desc",
+  f: alphaSaved.f || {}, open: false, rows: [], loading: false, err: "", at: 0,
+  cols: { recent: [], aboutToGraduate: [], graduated: [] }, jupOk: false, pumpFallback: false
 };
 function saveAlpha() {
   const a = state.alpha;
@@ -2204,18 +2210,18 @@ function alphaRcPass(x, f) {
 
 function alphaList() {
   const a = state.alpha;
-  const iv = a.src === "recent" ? "1h" : a.iv;
+  const iv = "24h";
+  const feed = a.sort === "feed";
   const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score", lp: "lp", rc: "rc" }[a.sort] || "vol";
   const dir = a.dir === "asc" ? 1 : -1;
-  const base = a.rows.map((t) => ({ t, x: alphaFields(t, iv) }))
-    .filter((r) => alphaPass(r.x, a.f))
-    .sort((p, q) => {
-      const u = p.x[key], v = q.x[key];
-      if (u == null && v == null) return 0;
-      if (u == null) return 1;
-      if (v == null) return -1;
-      return (u - v) * dir;
-    });
+  const base = a.rows.map((t) => ({ t, x: alphaFields(t, iv) })).filter((r) => alphaPass(r.x, a.f));
+  if (!feed) base.sort((p, q) => {
+    const u = p.x[key], v = q.x[key];
+    if (u == null && v == null) return 0;
+    if (u == null) return 1;
+    if (v == null) return -1;
+    return (u - v) * dir;
+  });
   // Lazy RugCheck: only rows that survived the other filters. With an RugCheck filter on,
   // check all of them; otherwise just the top 40 for badges.
   const rcOn = alphaRcActive(a.f) || a.sort === "lp" || a.sort === "rc";
@@ -2226,45 +2232,99 @@ function alphaList() {
 }
 
 let alphaSeq = 0;
+function alphaBorn(t) { return new Date(t?.firstPool?.createdAt || t?.createdAt || 0).getTime(); }
+function alphaSortCols() {
+  const c = state.alpha.cols;
+  c.recent.sort((a, b) => alphaBorn(b) - alphaBorn(a));
+  c.recent.splice(30);
+  c.aboutToGraduate.sort((a, b) => (b.bondingCurve || 0) - (a.bondingCurve || 0));
+  c.aboutToGraduate.splice(30);
+  c.graduated.sort((a, b) => new Date(b.graduatedAt || 0) - new Date(a.graduatedAt || 0));
+  c.graduated.splice(30);
+  state.alpha.rows = c[state.alpha.src] || [];
+}
+function alphaMergeSnap(key, fresh) {
+  const old = state.alpha.cols[key] || [];
+  const have = new Set(fresh.map((r) => r.id));
+  const byId = new Map(old.map((r) => [r.id, r]));
+  const merged = fresh.map((r) => {
+    const o = byId.get(r.id);
+    return o && o.updatedAt && r.updatedAt && new Date(o.updatedAt) > new Date(r.updatedAt) ? { ...r, ...o } : r;
+  });
+  // Keep a streamed launch that the 30s snapshot has not indexed yet.
+  const extra = old.filter((r) => r._streamed && !have.has(r.id));
+  state.alpha.cols[key] = key === "recent" ? [...extra, ...merged] : merged.concat(extra);
+}
+function alphaUpsert(list, row) {
+  const i = list.findIndex((r) => r.id === row.id);
+  if (i >= 0) list[i] = { ...list[i], ...row, _streamed: true };
+  return i;
+}
+// Place one stream frame the way AlphaScan does: new -> New, graduated -> Graduated,
+// bonding-curve inserts into Graduating only when they beat the last row.
+function alphaIngest(msg) {
+  const raw = msg?.asset;
+  if (!raw?.id) return;
+  const c = state.alpha.cols;
+  const row = { ...raw, _streamed: true };
+  if (msg.type === "new") {
+    if (alphaUpsert(c.recent, row) < 0) c.recent.unshift(row);
+  } else if (msg.type === "graduated") {
+    c.recent = c.recent.filter((r) => r.id !== row.id);
+    c.aboutToGraduate = c.aboutToGraduate.filter((r) => r.id !== row.id);
+    if (alphaUpsert(c.graduated, row) < 0) c.graduated.unshift(row);
+  } else if (msg.type === "update") {
+    ALPHA_COL_KEYS.forEach((k) => alphaUpsert(c[k], row));
+    if (row.graduatedPool != null) {
+      c.recent = c.recent.filter((r) => r.id !== row.id);
+      c.aboutToGraduate = c.aboutToGraduate.filter((r) => r.id !== row.id);
+      if (alphaUpsert(c.graduated, row) < 0) c.graduated.unshift(row);
+    }
+  } else return;
+  if (msg.type !== "graduated" && row.graduatedPool == null && row.bondingCurve > 0) {
+    const g = c.aboutToGraduate;
+    const i = g.findIndex((r) => r.id === row.id);
+    if (i >= 0) g[i] = { ...g[i], ...row, _streamed: true };
+    else {
+      const floor = g.length >= 30 ? (g[g.length - 1]?.bondingCurve || 0) : 0;
+      if (g.length < 30 || row.bondingCurve > floor) g.push({ ...row, _streamed: true });
+    }
+  }
+  alphaSortCols();
+}
+async function gemsFetch() {
+  const res = await fetch(GEMS_URL, {
+    method: "POST", cache: "no-store",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: GEMS_BODY
+  });
+  if (!res.ok) throw new Error("gems " + res.status);
+  return res.json();
+}
 async function loadAlpha() {
   const a = state.alpha;
   const seq = ++alphaSeq;
   a.loading = true;
   a.err = "";
+  streamSync();
   paintAlphaList();
   try {
-    let rows;
-    if (a.src === "recent") {
-      if (Date.now() - a.recentAt < 60000 && a.recent.length) rows = a.recent;
-      else {
-        rows = await jup("https://api.jup.ag/tokens/v2/recent?limit=100");
-        a.recent = rows || [];
-        a.recentAt = Date.now();
-      }
-    } else {
-      const d = await datapi(`https://datapi.jup.ag/v1/assets/${a.src}/${a.iv}?limit=100`);
-      rows = Array.isArray(d) ? d : d?.assets || [];
-    }
+    const d = await gemsFetch();
     if (seq !== alphaSeq) return;
-    // Keep whichever copy is newer: the streamed row or the fresh snapshot.
-    const old = new Map(a.rows.map((r) => [r.id, r]));
-    a.rows = (rows || []).map((r) => {
-      const o = old.get(r.id);
-      return o && o.updatedAt && r.updatedAt && new Date(o.updatedAt) > new Date(r.updatedAt) ? { ...r, ...o } : r;
-    });
-    if (a.src === "recent") {
-      // Keep launches that arrived over the stream / PumpPortal but aren't in the REST list yet.
-      const have = new Set(a.rows.map((r) => r.id));
-      const extra = [...old.values()].filter((r) => !have.has(r.id));
-      a.rows = [...extra, ...a.rows]
-        .sort((x, y) => new Date(y.firstPool?.createdAt || y.createdAt || 0) - new Date(x.firstPool?.createdAt || x.createdAt || 0))
-        .slice(0, 100);
-    }
+    a.jupOk = true;
+    a.pumpFallback = false;
+    pumpStop();
+    for (const k of ALPHA_COL_KEYS) alphaMergeSnap(k, d?.[k]?.assets || []);
+    alphaSortCols();
     a.at = Date.now();
     feedMark("alphaList");
     streamSync();
   } catch (err) {
-    if (seq === alphaSeq) a.err = err.message || String(err);
+    if (seq !== alphaSeq) return;
+    a.jupOk = false;
+    a.err = err.message || String(err);
+    // Jupiter feed down: PumpPortal covers New only. Graduating/Graduated stay empty until it recovers.
+    if (!stream.open || a.src === "recent") { a.pumpFallback = true; pumpConnect(); }
   } finally {
     if (seq === alphaSeq) { a.loading = false; paintAlphaList(); }
   }
@@ -2336,11 +2396,11 @@ function alphaView() {
   const a = state.alpha;
   const presets = { ...ALPHA_BUILTIN, ...alphaPresets() };
   const user = alphaPresets();
-  const ivLabel = a.src === "recent" ? "1h" : a.iv;
+  const ivLabel = "24h";
+  const feedNote = a.pumpFallback ? "Jupiter feed failed — New is on PumpPortal until it recovers." : "Same feed as jup.ag/spot/alphascan.";
   return `<div class="alpha">
     <div class="al-top"><h2>Alpha</h2><button type="button" class="al-refresh" data-alpha-refresh aria-label="Refresh">↻</button></div>
     <div class="chips">${ALPHA_SOURCES.map(([k, l]) => `<button type="button" data-alpha-src="${k}" class="${a.src === k ? "on" : ""}">${l}</button>`).join("")}</div>
-    ${a.src === "recent" ? "" : `<div class="chips small">${ALPHA_IVS.map((k) => `<button type="button" data-alpha-iv="${k}" class="${a.iv === k ? "on" : ""}">${k}</button>`).join("")}</div>`}
     <div class="chips small presets-row">
       <button type="button" class="${a.open ? "on" : ""}" data-alpha-filters>Filters <span id="alpha-fcount" class="tab-n">${alphaActiveCount() || ""}</span></button>
       ${Object.keys(presets).map((n) => `<span class="preset"><button type="button" data-alpha-preset="${esc(n)}">${esc(n)}</button>${user[n] ? `<button type="button" class="x" data-alpha-del="${esc(n)}" aria-label="Delete preset">✕</button>` : ""}</span>`).join("")}
@@ -2348,7 +2408,7 @@ function alphaView() {
     ${a.open ? `<div class="al-filters">
       <div class="al-grid">${ALPHA_NUM.map(([k, l]) => `<label><span>${l === "Chg % min" || l === "Chg % max" ? l + " (" + ivLabel + ")" : l}</span><input data-alpha-f="${k}" value="${esc(a.f[k] ?? "")}" inputmode="text" autocomplete="off" placeholder="${/Max|max/.test(l) && /%/.test(l) ? "e.g. 30" : /h\)/.test(l) ? "hours" : /%|Organic/.test(l) ? "e.g. 10" : "e.g. 50k"}"></label>`).join("")}</div>
       <div class="al-bools">${ALPHA_BOOL.map(([k, l]) => `<label><input type="checkbox" data-alpha-b="${k}" ${a.f[k] ? "checked" : ""}> ${l}</label>`).join("")}</div>
-      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. Token data: Jupiter (live stream). New pump.fun launches: PumpPortal. Missing data fails an active filter.</div>
+      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. ${feedNote} Filters apply on top of that list. Missing data fails an active filter.</div>
       <div class="al-actions"><button type="button" data-alpha-clear>Clear</button><button type="button" data-alpha-save class="save">Save preset</button></div>
     </div>` : ""}
     <div class="al-sort">${ALPHA_SORTS.map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
@@ -2360,8 +2420,12 @@ function alphaView() {
 function bindAlpha() {
   const a = state.alpha;
   const rerender = () => { saveAlpha(); render(); };
-  document.querySelectorAll("[data-alpha-src]").forEach((b) => b.onclick = () => { if (a.src === b.dataset.alphaSrc) return; a.src = b.dataset.alphaSrc; a.rows = []; rerender(); loadAlpha().catch(() => {}); });
-  document.querySelectorAll("[data-alpha-iv]").forEach((b) => b.onclick = () => { if (a.iv === b.dataset.alphaIv) return; a.iv = b.dataset.alphaIv; a.rows = []; rerender(); loadAlpha().catch(() => {}); });
+  document.querySelectorAll("[data-alpha-src]").forEach((b) => b.onclick = () => {
+    if (a.src === b.dataset.alphaSrc) return;
+    a.src = b.dataset.alphaSrc;
+    a.rows = a.cols[a.src] || [];
+    rerender();
+  });
   document.querySelectorAll("[data-alpha-sort]").forEach((b) => b.onclick = () => {
     const k = b.dataset.alphaSort;
     if (a.sort === k) a.dir = a.dir === "asc" ? "desc" : "asc";
@@ -2371,7 +2435,7 @@ function bindAlpha() {
   const fb = $("[data-alpha-filters]");
   if (fb) fb.onclick = () => { a.open = !a.open; render(); };
   const rf = $("[data-alpha-refresh]");
-  if (rf) rf.onclick = () => { a.recentAt = 0; loadAlpha().catch(() => {}); };
+  if (rf) rf.onclick = () => { loadAlpha().catch(() => {}); };
   // Typing only repaints the list so the input keeps focus.
   document.querySelectorAll("[data-alpha-f]").forEach((i) => i.oninput = () => {
     a.f[i.dataset.alphaF] = i.value;
@@ -3385,12 +3449,12 @@ function streamSync() {
   const wallets = new Set(state.wallet ? [state.wallet] : []);
   syncSet("pnl", wallets, "addresses");
   syncSet("user-trades", wallets, "addresses");
-  const recent = state.view === "alpha" && state.alpha.src === "recent";
+  const recent = state.view === "alpha";
   if (recent !== stream.sent.recent) {
     streamSend((recent ? "subscribe" : "unsubscribe") + ":assets,recent", {});
     stream.sent.recent = recent;
   }
-  if (recent) pumpConnect();
+  if (recent && state.alpha.pumpFallback) pumpConnect();
 }
 
 // Wallet push: balances + average cost for every token the wallet holds.
@@ -3448,9 +3512,14 @@ function onStreamUserTrades(list) {
 }
 
 // ---------------- PumpPortal (wss://pumpportal.fun/api/data) ----------------
-// Free, no key: new pump.fun tokens + migrations. ONE connection only (their rule; extra
-// connections risk an hour ban), opened the first time Alpha > New is shown, slow backoff.
+// Fallback only, if the Jupiter AlphaScan feed fails. ONE connection (their rule).
 const pump = { ws: null, retry: 0, wanted: false };
+function pumpStop() {
+  pump.wanted = false;
+  const ws = pump.ws;
+  pump.ws = null;
+  if (ws) { try { ws.close(); } catch (_) {} }
+}
 function pumpConnect() {
   pump.wanted = true;
   if (pump.ws && pump.ws.readyState <= 1) return;
@@ -3476,18 +3545,19 @@ function pumpRetry() {
   setTimeout(pumpConnect, Math.min(60000, 5000 * 2 ** pump.retry++));
 }
 function onPumpNew(d) {
+  if (!state.alpha.pumpFallback) return;
   feedMark("pumpNew");
-  const al = state.alpha;
-  if (al.src !== "recent" || al.rows.some((r) => r.id === d.mint)) return;
-  const solPx = state.prices[SOL] || 0;
-  al.rows.unshift({
-    id: d.mint, symbol: d.symbol, name: d.name, launchpad: "pump.fun", createdAt: new Date().toISOString(),
-    mcap: d.marketCapSol && solPx ? d.marketCapSol * solPx : null, dev: d.traderPublicKey, _pump: true, stats1h: {}, stats24h: {}, audit: {}
+  alphaIngest({
+    type: "new",
+    asset: {
+      id: d.mint, symbol: d.symbol, name: d.name, launchpad: "pump.fun", createdAt: new Date().toISOString(),
+      mcap: d.marketCapSol && state.prices[SOL] ? d.marketCapSol * state.prices[SOL] : null,
+      dev: d.traderPublicKey, _pump: true, stats1h: {}, stats24h: {}, audit: {}
+    }
   });
-  if (al.rows.length > 100) al.rows.length = 100;
   stream.dirty.alpha = true;
   streamFlush();
-  streamSync(); // ask Jupiter's stream for the full token object as soon as it's indexed
+  streamSync();
 }
 function onPumpMigrate(d) {
   feedMark("pumpMigrate");
@@ -3543,9 +3613,7 @@ function onStreamActions(list) {
 }
 function onStreamAssets(list) {
   const a = state.active;
-  const al = state.alpha;
   const alphaOn = state.view === "alpha";
-  let idx = null;
   for (const u of list) {
     const t = u?.asset;
     if (!t?.id) continue;
@@ -3568,16 +3636,9 @@ function onStreamAssets(list) {
       stream.dirty.live = true;
     }
     if (!alphaOn) continue;
-    if (!idx) idx = new Map(al.rows.map((r, i) => [r.id, i]));
-    const i = idx.get(t.id);
-    if (i != null) { al.rows[i] = { ...al.rows[i], ...t }; stream.dirty.alpha = true; feedMark("alphaRowStream"); }
-    else if (u.type === "new" && al.src === "recent") {
-      al.rows.unshift(t);
-      if (al.rows.length > 100) al.rows.length = 100;
-      idx = null;
-      stream.dirty.alpha = true;
-      feedMark("alphaNewStream");
-    }
+    alphaIngest(u);
+    stream.dirty.alpha = true;
+    feedMark(u.type === "new" ? "alphaNewStream" : "alphaRowStream");
   }
   if (stream.dirty.live || stream.dirty.alpha) streamFlush();
 }
@@ -3642,8 +3703,7 @@ async function boot() {
     every(PRICE_EVERY_MS, () => pollPrices());
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
-    every(ALPHA_LIST_MS, () => (state.view === "alpha" && state.alpha.src !== "recent" ? loadAlpha() : null));
-    every(60000, () => (state.view === "alpha" && state.alpha.src === "recent" ? loadAlpha() : null));
+    every(30000, () => (state.view === "alpha" ? loadAlpha() : null));
     every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
   } catch (err) {
     state.status = err.message || String(err);
