@@ -99,6 +99,9 @@ const usd = (n) => {
   if (a >= 1) return sign + "$" + a.toFixed(2);
   if (a >= 0.01) return sign + "$" + a.toFixed(4);
   if (!(a > 0)) return sign + "$0.00";
+  // 5 leading zeros makes toPrecision return "0.00000100", which read as a zero string.
+  const m = a.toFixed(18).match(/^0\.(0*)([1-9]\d{0,2})/);
+  if (m && m[1].length >= 4) return sign + "$0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
   const raw = a.toPrecision(3);
   if (!/[eE]/.test(raw)) return sign + "$" + raw;
   // 7.37e-8 must not land in Net Vol. Subscript matches the price.
@@ -1516,8 +1519,24 @@ async function cancelStop(id) {
 }
 
 function pnlText(d, pct) {
-  const mag = usd(Math.abs(d || 0)).replace(/^-/, "");
-  return "uPnL " + (d < 0 ? "-" : "+") + mag + " (" + signed(pct || 0) + "%)";
+  if (!Number.isFinite(d)) return "—";
+  const mag = usd(Math.abs(d)).replace(/^-/, "");
+  const pctBit = Number.isFinite(pct) ? sheetPct(pct) : "—";
+  return "uPnL " + (d < 0 ? "-" : d > 0 ? "+" : "") + mag + " (" + pctBit + ")";
+}
+function holdPnlHtml(d, pct) {
+  if (!Number.isFinite(d) || !Number.isFinite(pct)) return "<b>—</b><span>—</span>";
+  const text = usd(d);
+  const money = d > 0 ? "+" + text : text;
+  let pctHtml = "—";
+  if (pct === 0) pctHtml = "0.00%";
+  else {
+    let dig = 2;
+    const av = Math.abs(pct);
+    while (dig < 6 && Number(av.toFixed(dig)) === 0) dig++;
+    if (Number(av.toFixed(dig)) !== 0) pctHtml = (pct >= 0 ? "▲ " : "▼ ") + av.toFixed(dig) + "%";
+  }
+  return `<b class="${cls(d)}">${money}</b><span class="${cls(pct)}">${pctHtml}</span>`;
 }
 function paintLive() {
   const t = state.active;
@@ -1585,11 +1604,7 @@ function paintLive() {
     if (hn) hn.textContent = usd(value);
     if (pn) {
       if (!(entry > 0) || !(price > 0)) pn.innerHTML = "<b>—</b><span>—</span>";
-      else {
-        const d = value - h.ui * entry;
-        const pct = ((price - entry) / entry) * 100;
-        pn.innerHTML = `<b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span>`;
-      }
+      else pn.innerHTML = holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     }
   });
   tickChart();
@@ -3096,7 +3111,7 @@ function holdingsPanel() {
     const value = h.ui * price;
     const pnl = !(entry > 0) || !(price > 0)
       ? `<b>—</b><span>—</span>`
-      : `<b class="${cls(value - h.ui * entry)}">${signed(value - h.ui * entry)}</b><span class="${cls(((price - entry) / entry) * 100)}">${price >= entry ? "▲" : "▼"} ${Math.abs(((price - entry) / entry) * 100).toFixed(2)}%</span>`;
+      : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     return `<div class="row" data-mint="${h.mint}">
       <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(iconUrl(h.icon))}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
