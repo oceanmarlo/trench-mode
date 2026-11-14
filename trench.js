@@ -220,6 +220,7 @@ async function loadToken(query) {
   state.quote = null;
   state.samples = [hit.usdPrice];
   state.status = "Live · Jupiter";
+  state.scrollTop = 0;
   render();
   heliusTrack(hit);
   datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(hit.id)).then((extra) => {
@@ -1227,9 +1228,12 @@ function ensureChart() {
     layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
     grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.06)" } },
     rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.22 } },
-    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4 },
+    timeScale: {
+      borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4,
+      tickMarkFormatter: (time, type) => tickMarkText(time, type)
+    },
     crosshair: { mode: L.CrosshairMode.Normal },
-    localization: { priceFormatter: fmtAxis },
+    localization: { priceFormatter: fmtAxis, timeFormatter: (time) => tickMarkText(time, state.tf === "1s" || state.tf === "15s" ? 4 : 3) },
     handleScale: { axisPressedMouseMove: true, pinch: true, mouseWheel: true },
     handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
   });
@@ -1264,12 +1268,24 @@ function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
   if (logo && chartUi.host && logo.parentNode !== chartUi.host) chartUi.host.appendChild(logo);
 }
+function pad2(n) { return String(n).padStart(2, "0"); }
 function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
-  const p = (n) => String(n).padStart(2, "0");
   const sec = state.tf === "1s" || state.tf === "15s";
-  return p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + (sec ? ":" + p(d.getUTCSeconds()) : "");
+  return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
+}
+// lightweight-charts labels are UTC unless we format them. Match the footer clock (local).
+// TickMarkType: 0 year, 1 month, 2 day, 3 time, 4 time with seconds.
+function tickMarkText(time, type) {
+  const d = new Date(Number(time) * 1000);
+  if (!Number.isFinite(d.getTime())) return null;
+  if (type === 0) return String(d.getFullYear());
+  if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
+  if (type === 2) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  if (type === 4 || state.tf === "1s" || state.tf === "15s") return clock + ":" + pad2(d.getSeconds());
+  return clock;
 }
 function paintAxisEdge() {
   const host = chartUi.host;
@@ -1971,8 +1987,19 @@ function stat(win) {
   return t["stats" + win] || {};
 }
 
+function revealTab() {
+  const sc = document.querySelector(".scroll");
+  const tabs = sc && sc.querySelector(".tabs");
+  if (!sc || !tabs) return;
+  sc.scrollTop = Math.max(0, tabs.offsetTop - 2);
+}
 function render() {
   if (chartUi.dragging) { chartUi.pendingRender = true; return; }
+  const prevScroll = document.querySelector(".scroll");
+  const keep = state.scrollTop != null ? state.scrollTop : (prevScroll ? prevScroll.scrollTop : 0);
+  state.scrollTop = null;
+  const jumpTab = state.scrollToTab;
+  state.scrollToTab = false;
   const t = state.active;
   const p = activePnl();
   const price = t ? (state.prices[t.id] || t.usdPrice || 0) : 0;
@@ -2009,6 +2036,11 @@ function render() {
   if (state.view === "alpha") bindAlpha();
   if (state.infoOpen) openSheet(); else if (document.getElementById("sheet-root")) closeSheet();
   drawChart();
+  const sc = document.querySelector(".scroll");
+  if (sc) {
+    if (jumpTab) revealTab();
+    else if (keep) sc.scrollTop = keep;
+  }
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
 }
 
@@ -3282,7 +3314,11 @@ function searchSheet() {
 }
 
 function bind() {
-  document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { state.tab = b.dataset.tab; render(); });
+  document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => {
+    state.tab = b.dataset.tab;
+    state.scrollToTab = true;
+    render();
+  });
   document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { if (state.tf === b.dataset.tf) return; state.tf = b.dataset.tf; state.candles = []; render(); loadCandles().catch(() => {}); });
   document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => { state.side = b.dataset.side; state.quote = null; render(); scheduleQuote(0); });
   document.querySelectorAll("[data-amt]").forEach((b) => b.onclick = () => { state.amount = Number(b.dataset.amt); render(); scheduleQuote(0); });
