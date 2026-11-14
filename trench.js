@@ -4045,7 +4045,7 @@ function tradePanel() {
         <button class="sell ${state.side==="sell"?"on":""}" data-side="sell">Sell</button>
       </div></span>
     </div>
-    <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n.toFixed(n < 1 ? 1 : 2)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n.toFixed(2)}%</button>`).join("")}</div>
+    <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n < 1 ? n.toFixed(1) : String(n)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n}%</button>`).join("")}</div>
     <div class="amt-row">
       <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" value="${state.side === "buy" ? state.amount : state.sellPct}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
       <button class="go ${state.side}" id="go" ${state.busy ? "disabled" : ""}>${state.busy ? "…" : label}</button>
