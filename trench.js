@@ -1121,9 +1121,6 @@ function ensureChart() {
   const L = window.LightweightCharts;
   const host = document.createElement("div");
   host.className = "lwc-host";
-  const legend = document.createElement("div");
-  legend.className = "lwc-legend";
-  host.appendChild(legend);
   const chart = L.createChart(host, {
     autoSize: true,
     layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
@@ -1138,10 +1135,10 @@ function ensureChart() {
   const priceFormat = { type: "custom", formatter: fmtAxis, minMove: 1e-12 };
   const candles = chart.addSeries(L.CandlestickSeries, {
     upColor: "#2ebd85", downColor: "#f6465d", borderVisible: false, wickUpColor: "#2ebd85", wickDownColor: "#f6465d",
-    priceFormat
+    priceFormat, title: "", lastValueVisible: true
   });
-  const line = chart.addSeries(L.LineSeries, { color: "#c7f284", lineWidth: 2, priceFormat, visible: false, priceLineVisible: true });
-  const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+  const line = chart.addSeries(L.LineSeries, { color: "#c7f284", lineWidth: 2, priceFormat, visible: false, priceLineVisible: true, title: "" });
+  const volume = chart.addSeries(L.HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false, title: "" });
   volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
   const draw = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   draw.setAttribute("class", "draw-layer off");
@@ -1152,25 +1149,44 @@ function ensureChart() {
   chart.subscribeCrosshairMove((param) => {
     const bar = param?.seriesData?.get(candles) || param?.seriesData?.get(line);
     const vol = param?.seriesData?.get(volume);
-    if (!bar) { paintLegend(); return; }
-    paintLegend(bar, vol?.value);
+    paintLegend(bar, vol?.value, param);
+    paintPaneTags(param);
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => paintDrawings());
-  Object.assign(chartUi, { host, chart, candles, line, volume, legend, draw, tags, extra: [], extraMap: {}, indLayout: "" });
+  Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
   bindDraw(draw);
   requestAnimationFrame(watchDraw);
   return chart;
 }
 
-function paintLegend(bar, vol) {
-  if (!chartUi.legend) return;
-  if (!bar) { chartUi.legend.textContent = ""; return; }
-  if (bar.open == null) {
-    chartUi.legend.innerHTML = `<span>C</span><b>${fmtAxis(bar.value)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
-    return;
+function paintLegend(bar, vol, param) {
+  const ohlc = document.getElementById("ohlc");
+  const inds = document.getElementById("ind-leg");
+  if (ohlc) {
+    if (!bar) ohlc.replaceChildren();
+    else if (bar.open == null) {
+      ohlc.innerHTML = `<span>C</span><b>${fmtAxis(bar.value)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+    } else {
+      const c = bar.close >= bar.open ? "up" : "down";
+      ohlc.innerHTML = `<span>O</span><b class="${c}">${fmtAxis(bar.open)}</b><span>H</span><b class="${c}">${fmtAxis(bar.high)}</b><span>L</span><b class="${c}">${fmtAxis(bar.low)}</b><span>C</span><b class="${c}">${fmtAxis(bar.close)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+    }
   }
-  const c = bar.close >= bar.open ? "up" : "down";
-  chartUi.legend.innerHTML = `<span>O</span><b class="${c}">${fmtAxis(bar.open)}</b><span>H</span><b class="${c}">${fmtAxis(bar.high)}</b><span>L</span><b class="${c}">${fmtAxis(bar.low)}</b><span>C</span><b class="${c}">${fmtAxis(bar.close)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+  if (!inds) return;
+  const names = { ma: "MA", ema: "EMA", vwap: "VWAP", bbM: "BB", rsi: "RSI", macd: "MACD", stochK: "Stoch" };
+  const parts = [];
+  const data = param?.seriesData;
+  if (data && chartUi.extraMap) {
+    for (const [id, label] of Object.entries(names)) {
+      const series = chartUi.extraMap[id];
+      if (!series) continue;
+      const row = data.get(series);
+      const v = row && (row.value != null ? row.value : row.close);
+      if (v == null || !Number.isFinite(Number(v))) continue;
+      const text = id === "rsi" || id === "stochK" ? Number(v).toFixed(1) : fmtAxis(v);
+      parts.push(label + " " + text);
+    }
+  }
+  inds.textContent = parts.join("  ");
 }
 
 function toBars(list) {
@@ -1299,17 +1315,26 @@ function applyPaneHeights() {
     try { panes[i].setHeight(68); } catch (_) {}
   }
 }
-function paintPaneTags() {
+function paintPaneTags(param) {
   const box = chartUi.tags;
   if (!box || !chartUi.chart) return;
   const names = { rsi: "RSI 14", macd: "MACD 12 26 9", stoch: "Stoch RSI", chop: "Chop Zone" };
+  const seriesId = { rsi: "rsi", macd: "macd", stoch: "stochK", chop: "chop" };
   const order = paneIds();
   const panes = chartUi.chart.panes();
   let y = 0;
   const html = [];
   panes.forEach((p, i) => {
     const h = p.getHeight();
-    if (i > 0 && order[i - 1]) html.push(`<div class="pane-tag" style="top:${y + 2}px">${names[order[i - 1]]}</div>`);
+    const id = i > 0 ? order[i - 1] : "";
+    if (id && names[id]) {
+      let extra = "";
+      const series = chartUi.extraMap && chartUi.extraMap[seriesId[id]];
+      const row = series && param?.seriesData?.get(series);
+      const v = row && (row.value != null ? row.value : row.close);
+      if (id !== "chop" && v != null && Number.isFinite(Number(v))) extra = " " + (id === "rsi" || id === "stoch" ? Number(v).toFixed(1) : fmtAxis(v));
+      html.push(`<div class="pane-tag" style="top:${y + 2}px">${names[id]}${extra}</div>`);
+    }
     y += h;
   });
   box.innerHTML = html.join("");
@@ -1327,25 +1352,25 @@ function buildIndSeries() {
     chartUi.extra.push(s);
     return s;
   };
-  if (want.has("ma")) chartUi.extraMap.ma = addLine({ color: "#f5c542", title: "MA 20", priceFormat: fmt });
-  if (want.has("ema")) chartUi.extraMap.ema = addLine({ color: "#5b8def", title: "EMA 21", priceFormat: fmt });
-  if (want.has("vwap")) chartUi.extraMap.vwap = addLine({ color: "#c7f284", title: "VWAP", priceFormat: fmt });
+  if (want.has("ma")) chartUi.extraMap.ma = addLine({ color: "#f5c542", title: "", priceFormat: fmt });
+  if (want.has("ema")) chartUi.extraMap.ema = addLine({ color: "#5b8def", title: "", priceFormat: fmt });
+  if (want.has("vwap")) chartUi.extraMap.vwap = addLine({ color: "#c7f284", title: "", priceFormat: fmt });
   if (want.has("bb")) {
     chartUi.extraMap.bbU = addLine({ color: "rgba(179,136,255,.85)", title: "", priceFormat: fmt });
-    chartUi.extraMap.bbM = addLine({ color: "#b388ff", title: "BB 20", lineStyle: 2, priceFormat: fmt });
+    chartUi.extraMap.bbM = addLine({ color: "#b388ff", title: "", lineStyle: 2, priceFormat: fmt });
     chartUi.extraMap.bbL = addLine({ color: "rgba(179,136,255,.85)", title: "", priceFormat: fmt });
   }
   const panes = paneIds();
   const paneOf = Object.fromEntries(panes.map((id, i) => [id, i + 1]));
   if (want.has("rsi")) {
-    const s = addLine({ color: "#c7f284", title: "RSI 14", priceFormat: { type: "price", precision: 1, minMove: 0.1 } }, paneOf.rsi);
+    const s = addLine({ color: "#c7f284", title: "", priceFormat: { type: "price", precision: 1, minMove: 0.1 } }, paneOf.rsi);
     s.createPriceLine({ price: 70, color: "rgba(139,147,158,.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" });
     s.createPriceLine({ price: 30, color: "rgba(139,147,158,.55)", lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" });
     chartUi.extraMap.rsi = s;
   }
   if (want.has("macd")) {
     const p = paneOf.macd;
-    const hist = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: "MACD" }, p);
+    const hist = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: "" }, p);
     chartUi.extra.push(hist);
     chartUi.extraMap.macdHist = hist;
     chartUi.extraMap.macd = addLine({ color: "#5b8def", title: "" }, p);
@@ -1353,11 +1378,11 @@ function buildIndSeries() {
   }
   if (want.has("stoch")) {
     const p = paneOf.stoch;
-    chartUi.extraMap.stochK = addLine({ color: "#5b8def", title: "Stoch RSI" }, p);
+    chartUi.extraMap.stochK = addLine({ color: "#5b8def", title: "" }, p);
     chartUi.extraMap.stochD = addLine({ color: "#f5c542", title: "" }, p);
   }
   if (want.has("chop")) {
-    const s = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: "Chop Zone" }, paneOf.chop);
+    const s = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: "" }, paneOf.chop);
     chartUi.extra.push(s);
     chartUi.extraMap.chop = s;
     try { s.priceScale().applyOptions({ visible: false }); } catch (_) {}
@@ -1947,7 +1972,7 @@ function tokenHead(t, price, chg) {
     <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
       ${chartToolsHtml()}
       <div id="chart-slot" class="chart-slot"></div>
-      <div class="chart-label">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · jup.ag<div id="live"></div></div>
+      <div class="chart-label" id="chart-legend"><div class="lg-sym">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · jup.ag</div><div class="lg-ohlc" id="ohlc"></div><div class="lg-inds" id="ind-leg"></div></div>
       <button type="button" class="chart-full-btn" id="chart-full" aria-label="${state.chartFull ? "Exit full screen" : "Full screen"}">${state.chartFull ? "✕" : "⤢"}</button>
       ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
