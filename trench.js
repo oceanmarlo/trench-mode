@@ -1013,6 +1013,7 @@ function paintLive() {
   const utc = $("#utc");
   if (utc) utc.textContent = clockLabel();
   parkLogo();
+  paintAxisEdge();
   if (barH) barH.textContent = "Holding " + usd(p.value);
   if (barP) {
     barP.textContent = pnlText(p.d, p.p);
@@ -1252,7 +1253,7 @@ function ensureChart() {
     paintLegend(bar, vol?.value, param);
     paintPaneTags(param);
   });
-  chart.timeScale().subscribeVisibleLogicalRangeChange(() => paintDrawings());
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); });
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
   bindDraw(draw);
   parkLogo();
@@ -1262,6 +1263,26 @@ function ensureChart() {
 function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
   if (logo && chartUi.host && logo.parentNode !== chartUi.host) chartUi.host.appendChild(logo);
+}
+function axisClock(ts) {
+  const d = new Date(Number(ts) * 1000);
+  if (!Number.isFinite(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  const sec = state.tf === "1s" || state.tf === "15s";
+  return p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + (sec ? ":" + p(d.getUTCSeconds()) : "");
+}
+function paintAxisEdge() {
+  const host = chartUi.host;
+  const chart = chartUi.chart;
+  if (!host || !chart) return;
+  let bar = host.querySelector(".axis-edge");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.className = "axis-edge";
+    host.appendChild(bar);
+  }
+  const range = chart.timeScale().getVisibleRange();
+  bar.textContent = range ? axisClock(range.from) : "";
 }
 
 function paintLegend(bar, vol, param) {
@@ -1839,6 +1860,7 @@ function drawChart() {
   if (chartUi.host.parentNode !== slot) slot.appendChild(chartUi.host);
   parkLogo();
   setChartData();
+  paintAxisEdge();
 }
 
 function bindChartResize() {
