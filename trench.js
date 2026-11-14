@@ -919,6 +919,12 @@ function sellTokens() {
   const pct = Math.min(100, Math.max(0, Number(state.sellPct) || 0));
   return held ? held.ui * pct / 100 : 0;
 }
+function idleQuoteStatus() {
+  if (!state.active) return null;
+  if (state.side === "buy" && state.active.id === SOL) return "SOL is the pay token";
+  if (state.side === "sell" && !orderParams()) return "No balance";
+  return null;
+}
 
 function orderParams() {
   const t = state.active;
@@ -1323,7 +1329,9 @@ async function refreshQuote() {
   const seq = ++quoteSeq;
   if (!params) {
     state.quote = null;
-    if (state.active?.id === SOL) state.status = "SOL is the pay token";
+    state.quoting = false;
+    const idle = idleQuoteStatus();
+    if (idle) state.status = idle;
     paintLive();
     return null;
   }
@@ -4545,7 +4553,13 @@ function bind() {
     render();
   });
   document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => { if (state.tf === b.dataset.tf) return; state.tf = b.dataset.tf; state.candles = []; render(); loadCandles().catch(() => {}); });
-  document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => { state.side = b.dataset.side; state.quote = null; render(); scheduleQuote(0); });
+  document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => {
+    state.side = b.dataset.side;
+    state.quote = null;
+    state.status = idleQuoteStatus() || "Quoting…";
+    render();
+    scheduleQuote(0);
+  });
   document.querySelectorAll("[data-amt]").forEach((b) => b.onclick = () => { state.amount = Number(b.dataset.amt); render(); scheduleQuote(0); });
   document.querySelectorAll("[data-pct]").forEach((b) => b.onclick = () => { state.sellPct = Number(b.dataset.pct); render(); scheduleQuote(0); });
   const amt = $("#amt");
