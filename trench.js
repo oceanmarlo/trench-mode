@@ -32,6 +32,14 @@ const state = {
   searchQ: "",
   searching: false,
   marketOpen: false,
+  orderType: "market",
+  slMode: "pct",
+  slPct: 10,
+  slPrice: "",
+  trailPct: 10,
+  stops: [],
+  trailMark: {},
+  stopLive: {},
   results: [],
   spotScan: { kind: "trending", rows: [], loading: false, err: "" },
   toast: null,
@@ -654,6 +662,11 @@ function stdAdapter(w) {
       const out = await signTx.signTransaction({ account: acct(), transaction: bytes, chain: WS_CHAIN });
       return out[0].signedTransaction;
     } : null,
+    signMessage: f["solana:signMessage"] ? async (bytes) => {
+      const out = await f["solana:signMessage"].signMessage({ account: acct(), message: bytes });
+      const row = Array.isArray(out) ? out[0] : out;
+      return row?.signature || row;
+    } : null,
     signAndSend: sas ? async (bytes) => {
       const out = await sas.signAndSendTransaction({ account: acct(), transaction: bytes, chain: WS_CHAIN });
       return b58(out[0].signature);
@@ -670,6 +683,10 @@ function legacyAdapter(p, name) {
     signTransaction: p.signTransaction ? async (bytes) => {
       const signed = await p.signTransaction(solanaWeb3.VersionedTransaction.deserialize(bytes));
       return signed.serialize();
+    } : null,
+    signMessage: p.signMessage ? async (bytes) => {
+      const r = await p.signMessage(bytes, "utf8");
+      return r?.signature || r;
     } : null,
     signAndSend: p.signAndSendTransaction ? async (bytes) => {
       const r = await p.signAndSendTransaction(solanaWeb3.VersionedTransaction.deserialize(bytes));
@@ -846,6 +863,348 @@ function orderParams() {
   return { inputMint: t.id, outputMint: SOL, amount };
 }
 
+// Jupiter Trigger v2 (api.jup.ag/trigger/v2). Stop and trailing orders live on Jupiter's
+// keeper, so they keep working after this tab closes. Market + SL is a Swap API buy, then a
+// single below-stop on the tokens received. Trailing Stop is a single order with trailingBps.
+const TRIGGER = "https://api.jup.ag/trigger/v2";
+const ORDER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SL_SLIPPAGE = 2000;
+const triggerAuth = { access: "", refresh: "", exp: 0, wallet: "" };
+
+function loadOrderPrefs() {
+  try {
+    const t = localStorage.getItem("trench-order-type");
+    if (t === "market" || t === "msl" || t === "trail") state.orderType = t;
+    const pct = Number(localStorage.getItem("trench-sl-pct"));
+    if (pct > 0 && pct < 100) state.slPct = pct;
+    const mode = localStorage.getItem("trench-sl-mode");
+    if (mode === "pct" || mode === "price") state.slMode = mode;
+    const sp = localStorage.getItem("trench-sl-price");
+    if (sp) state.slPrice = sp;
+    const tr = Number(localStorage.getItem("trench-trail-pct"));
+    if (tr >= 0.5 && tr <= 90) state.trailPct = tr;
+    const stops = JSON.parse(localStorage.getItem("trench-stops") || "[]");
+    if (Array.isArray(stops)) state.stops = stops.filter((s) => s && s.id && s.mint).slice(0, 20);
+  } catch (_) {}
+}
+function saveOrderPrefs() {
+  try {
+    localStorage.setItem("trench-order-type", state.orderType);
+    localStorage.setItem("trench-sl-pct", String(state.slPct));
+    localStorage.setItem("trench-sl-mode", state.slMode);
+    localStorage.setItem("trench-sl-price", String(state.slPrice || ""));
+    localStorage.setItem("trench-trail-pct", String(state.trailPct));
+    localStorage.setItem("trench-stops", JSON.stringify(state.stops.slice(0, 20)));
+  } catch (_) {}
+}
+loadOrderPrefs();
+
+function roundPx(n) {
+  const v = Number(n);
+  if (!(v > 0)) return 0;
+  if (v >= 1) return Math.round(v * 1e8) / 1e8;
+  return Number(v.toPrecision(8));
+}
+function stopFromEntry(entry, mode, pct, price) {
+  const e = Number(entry);
+  if (!(e > 0)) return { ok: false, reason: "No price yet" };
+  if (mode === "price") {
+    const p = Number(price);
+    if (!(p > 0)) return { ok: false, reason: "Enter a stop price" };
+    if (p >= e) return { ok: false, reason: "Stop must be below the price" };
+    return { ok: true, stop: p, pct: (1 - p / e) * 100 };
+  }
+  const n = Number(pct);
+  if (!(n > 0) || n >= 100) return { ok: false, reason: "Stop % must be between 0 and 100" };
+  return { ok: true, stop: e * (1 - n / 100), pct: n };
+}
+function trailFromHigh(high, pct) {
+  const h = Number(high);
+  const n = Number(pct);
+  if (!(h > 0)) return { ok: false, reason: "No price yet" };
+  if (!(n >= 0.5) || n > 90) return { ok: false, reason: "Trail must be 0.5% to 90%" };
+  const bps = Math.round(n * 100);
+  if (bps < 50 || bps > 9000) return { ok: false, reason: "Trail must be 0.5% to 90%" };
+  return { ok: true, high: h, trigger: h * (1 - n / 100), bps, pct: n };
+}
+function orderRefPrice() {
+  const t = state.active;
+  if (!t) return 0;
+  const px = Number(state.prices[t.id] || t.usdPrice || 0);
+  if (state.side === "buy") return px;
+  const saved = Number(localStorage.getItem(entryKey(t.id)));
+  return saved > 0 ? saved : px;
+}
+function armTrailHigh(reset) {
+  const t = state.active;
+  if (!t) return 0;
+  const px = Number(state.prices[t.id] || t.usdPrice || 0);
+  if (reset && px > 0) { state.trailMark[t.id] = px; return px; }
+  const prev = Number(state.trailMark[t.id]) || 0;
+  if (px > prev) state.trailMark[t.id] = px;
+  else if (!(prev > 0) && px > 0) state.trailMark[t.id] = px;
+  return Number(state.trailMark[t.id]) || px;
+}
+function openTrail() {
+  const t = state.active;
+  if (!t) return null;
+  return state.stops.find((s) => s.mint === t.id && s.kind === "trail") || null;
+}
+function trailDisplay() {
+  const open = openTrail();
+  const live = open && state.stopLive[open.id];
+  if (live && Number(live.high) > 0 && Number(live.trigger) > 0) {
+    return { ok: true, high: Number(live.high), trigger: Number(live.trigger), source: "jupiter", bps: live.trailingBps, line: "High " + priceLabel(live.high) + " · trigger " + priceLabel(live.trigger) };
+  }
+  const tr = trailFromHigh(armTrailHigh(false), state.trailPct);
+  if (!tr.ok) return { ok: false, line: tr.reason, reason: tr.reason };
+  return { ...tr, source: "local", line: "High " + priceLabel(tr.high) + " · trigger " + priceLabel(tr.trigger) };
+}
+function stopDisplay() {
+  const entry = orderRefPrice();
+  const sl = stopFromEntry(entry, state.slMode, state.slPct, state.slPrice);
+  if (!sl.ok) return { ok: false, line: sl.reason, reason: sl.reason, entry };
+  return { ...sl, entry, line: "Stop " + priceLabel(sl.stop) + " (−" + sl.pct.toFixed(1) + "% from " + priceLabel(entry) + ")" };
+}
+function orderPreview() {
+  if (state.orderType === "msl") return { kind: "stop", ...stopDisplay() };
+  if (state.orderType === "trail") return { kind: "trail", ...trailDisplay() };
+  return { ok: true, kind: "market", line: "" };
+}
+function buildStopBody({ mint, amount, wallet, stop, now }) {
+  const exp = (now || Date.now()) + ORDER_TTL_MS;
+  const amt = String(amount);
+  return {
+    craft: { inputMint: mint, outputMint: SOL, userAddress: wallet, amount: amt, orderType: "price", orderSubType: "single" },
+    create: {
+      orderType: "single", userPubkey: wallet, inputMint: mint, outputMint: SOL, inputAmount: amt,
+      triggerMint: mint, triggerCondition: "below", triggerPriceUsd: roundPx(stop),
+      slippageBps: SL_SLIPPAGE, expiresAt: exp
+    }
+  };
+}
+function buildTrailBody({ mint, amount, wallet, bps, now }) {
+  const exp = (now || Date.now()) + ORDER_TTL_MS;
+  const amt = String(amount);
+  return {
+    craft: { inputMint: mint, outputMint: SOL, userAddress: wallet, amount: amt, orderType: "price", orderSubType: "single" },
+    create: {
+      orderType: "single", userPubkey: wallet, inputMint: mint, outputMint: SOL, inputAmount: amt,
+      triggerMint: mint, triggerCondition: "below", trailingBps: bps,
+      slippageBps: SL_SLIPPAGE, expiresAt: exp
+    }
+  };
+}
+function protectRaw() {
+  const t = state.active;
+  if (!t) return "";
+  if (state.side === "sell") {
+    const p = orderParams();
+    return p ? String(p.amount) : "";
+  }
+  return state.quote?.outAmount ? String(state.quote.outAmount) : "";
+}
+function buildTriggerOrder(extra = {}) {
+  const t = state.active;
+  if (!t) return { ok: false, reason: "No token" };
+  const wallet = extra.userPubkey || state.wallet || "WALLET";
+  const amount = extra.amount != null ? String(extra.amount) : protectRaw();
+  if (state.orderType === "msl" || extra.kind === "stop") {
+    const entry = extra.entry != null ? Number(extra.entry) : orderRefPrice();
+    const sl = stopFromEntry(entry, extra.slMode || state.slMode, extra.slPct != null ? extra.slPct : state.slPct, extra.slPrice != null ? extra.slPrice : state.slPrice);
+    if (!sl.ok) return sl;
+    const body = buildStopBody({ mint: t.id, amount: amount || "0", wallet, stop: sl.stop, now: extra.now });
+    return { ok: true, kind: "stop", ...body, stop: sl.stop, pct: sl.pct, entry, line: "Stop " + priceLabel(sl.stop) + " (−" + sl.pct.toFixed(1) + "%)" };
+  }
+  if (state.orderType === "trail" || extra.kind === "trail") {
+    const high = extra.high != null ? Number(extra.high) : armTrailHigh(false);
+    const tr = trailFromHigh(high, extra.trailPct != null ? extra.trailPct : state.trailPct);
+    if (!tr.ok) return tr;
+    const body = buildTrailBody({ mint: t.id, amount: amount || "0", wallet, bps: tr.bps, now: extra.now });
+    return { ok: true, kind: "trail", ...body, high: tr.high, trigger: tr.trigger, bps: tr.bps, line: "High " + priceLabel(tr.high) + " · trigger " + priceLabel(tr.trigger) };
+  }
+  return { ok: false, reason: "Market order" };
+}
+function orderMathOk() {
+  const a = stopFromEntry(100, "pct", 10, "");
+  const b = stopFromEntry(100, "price", 10, 80);
+  const c = stopFromEntry(100, "price", 10, 100);
+  const d = trailFromHigh(50, 10);
+  const e = trailFromHigh(50, 0.4);
+  const f = buildStopBody({ mint: "MINT", amount: "5", wallet: "W", stop: 90, now: 1000 });
+  const g = buildTrailBody({ mint: "MINT", amount: "5", wallet: "W", bps: 1000, now: 1000 });
+  const ttl = 1000 + ORDER_TTL_MS;
+  const ok = a.ok && a.stop === 90 && b.ok && b.stop === 80 && !c.ok
+    && d.ok && d.trigger === 45 && d.bps === 1000 && !e.ok
+    && f.create.triggerCondition === "below" && f.create.triggerPriceUsd === 90 && !("trailingBps" in f.create)
+    && f.create.triggerMint === "MINT" && f.craft.orderSubType === "single" && f.create.expiresAt === ttl
+    && g.create.trailingBps === 1000 && !("triggerPriceUsd" in g.create)
+    && g.create.triggerMint === g.create.inputMint && g.create.triggerCondition === "below";
+  return { ok, a, b, c, d, e };
+}
+function orderTypeLabel() {
+  return state.orderType === "msl" ? "Mkt + SL" : state.orderType === "trail" ? "Trail" : "Market";
+}
+function goLabel() {
+  if (!state.wallet) return "Connect";
+  if (state.busy) return "…";
+  if (state.orderType === "msl") return state.side === "buy" ? "Buy + SL" : "Set stop";
+  if (state.orderType === "trail") return state.side === "buy" ? "Buy + trail" : "Set trail";
+  return state.side === "buy" ? "Buy" : "Sell";
+}
+function orderMenu() {
+  if (!state.marketOpen) return "";
+  const opt = (id, label) => `<button type="button" data-otype="${id}" class="${state.orderType === id ? "on" : ""}">${label}</button>`;
+  return `<div class="market-menu">${opt("market", "Market")}${opt("msl", "Market + SL")}${opt("trail", "Trailing Stop")}</div>`;
+}
+function orderFields() {
+  if (state.orderType === "market") return "";
+  const p = orderPreview();
+  const stops = state.stops.filter((s) => state.active && s.mint === state.active.id).map((s) =>
+    `<div class="stop-row"><span>${esc(s.symbol || "")} ${s.kind === "trail" ? "trail" : "stop"}</span><span class="live-stop">${esc(s.line || "")}</span><button type="button" data-cancel-stop="${esc(s.id)}">Cancel</button></div>`).join("");
+  if (state.orderType === "msl") {
+    const chips = [5, 10, 25].map((n) => `<button type="button" data-slpct="${n}" class="${state.slMode !== "price" && Number(state.slPct) === n ? "on" : ""}">${n}%</button>`).join("");
+    return `<div class="otype" id="otype">
+      <div class="otype-row">
+        <span class="mini-seg"><button type="button" data-slmode="pct" class="${state.slMode !== "price" ? "on" : ""}">%</button><button type="button" data-slmode="price" class="${state.slMode === "price" ? "on" : ""}">Price</button></span>
+        <input id="sl-in" inputmode="decimal" value="${esc(state.slMode === "price" ? state.slPrice : state.slPct)}" aria-label="${state.slMode === "price" ? "Stop price" : "Stop percent"}">
+        ${state.slMode === "price" ? "" : `<span class="otype-chips">${chips}</span>`}
+      </div>
+      <div class="live-stop${p.ok ? "" : " down"}" id="sl-live">${esc(p.line)}</div>
+      <div class="note">Jupiter Trigger stop · sells if price falls there · tab can close</div>
+      ${stops}
+    </div>`;
+  }
+  const chips = [5, 10, 25].map((n) => `<button type="button" data-trail="${n}" class="${Number(state.trailPct) === n ? "on" : ""}">${n}%</button>`).join("");
+  return `<div class="otype" id="otype">
+    <div class="otype-row"><span>Trail %</span><input id="trail-in" inputmode="decimal" value="${esc(state.trailPct)}" aria-label="Trail percent"><span class="otype-chips">${chips}</span></div>
+    <div class="live-stop${p.ok ? "" : " down"}" id="trail-live">${esc(p.line)}</div>
+    <div class="note">Jupiter Trigger trail · sells ${esc(state.trailPct)}% under the high · tab can close</div>
+    ${stops}
+  </div>`;
+}
+function paintOrderPreview() {
+  const p = orderPreview();
+  const el = document.getElementById("sl-live") || document.getElementById("trail-live");
+  if (!el) return;
+  el.textContent = p.line;
+  el.classList.toggle("down", !p.ok);
+}
+function asSig58(sig) {
+  if (!sig) throw new Error("Wallet did not sign.");
+  if (typeof sig === "string") return sig;
+  const bytes = sig instanceof Uint8Array ? sig : (sig.signature instanceof Uint8Array ? sig.signature : null);
+  if (!bytes) throw new Error("Wallet did not sign.");
+  return b58(bytes);
+}
+function saveAuth(r) {
+  triggerAuth.access = r.accessToken || r.token || "";
+  if (r.refreshToken) triggerAuth.refresh = r.refreshToken;
+  triggerAuth.exp = r.expiresAt ? Date.parse(r.expiresAt) : Date.now() + 14 * 60 * 1000;
+  triggerAuth.wallet = state.wallet || "";
+  if (!triggerAuth.access) throw new Error(r.error || r.message || "Jupiter did not return a session.");
+}
+async function triggerToken() {
+  if (triggerAuth.wallet && triggerAuth.wallet !== state.wallet) {
+    triggerAuth.access = ""; triggerAuth.refresh = ""; triggerAuth.exp = 0;
+  }
+  triggerAuth.wallet = state.wallet || "";
+  if (triggerAuth.access && triggerAuth.exp - Date.now() > 60000) return triggerAuth.access;
+  if (triggerAuth.refresh) {
+    try {
+      const r = await jup(TRIGGER + "/auth/refresh", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken: triggerAuth.refresh })
+      });
+      saveAuth(r);
+      return triggerAuth.access;
+    } catch (_) { triggerAuth.refresh = ""; triggerAuth.access = ""; }
+  }
+  const w = state.provider;
+  if (!w) throw new Error("Connect a wallet first.");
+  if (w.signMessage) {
+    const ch = await jup(TRIGGER + "/auth/challenge", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ walletPubkey: state.wallet, type: "message" })
+    });
+    const sig = await w.signMessage(new TextEncoder().encode(ch.challenge));
+    const verified = await jup(TRIGGER + "/auth/verify", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "message", walletPubkey: state.wallet, signature: asSig58(sig), authMode: "access_refresh" })
+    });
+    saveAuth(verified);
+    return triggerAuth.access;
+  }
+  if (!w.signTransaction) throw new Error("This wallet can't sign a Jupiter stop.");
+  const ch = await jup(TRIGGER + "/auth/challenge", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ walletPubkey: state.wallet, type: "transaction" })
+  });
+  const signed = await w.signTransaction(b64ToBytes(ch.transaction));
+  const verified = await jup(TRIGGER + "/auth/verify", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "transaction", walletPubkey: state.wallet, signedTransaction: bytesToB64(signed), authMode: "access_refresh" })
+  });
+  saveAuth(verified);
+  return triggerAuth.access;
+}
+async function ensureVault(headers) {
+  try { return await jup(TRIGGER + "/vault", { headers }); }
+  catch (err) {
+    try { return await jup(TRIGGER + "/vault/register", { headers }); }
+    catch (e2) {
+      if (/409|already/i.test(e2.message || "")) return jup(TRIGGER + "/vault", { headers });
+      throw e2;
+    }
+  }
+}
+function rememberOrder(created, built) {
+  state.stops = [{ id: created.id, kind: built.kind, mint: state.active.id, symbol: state.active.symbol, line: built.line }].concat(state.stops.filter((s) => s.id !== created.id)).slice(0, 20);
+  saveOrderPrefs();
+}
+async function submitTrigger(built) {
+  if (!built.ok) throw new Error(built.reason || "Can't build that stop.");
+  if (!built.create.inputAmount || built.create.inputAmount === "0") throw new Error("No tokens to protect.");
+  const token = await triggerToken();
+  const headers = { "content-type": "application/json", Authorization: "Bearer " + token };
+  await ensureVault(headers);
+  state.status = "Confirm the deposit in your wallet…";
+  paintLive();
+  const deposit = await jup(TRIGGER + "/deposit/craft", { method: "POST", headers, body: JSON.stringify(built.craft) });
+  if (!deposit.requestId || !deposit.transaction) throw new Error(deposit.error || deposit.message || "Jupiter did not return a deposit.");
+  const signed = await state.provider.signTransaction(b64ToBytes(deposit.transaction));
+  const createBody = { ...built.create, depositRequestId: deposit.requestId, depositSignedTx: bytesToB64(signed) };
+  if (built.kind === "trail") delete createBody.triggerPriceUsd;
+  state.status = "Placing stop…";
+  paintLive();
+  const created = await jup(TRIGGER + "/orders/price", { method: "POST", headers, body: JSON.stringify(createBody) });
+  if (!created.id) throw new Error(created.error || created.message || "Stop was not created.");
+  rememberOrder(created, built);
+  if (built.kind === "trail") {
+    const px = Number(state.prices[state.active.id] || state.active.usdPrice || built.high || 0);
+    if (px > 0) state.trailMark[state.active.id] = px;
+    state.stopLive[created.id] = { high: px, trigger: px * (1 - built.bps / 10000), trailingBps: built.bps };
+  }
+  return created;
+}
+function amountUsd(rawAmt, decimals, price) {
+  const n = Number(rawAmt);
+  if (!(n > 0) || !(price > 0)) return 0;
+  return n / 10 ** (decimals || 0) * price;
+}
+async function refreshStopLive() {
+  if (!triggerAuth.access || !state.stops.length || triggerAuth.exp - Date.now() < 5000) return;
+  try {
+    const hist = await jup(TRIGGER + "/orders/history?state=active&limit=20", { headers: { Authorization: "Bearer " + triggerAuth.access } });
+    for (const o of hist.orders || []) {
+      if (o.highWatermark || o.triggerPriceUsd) {
+        state.stopLive[o.id] = { high: Number(o.highWatermark) || state.stopLive[o.id]?.high || 0, trigger: Number(o.triggerPriceUsd) || 0, trailingBps: o.trailingBps };
+      }
+    }
+    paintOrderPreview();
+  } catch (_) {}
+}
+
 let quoteTimer = 0;
 let quoteSeq = 0;
 function scheduleQuote(ms = 400) {
@@ -911,6 +1270,48 @@ async function heliusSendSigned(signed) {
   return confirmSig(sig);
 }
 
+async function sendMarket() {
+  const w = state.provider;
+  if (!w?.signTransaction && !w?.signAndSend) throw new Error("This wallet can't sign transactions here.");
+  // Orders are single-use and expire fast, so always take a fresh one for the click.
+  clearTimeout(quoteTimer);
+  const order = await refreshQuote();
+  if (!order?.transaction) throw new Error(order?.errorMessage || order?.error || "Jupiter did not return a transaction.");
+  state.status = "Confirm in your wallet…";
+  paintLive();
+  const unsigned = b64ToBytes(order.transaction);
+  let done;
+  if (w.signTransaction) {
+    // signTransaction (not signAndSend): JupiterZ/gasless routes need Jupiter to add
+    // its signature at /execute, so the wallet must not broadcast it itself.
+    const signed = await w.signTransaction(unsigned);
+    state.status = "Sending…";
+    paintLive();
+    done = null;
+    if (HKEY) {
+      try { done = await heliusSendSigned(signed); }
+      catch (_) { done = null; }
+    }
+    if (!done) {
+      done = await jup(SWAP + "/execute", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
+      });
+    }
+  } else {
+    // Wallet only offers signAndSend: OK unless Jupiter must co-sign (gasless/RFQ).
+    const need = solanaWeb3.VersionedTransaction.deserialize(unsigned).message.header.numRequiredSignatures;
+    if (need > 1) throw new Error(w.name + " can only sign-and-send; this route needs Jupiter to co-sign. Try another wallet or a larger amount.");
+    const sig = await w.signAndSend(unsigned);
+    state.status = "Sent · confirming…";
+    paintLive();
+    done = await confirmSig(sig);
+  }
+  if (done.status !== "Success") throw new Error((done.error || "Swap failed") + (done.code != null ? " (code " + done.code + ")" : ""));
+  return { done, outAmount: order.outAmount ? String(order.outAmount) : "" };
+}
+
 async function trade() {
   if (!state.wallet) return connect();
   if (state.busy) return;
@@ -923,44 +1324,7 @@ async function trade() {
   state.status = "Getting order…";
   render();
   try {
-    const w = state.provider;
-    if (!w?.signTransaction && !w?.signAndSend) throw new Error("This wallet can't sign transactions here.");
-    // Orders are single-use and expire fast, so always take a fresh one for the click.
-    clearTimeout(quoteTimer);
-    const order = await refreshQuote();
-    if (!order?.transaction) throw new Error(order?.errorMessage || order?.error || "Jupiter did not return a transaction.");
-    state.status = "Confirm in your wallet…";
-    paintLive();
-    const unsigned = b64ToBytes(order.transaction);
-    let done;
-    if (w.signTransaction) {
-      // signTransaction (not signAndSend): JupiterZ/gasless routes need Jupiter to add
-      // its signature at /execute, so the wallet must not broadcast it itself.
-      const signed = await w.signTransaction(unsigned);
-      state.status = "Sending…";
-      paintLive();
-      done = null;
-      if (HKEY) {
-        try { done = await heliusSendSigned(signed); }
-        catch (_) { done = null; }
-      }
-      if (!done) {
-        done = await jup(SWAP + "/execute", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
-        });
-      }
-    } else {
-      // Wallet only offers signAndSend: OK unless Jupiter must co-sign (gasless/RFQ).
-      const need = solanaWeb3.VersionedTransaction.deserialize(unsigned).message.header.numRequiredSignatures;
-      if (need > 1) throw new Error(w.name + " can only sign-and-send; this route needs Jupiter to co-sign. Try another wallet or a larger amount.");
-      const sig = await w.signAndSend(unsigned);
-      state.status = "Sent · confirming…";
-      paintLive();
-      done = await confirmSig(sig);
-    }
-    if (done.status !== "Success") throw new Error((done.error || "Swap failed") + (done.code != null ? " (code " + done.code + ")" : ""));
+    const { done } = await sendMarket();
     const price = state.prices[t.id] || t.usdPrice;
     if (side === "buy" && price) localStorage.setItem(entryKey(t.id), String(price));
     state.txs.unshift({ side, symbol: t.symbol, sig: done.signature, sol: solIn, t: "now" });
@@ -975,6 +1339,110 @@ async function trade() {
     state.busy = false;
     render();
     scheduleQuote(QUOTE_EVERY_MS);
+  }
+}
+
+async function boughtRaw(before, quoted) {
+  for (let i = 0; i < 3; i++) {
+    await loadHoldings().catch(() => {});
+    const now = Number(state.holdings.find((h) => h.mint === state.active?.id)?.amount) || 0;
+    if (now > before) return String(Math.floor(now - before));
+    await sleep(700);
+  }
+  return quoted || "";
+}
+
+async function placeProtect() {
+  if (window.__orderDry) {
+    const built = buildTriggerOrder();
+    state.lastBuilt = built;
+    window.__orderLast = built && built.create ? { kind: built.kind, bps: built.create.trailingBps || 0, hasPrice: "triggerPriceUsd" in built.create, hasSigned: !!built.create.depositSignedTx } : { kind: "", bps: 0, hasSigned: false };
+    state.status = built.ok ? ("Built " + built.kind + " · not sent") : (built.reason || "Can't build");
+    state.toast = state.status;
+    render();
+    return;
+  }
+  if (!state.wallet) return connect();
+  if (state.busy) return;
+  const t = state.active;
+  if (!t) return;
+  const preview = orderPreview();
+  if (!preview.ok) { state.toast = preview.reason || preview.line; state.status = state.toast; render(); return; }
+  state.busy = true;
+  const side = state.side;
+  state.status = side === "buy" ? "Getting order…" : "Building stop…";
+  render();
+  let bought = false;
+  try {
+    let amount = "";
+    let entry = orderRefPrice();
+    if (side === "buy") {
+      if (!state.quote) await refreshQuote().catch(() => {});
+      const est = Number(state.quote?.outUsdValue);
+      const px = Number(state.prices[t.id] || t.usdPrice || 0);
+      const usdEst = Number.isFinite(est) && est > 0 ? est : amountUsd(state.quote?.outAmount, t.decimals || 6, px) || Number(state.amount) * (state.prices[SOL] || 0);
+      if (usdEst && usdEst < 10) throw new Error("Jupiter stops need at least $10. This buy is about " + usd(usdEst) + ".");
+      const before = Number(state.holdings.find((h) => h.mint === t.id)?.amount) || 0;
+      const fill = await sendMarket();
+      bought = true;
+      entry = Number(state.prices[t.id] || t.usdPrice || entry);
+      if (entry) localStorage.setItem(entryKey(t.id), String(entry));
+      amount = await boughtRaw(before, fill.outAmount);
+    } else {
+      const params = orderParams();
+      if (!params) throw new Error("No balance to protect.");
+      amount = params.amount;
+      const px = Number(state.prices[t.id] || t.usdPrice || 0);
+      const usdEst = amountUsd(amount, t.decimals || 6, px);
+      if (usdEst && usdEst < 10) throw new Error("Jupiter stops need at least $10. This is about " + usd(usdEst) + ".");
+    }
+    const built = buildTriggerOrder({ amount, entry, userPubkey: state.wallet });
+    if (!built.ok) throw new Error(built.reason || "Can't build that stop.");
+    await submitTrigger(built);
+    state.toast = built.kind === "trail"
+      ? "Trailing stop set · Jupiter keeps it with the tab closed"
+      : "Stop set at " + priceLabel(built.stop) + " · tab can close";
+    state.status = state.toast;
+  } catch (err) {
+    const msg = err.message || String(err);
+    state.status = bought ? ("Bought, stop not set: " + msg) : msg;
+    state.toast = state.status;
+  } finally {
+    state.busy = false;
+    render();
+    scheduleQuote(QUOTE_EVERY_MS);
+  }
+}
+
+async function cancelStop(id) {
+  if (!id || state.busy) return;
+  if (window.__orderDry) { state.toast = "Cancel not sent"; render(); return; }
+  state.busy = true;
+  state.status = "Cancelling…";
+  render();
+  try {
+    const token = await triggerToken();
+    const headers = { Authorization: "Bearer " + token, "content-type": "application/json" };
+    const cancel = await jup(TRIGGER + "/orders/price/cancel/" + id, { method: "POST", headers });
+    if (!cancel.transaction) throw new Error(cancel.error || cancel.message || "Jupiter did not return a withdrawal.");
+    state.status = "Confirm the withdrawal in your wallet…";
+    paintLive();
+    const signed = await state.provider.signTransaction(b64ToBytes(cancel.transaction));
+    await jup(TRIGGER + "/orders/price/confirm-cancel/" + id, {
+      method: "POST", headers,
+      body: JSON.stringify({ signedTransaction: bytesToB64(signed), cancelRequestId: cancel.requestId })
+    });
+    state.stops = state.stops.filter((s) => s.id !== id);
+    delete state.stopLive[id];
+    saveOrderPrefs();
+    state.toast = "Stop cancelled · funds return to your wallet";
+    state.status = state.toast;
+  } catch (err) {
+    state.status = err.message || String(err);
+    state.toast = state.status;
+  } finally {
+    state.busy = false;
+    render();
   }
 }
 
@@ -1046,6 +1514,8 @@ function paintLive() {
   });
   tickChart();
   paintEntryLine();
+  if (state.orderType === "trail") armTrailHigh(false);
+  paintOrderPreview();
 }
 
 // ---- TradingView Lightweight Charts (Apache-2.0), created once and re-attached after each render ----
@@ -2927,10 +3397,11 @@ function tradePanel() {
   if (!t) return "";
   const bal = state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
   const balIcon = state.side === "buy" ? SOL_ICON : t.icon;
-  const label = state.wallet ? (state.side === "buy" ? "Buy" : "Sell") : "Connect";
+  const label = goLabel();
+  const engine = state.orderType === "market" ? "Jupiter Swap" : "Jupiter Trigger";
   return `<div class="trade-top">
       <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> <span id="trade-bal">${bal}</span></span>
-      <span class="trade-right"><span class="market-wrap"><button class="market" type="button" id="market">Market <span>▾</span></button>${state.marketOpen ? `<div class="market-menu"><button type="button" class="on">Market</button></div>` : ""}</span>
+      <span class="trade-right"><span class="market-wrap"><button class="market" type="button" id="market" aria-expanded="${state.marketOpen}">${orderTypeLabel()} <span>▾</span></button>${orderMenu()}</span>
       <div class="seg">
         <button class="buy ${state.side==="buy"?"on":""}" data-side="buy">Buy</button>
         <button class="sell ${state.side==="sell"?"on":""}" data-side="sell">Sell</button>
@@ -2941,9 +3412,10 @@ function tradePanel() {
       <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" value="${state.side === "buy" ? state.amount : state.sellPct}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
       <button class="go ${state.side}" id="go" ${state.busy ? "disabled" : ""}>${state.busy ? "…" : label}</button>
     </div>
+    ${orderFields()}
     <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
     <div class="quote-detail" id="quote-detail" hidden></div>
-    <div class="ultra">✦ Jupiter Swap · <span id="status">${esc(state.status)}</span></div>`;
+    <div class="ultra">✦ ${engine} · <span id="status">${esc(state.status)}</span></div>`;
 }
 
 function tapeRows() {
@@ -3327,6 +3799,11 @@ document.addEventListener("click", (e) => {
   if (est) est.innerHTML = quoteSummary();
   paintQuoteExtras();
 });
+document.addEventListener("click", (e) => {
+  if (!state.marketOpen || e.target.closest(".market-wrap")) return;
+  state.marketOpen = false;
+  document.querySelector(".market-menu")?.remove();
+});
 
 function searchSheet() {
   const q = state.searchQ || "";
@@ -3354,9 +3831,64 @@ function bind() {
     scheduleQuote(700);
   };
   const go = $("#go");
-  if (go) go.onclick = () => state.wallet ? trade() : connect();
+  if (go) go.onclick = () => {
+    if (!state.wallet) return connect();
+    if (state.orderType === "market") return trade();
+    return placeProtect();
+  };
   const market = $("#market");
   if (market) market.onclick = (e) => { e.stopPropagation(); state.marketOpen = !state.marketOpen; render(); };
+  document.querySelectorAll("[data-otype]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    state.orderType = b.dataset.otype;
+    if (state.orderType === "trail") armTrailHigh(true);
+    state.marketOpen = false;
+    state.quote = null;
+    saveOrderPrefs();
+    render();
+    scheduleQuote(0);
+  });
+  document.querySelectorAll("[data-slmode]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    state.slMode = b.dataset.slmode;
+    saveOrderPrefs();
+    render();
+  });
+  document.querySelectorAll("[data-slpct]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    state.slMode = "pct";
+    state.slPct = Number(b.dataset.slpct);
+    saveOrderPrefs();
+    render();
+  });
+  document.querySelectorAll("[data-trail]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    state.trailPct = Number(b.dataset.trail);
+    saveOrderPrefs();
+    const inp = $("#trail-in");
+    if (inp) inp.value = state.trailPct;
+    document.querySelectorAll("[data-trail]").forEach((x) => x.classList.toggle("on", Number(x.dataset.trail) === Number(state.trailPct)));
+    paintOrderPreview();
+  });
+  const slIn = $("#sl-in");
+  if (slIn) slIn.oninput = () => {
+    const v = slIn.value.replace(",", ".");
+    if (state.slMode === "price") state.slPrice = v;
+    else state.slPct = v;
+    saveOrderPrefs();
+    paintOrderPreview();
+  };
+  const trailIn = $("#trail-in");
+  if (trailIn) trailIn.oninput = () => {
+    const v = trailIn.value.replace(",", ".");
+    state.trailPct = v === "" ? "" : Number(v);
+    saveOrderPrefs();
+    paintOrderPreview();
+  };
+  document.querySelectorAll("[data-cancel-stop]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    cancelStop(b.dataset.cancelStop);
+  });
   const fx = $("#fx");
   if (fx) fx.onclick = (e) => { e.stopPropagation(); openIndSheet(); };
   const chartStyleBtn = $("#chart-style");
@@ -3800,6 +4332,33 @@ function heliusNoteJupTx(sig) {
   hel.jupSig.set(sig, now);
   if (hel.jupSig.size > 500) hel.jupSig.delete(hel.jupSig.keys().next().value);
 }
+window.__orders = (cmd) => {
+  if (cmd === "ratchet" && state.active) {
+    const id = state.active.id;
+    const px = Number(state.prices[id] || state.active.usdPrice || 0);
+    state.orderType = "trail";
+    state.trailPct = 10;
+    state.prices[id] = px;
+    armTrailHigh(true);
+    state.prices[id] = px * 1.2;
+    armTrailHigh(false);
+    state.prices[id] = px * 1.05;
+    const d = trailDisplay();
+    state.prices[id] = px;
+    armTrailHigh(true);
+    return { px, high: d.high, trigger: d.trigger, line: d.line };
+  }
+  const px = state.active ? Number(state.prices[state.active.id] || state.active.usdPrice || 0) : 0;
+  const extra = { amount: "1000", userPubkey: "WALLET", now: 1700000000000, high: px || 2, entry: px || 2 };
+  return {
+    math: orderMathOk(),
+    type: state.orderType,
+    preview: orderPreview(),
+    px,
+    stop: state.active ? buildTriggerOrder({ ...extra, kind: "stop" }) : null,
+    trail: state.active ? buildTriggerOrder({ ...extra, kind: "trail" }) : null
+  };
+};
 window.__helius = () => {
   const l = [...hel.leads].sort((x, y) => x - y);
   const q = (f) => (l.length ? Math.round(l[Math.min(l.length - 1, Math.floor(l.length * f))]) : null);
@@ -4154,6 +4713,7 @@ async function boot() {
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadAlpha() : null));
     every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
+    every(20000, () => refreshStopLive());
   } catch (err) {
     state.status = err.message || String(err);
     render();
