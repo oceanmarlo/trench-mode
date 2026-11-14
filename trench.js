@@ -3012,9 +3012,9 @@ function rcLineInner(t) {
   const r = rcGet(t.id);
   const a = t.audit || {};
   const score = r && !r.missing && r.score != null ? String(Math.round(r.score)) : "…";
-  const lp = r && !r.missing && r.lp != null ? Math.round(r.lp) + "%" : "…";
+  const lp = r && !r.missing && r.lp != null ? pctShown(r.lp) : "…";
   const auth = (off) => off == null ? "—" : (off ? `<span class="ok">off</span>` : `<span class="bad">on</span>`);
-  const top = a.topHoldersPercentage == null ? "—" : Math.round(a.topHoldersPercentage) + "%";
+  const top = pctShown(a.topHoldersPercentage);
   return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
 }
 function tokenHead(t, price, chg) {
@@ -3503,7 +3503,7 @@ function alphaRowsHtml() {
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : "Hld " + compactCount(x.holders)}</span></span>
-      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : x.top10.toFixed(0) + "%"}</span></span>
+      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
     </button>`;
   }).join("");
 }
@@ -3943,6 +3943,33 @@ function shareText(n) {
   if (Math.abs(v) < 0.01) return "<0.01%";
   return v.toFixed(2) + "%";
 }
+// Header and Alpha rows are one line. An integer round turns 0.70 into 1 and 99.6 into 100.
+function pctShown(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  const abs = Math.abs(v);
+  if (abs === 0) return "0%";
+  if (abs < 0.01) return "<0.01%";
+  if (abs < 1) return v.toFixed(2) + "%";
+  if (abs < 10) {
+    let text = v.toFixed(1);
+    if (Math.abs(Number(text)) >= 10) text = v.toFixed(2);
+    return text.replace(/\.0$/, "") + "%";
+  }
+  if (abs < 100 && Math.abs(Math.round(v)) >= 100) return v.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%";
+  return Math.round(v) + "%";
+}
+// Buy and sell pills share one basis so 100% Buy is never paired with a dash.
+function splitPct(a, b) {
+  const aOk = a != null && Number.isFinite(Number(a));
+  const bOk = b != null && Number.isFinite(Number(b));
+  if (!aOk && !bOk) return null;
+  const av = aOk ? Number(a) : 0;
+  const bv = bOk ? Number(b) : 0;
+  if (!(av + bv > 0)) return null;
+  const left = Math.round(100 * av / (av + bv));
+  return [left, 100 - left];
+}
 function shareShown(n) {
   if (n == null || !Number.isFinite(Number(n))) return null;
   const v = Number(n);
@@ -4088,11 +4115,10 @@ function sheetVals() {
   const s = stat(state.infoWin);
   const buy = Number(s.buyVolume) || 0, sell = Number(s.sellVolume) || 0;
   const volSum = buy + sell;
-  const buys = s.numBuys, sells = s.numSells;
-  const tradeN = (Number(buys) || 0) + (Number(sells) || 0);
-  const buyPct = volSum ? Math.round(100 * buy / volSum) : null;
-  // A missing sell count must not become NaN% (100 * undefined). Unknown stays an em dash.
-  const sellPct = sells == null || !Number.isFinite(Number(sells)) ? null : (tradeN ? Math.round(100 * Number(sells) / tradeN) : 0);
+  // Volume share when we have it; otherwise buyer/seller counts. Never mix the two.
+  const pair = splitPct(s.buyVolume, s.sellVolume) || splitPct(s.numBuys, s.numSells);
+  const buyPct = pair ? pair[0] : null;
+  const sellPct = pair ? pair[1] : null;
   const curveOn = onCurve(t);
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
   return {
