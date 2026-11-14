@@ -1846,6 +1846,8 @@ function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
   const tf = resolvedTf();
+  // A clock time next to month ticks (Jul 19:00) is the wrong unit.
+  if (tf === "4h" || tf === "1D") return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const sec = tf === "1s" || tf === "15s";
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
 }
