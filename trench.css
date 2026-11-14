@@ -121,8 +121,14 @@ button { font: inherit; }
   display: grid; place-items: center; font-size: 8px; color: var(--green);
 }
 .tok-name { min-width: 0; flex: 1; }
-.tf { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 13px; padding-bottom: 6px; }
-.tf-tools { margin-left: auto; display: flex; gap: 10px; }
+.tf { display: flex; gap: 0; align-items: center; color: var(--muted); font-size: 12px; padding-bottom: 6px; overflow: hidden; }
+.tf-scroll { display: flex; gap: 7px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.tf-scroll::-webkit-scrollbar { display: none; }
+.tf-tools { margin-left: 0; flex: none; display: flex; gap: 2px; padding-left: 6px; border-left: 1px solid var(--line); }
+#fx { font-style: italic; font-weight: 700; padding: 4px 6px; }
+#chart-style { display: grid; place-items: center; width: 28px; height: 28px; }
+#chart-style svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+#fx.on, #chart-style.on { color: var(--text); }
 .set-wrap { position: relative; }
 .set-menu { top: 22px; right: 0; }
 .tf button {
@@ -131,11 +137,13 @@ button { font: inherit; }
 .tf button.on { color: var(--text); font-weight: 700; }
 .chart-wrap { position: relative; height: 260px; margin: 0 4px; padding-bottom: 14px; box-sizing: border-box; }
 .tools {
-  position: absolute; left: 0; top: 34px; z-index: 2;
-  display: grid; gap: 2px; color: #8b939e;
+  position: absolute; left: 0; top: 22px; z-index: 6;
+  display: grid; gap: 0; color: #8b939e;
+  background: rgba(7,9,14,.72); border-radius: 8px; padding: 2px 0;
 }
-.tools button { width: 18px; height: 18px; padding: 0; border: 0; background: transparent; color: inherit; }
-.tools svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.tools button { width: 28px; height: 26px; padding: 0; border: 0; background: transparent; color: inherit; }
+.tools button.on { color: #c7f284; }
+.tools svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; }
 .al { position: absolute; right: 2px; display: grid; gap: 1px; z-index: 2; }
 .al-price { top: 28px; }
 .al-vol { top: 122px; }
@@ -318,7 +326,22 @@ canvas.chart, canvas.map { width: 100%; height: 100%; display: block; }
 /* Lightweight Charts host + resize */
 .chart-slot { position: absolute; inset: 0 0 14px 0; }
 .lwc-host { position: absolute; inset: 0; }
-.lwc-legend { position: absolute; left: 6px; top: 34px; z-index: 3; display: flex; flex-wrap: wrap; gap: 2px 5px; font-size: 10px; pointer-events: none; max-width: calc(100% - 70px); }
+.lwc-legend { position: absolute; left: 32px; top: 16px; z-index: 4; display: flex; flex-wrap: wrap; gap: 2px 5px; font-size: 10px; pointer-events: none; max-width: calc(100% - 80px); }
+.draw-layer { position: absolute; inset: 0; z-index: 3; touch-action: none; }
+.draw-layer.off { pointer-events: none; }
+.pane-tags { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.pane-tag { position: absolute; left: 32px; font-size: 10px; color: #c5ccd4; font-weight: 650; text-shadow: 0 1px 2px #000; }
+.draw-text-inp { position: absolute; z-index: 7; width: 128px; font-size: 16px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: #12171e; color: #fff; }
+.scale-btns { display: flex; gap: 10px; }
+.scale-btns button { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 0; }
+.scale-btns button.on { color: var(--text); font-weight: 700; }
+#ind-sheet { z-index: 40; padding: 10px 14px 24px; max-height: 72dvh; overflow: auto; }
+#ind-sheet h2 { display: flex; justify-content: space-between; align-items: center; }
+#ind-sheet h2 button { background: none; border: 0; color: var(--muted); font-size: 18px; }
+.ind-row { width: 100%; display: flex; gap: 8px; align-items: center; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font: inherit; font-size: 15px; padding: 12px 0; text-align: left; }
+.ind-row .ind-kind { margin-left: auto; color: var(--faint); font-size: 11px; }
+.ind-row.on { color: var(--green-2); }
+.ind-check { width: 18px; text-align: right; font-weight: 700; }
 .lwc-legend span { color: var(--muted); }
 .lwc-legend b { font-weight: 600; }
 .chart-label { z-index: 3; pointer-events: none; }
