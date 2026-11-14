@@ -3472,12 +3472,16 @@ function tapeRows() {
   return rows.slice(0, 40).map((x) => {
     const buy = x.type === "buy";
     const mc = supply && x.usdPrice ? usd(supply * x.usdPrice) : "—";
-    return `<div class="trow"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span><span class="trader">${(x.traderAddress || "").slice(-3)} ▾</span></div>`;
+    const addr = x.traderAddress || "";
+    const trader = addr
+      ? `<a class="trader" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" aria-label="Trader on Solscan">${esc(addr.slice(-4))}</a>`
+      : `<span class="trader">—</span>`;
+    return `<div class="trow"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span>${trader}</div>`;
   }).join("");
 }
 
 function txPanel() {
-  const chips = ["All", "You", "Dev", "Followed", "Sniper", "Insider", "Bundler"];
+  const chips = ["All", "You", "Dev"];
   const arrow = (k) => state.txSort === k ? (state.txDir === "asc" ? " ↑" : " ↓") : "";
   return `<div class="filters">${chips.map((f) => `<button data-txf="${f}" class="${state.txFilter === f ? "on" : ""}">${f}</button>`).join("")}</div>
     <div class="tcols"><button type="button" data-txsort="age">Age${arrow("age")}</button><button type="button" data-txsort="mc">MC${arrow("mc")}</button><span>${esc(state.active?.symbol || "")}</span><span>Vol</span><span>Trader</span></div>
