@@ -1307,9 +1307,19 @@ function paintAxisEdge() {
   }
   const range = chart.timeScale().getVisibleRange();
   const x = range ? chart.timeScale().timeToCoordinate(range.from) : null;
+  const toX = range ? chart.timeScale().timeToCoordinate(range.to) : null;
+  const paneW = host.querySelector("canvas")?.clientWidth || 0;
+  const rightClipped = toX != null && paneW && toX > paneW - 36;
   // Cover a clipped left tick. Skip when that tick is already drawn under the overlay, or the two labels stack.
-  const show = x == null ? !!range : x < 8 || x > 56;
+  const show = (x == null ? !!range : x < 8 || x > 56) && !(rightClipped && range.from === range.to);
   bar.textContent = range && show ? axisClock(range.from) : "";
+  let right = host.querySelector(".axis-edge-r");
+  if (!right) {
+    right = document.createElement("div");
+    right.className = "axis-edge axis-edge-r";
+    host.appendChild(right);
+  }
+  right.textContent = range && rightClipped ? axisClock(range.to) : "";
 }
 
 function paintLegend(bar, vol, param) {
