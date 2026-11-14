@@ -5,7 +5,6 @@ const SOL_ICON = "https://static.datapi.jup.ag/token-icons/79a96c7b893fd89951241
 // Swap API V2 (/order + /execute). Same request/response shape as Ultra v1, which Jupiter no longer maintains.
 const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
-const SEARCH = "https://api.jup.ag/tokens/v2/search";
 const RPC = (window.HELIUS_API_KEY && !/[?&]nohelius=1/.test(location.search)) ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(window.HELIUS_API_KEY) : "https://solana-rpc.publicnode.com";
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VeKKdPT7yHdmnMvEGB4ryFHSZH9Ee"];
 const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
@@ -218,7 +217,7 @@ let loadSeq = 0;
 async function loadToken(query) {
   const seq = ++loadSeq;
   const q = String(query).trim();
-  const list = await jup(SEARCH + "?query=" + encodeURIComponent(q));
+  const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(q));
   if (seq !== loadSeq) return;
   const hit = (list || []).find((t) => t.id === q)
     || (list || []).find((t) => t.symbol?.toLowerCase() === q.toLowerCase())
@@ -237,24 +236,6 @@ async function loadToken(query) {
   state.scrollTop = 0;
   render();
   heliusTrack(hit);
-  datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(hit.id)).then((extra) => {
-    const row = (extra || []).find((t) => t.id === hit.id);
-    if (row && state.active === hit) {
-      ["fees", "launchpad", "metaLaunchpad", "twitter", "primaryTwitter", "website", "telegram", "discord", "isVerified", "bondingCurve", "graduatedAt", "graduatedPool", "dexPaidAt"].forEach((k) => {
-        if (row[k] != null && hit[k] == null) hit[k] = row[k];
-      });
-      ["stats5m", "stats1h", "stats6h", "stats24h"].forEach((k) => {
-        if (row[k] && (hit[k] == null || !Object.keys(hit[k]).length)) hit[k] = row[k];
-      });
-      if (row.audit) {
-        hit.audit = hit.audit || {};
-        for (const [k, val] of Object.entries(row.audit)) {
-          if (hit.audit[k] == null && val != null) hit.audit[k] = val;
-        }
-      }
-      render();
-    }
-  }).catch(() => {});
   state.tapeIds = new Set();
   streamSync();
   loadCandles().catch(() => {});
@@ -390,7 +371,7 @@ function search(q) {
   paintResults();
   searchTimer = setTimeout(async () => {
     try {
-      const list = await jup(SEARCH + "?query=" + encodeURIComponent(state.searchQ));
+      const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(state.searchQ));
       if (seq !== searchSeq) return;
       state.results = Array.isArray(list) ? list : [];
       state.searching = false;
