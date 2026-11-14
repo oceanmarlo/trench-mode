@@ -3726,9 +3726,9 @@ function pctText(v) {
     text = n.toFixed(digits);
   }
   if (Number(text) === 0) {
-    const m = abs.toFixed(12).match(/^0\.(0*)([1-9])/);
-    if (!m) return "—";
-    return (n < 0 ? "-" : "+") + "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2] + "%";
+    // Under 0.001%. A price subscript (0.0₆) is not a percent, and the longer
+    // decimal will not fit beside -99.96% in this column.
+    return (n < 0 ? "-" : "+") + "<0.001%";
   }
   if (n > 0) text = "+" + text;
   return text + "%";
@@ -3754,8 +3754,8 @@ function alphaRowsHtml() {
       <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="" loading="lazy">` : "●"}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
-      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "—" : "Hld " + compactCount(x.holders)}</span></span>
-      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${pctText(x.chg)}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
+      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
+      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${esc(pctText(x.chg))}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
     </button>`;
   }).join("");
 }
