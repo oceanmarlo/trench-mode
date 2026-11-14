@@ -40,6 +40,7 @@ const state = {
   provider: null,
   sol: 0,
   quote: null,
+  quoteOpen: false,
   quoting: false,
   busy: false,
   holdersLoading: false,
@@ -1013,6 +1014,7 @@ function paintLive() {
     barP.className = cls(p.p);
   }
   if (est) est.innerHTML = quoteSummary();
+  paintQuoteExtras();
   if (stat) stat.textContent = state.quoting ? "Quoting…" : state.status;
   document.querySelectorAll("[data-mint]").forEach((row) => {
     const h = state.holdings.find((x) => x.mint === row.dataset.mint);
@@ -2094,10 +2096,10 @@ function holdingsPanel() {
     const d = value - h.ui * entry;
     const pct = entry ? ((price - entry) / entry) * 100 : 0;
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(h.icon)}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>now</span></div></div>
+      <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(h.icon)}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl"><b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span></div>
-      <div class="actions"><span class="share" aria-hidden="true">↗</span><button class="sell" data-sell="${h.mint}">Sell</button></div>
+      <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
     </div>`;
   }).join("");
   return head + rows;
@@ -2786,6 +2788,35 @@ function portfolioView() {
   return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
 }
 
+function quoteBits(q) {
+  const plan = Array.isArray(q?.routePlan) ? q.routePlan : [];
+  const labels = [];
+  for (const s of plan) {
+    const label = s?.swapInfo?.label;
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  const parts = [];
+  if (labels.length) parts.push(labels.join(" · "));
+  const impact = Number(q?.priceImpact);
+  if (Number.isFinite(impact)) parts.push("Impact " + signed(impact) + "%");
+  const fee = Number(q?.feeBps);
+  if (Number.isFinite(fee) && fee > 0) parts.push("Fee " + (fee / 100).toFixed(2) + "%");
+  return { hops: plan.length, line: parts.join(" · ") };
+}
+function paintQuoteExtras() {
+  const bits = quoteBits(state.quote);
+  const n = $("#route-n");
+  if (n) {
+    n.hidden = !bits.hops;
+    if (bits.hops) n.textContent = String(bits.hops);
+  }
+  const det = $("#quote-detail");
+  if (det) {
+    const show = state.quoteOpen && !!bits.line;
+    det.hidden = !show;
+    det.textContent = show ? bits.line : "";
+  }
+}
 function quoteSummary() {
   const t = state.active;
   if (!t) return "—";
@@ -2793,13 +2824,18 @@ function quoteSummary() {
   if (!state.quote?.outAmount) return state.quoting ? "…" : "—";
   const outDec = state.side === "buy" ? (t.decimals || 6) : 9;
   const outUi = ui(state.quote.outAmount, outDec);
+  const qUsd = Number(state.quote.outUsdValue);
+  const inQuote = Number(state.quote.inUsdValue);
   const solPx = state.prices[SOL] || 0;
   const tokPx = state.prices[t.id] || t.usdPrice || 0;
-  const outUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
-  const inUsd = state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx;
+  const outUsd = Number.isFinite(qUsd) ? qUsd : (state.side === "buy" ? outUi * tokPx : outUi * solPx);
+  const inUsd = Number.isFinite(inQuote) ? inQuote : (state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx);
   const pct = inUsd ? ((outUsd - inUsd) / inUsd) * 100 : 0;
   const icon = state.side === "buy" ? (t.icon ? `<img src="${esc(t.icon)}" alt="">` : "●") : `<img src="${SOL_ICON}" alt="">`;
-  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usd(outUsd)}</span> <span class="${cls(pct)}">(${signed(pct)}%)</span> <span class="chev">›</span>`;
+  const more = quoteBits(state.quote).line
+    ? `<button type="button" id="est-more" aria-label="Route details" aria-expanded="${state.quoteOpen}"><span class="chev">${state.quoteOpen ? "⌄" : "›"}</span></button>`
+    : "";
+  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usd(outUsd)}</span> <span class="${cls(pct)}">(${signed(pct)}%)</span>${more}`;
 }
 function tradePanel() {
   const t = state.active;
@@ -2817,10 +2853,11 @@ function tradePanel() {
     </div>
     <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n.toFixed(n < 1 ? 1 : 2)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n.toFixed(2)}%</button>`).join("")}</div>
     <div class="amt-row">
-      <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" value="${state.side === "buy" ? state.amount : state.sellPct}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}<span class="chev">▾</span></label>
+      <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" value="${state.side === "buy" ? state.amount : state.sellPct}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
       <button class="go ${state.side}" id="go" ${state.busy ? "disabled" : ""}>${state.busy ? "…" : label}</button>
     </div>
-    <div class="fine"><span>Est. Received <span class="badge">2</span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
+    <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
+    <div class="quote-detail" id="quote-detail" hidden></div>
     <div class="ultra">✦ Jupiter Swap · <span id="status">${esc(state.status)}</span></div>`;
 }
 
@@ -3197,6 +3234,14 @@ function bindSheetSwipe(root) {
   head.addEventListener("pointercancel", end);
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.infoOpen) closeSheet(); });
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#est-more")) return;
+  e.preventDefault();
+  state.quoteOpen = !state.quoteOpen;
+  const est = $("#est");
+  if (est) est.innerHTML = quoteSummary();
+  paintQuoteExtras();
+});
 
 function searchSheet() {
   const q = state.searchQ || "";
