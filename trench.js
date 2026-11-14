@@ -139,11 +139,18 @@ const ui = (amount, decimals) => Number(amount) / 10 ** decimals;
 
 
 function entryKey(mint) { return "trench-entry:" + mint; }
-function entryOf(mint, price) {
-  const saved = localStorage.getItem(entryKey(mint));
-  if (saved) return Number(saved);
-  if (price) localStorage.setItem(entryKey(mint), String(price));
-  return price || 0;
+function entryOf(mint) {
+  const n = Number(localStorage.getItem(entryKey(mint)));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function holdBar(p) {
+  if (!(p.amount > 0)) return { hold: "Holding —", pnl: "—", clsName: "" };
+  if (!(p.entry > 0)) return { hold: "Holding " + usd(p.value), pnl: "—", clsName: "" };
+  return { hold: "Holding " + usd(p.value), pnl: pnlText(p.d, p.p), clsName: cls(p.p) };
+}
+function feeHtml(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return `<img class="fee-ico" alt="" width="12" height="12" src="${SOL_ICON}"><span>${esc(solAmt(n))}</span>`;
 }
 
 function activePnl() {
@@ -1450,7 +1457,10 @@ function paintLive() {
     mc.textContent = usd((t.circSupply || 0) * px || t.mcap || 0);
   }
   const feeEl = $("#stat-fees");
-  if (feeEl && t) feeEl.textContent = t.fees == null ? "—" : statMoney(t.fees);
+  if (feeEl && t) {
+    const next = feeHtml(t.fees);
+    if (feeEl.innerHTML !== next) feeEl.innerHTML = next;
+  }
   if (chg && t) {
     const c = t.stats24h?.priceChange || 0;
     chg.textContent = moveLabel(c);
@@ -1472,10 +1482,11 @@ function paintLive() {
   if (utc) utc.textContent = clockLabel();
   parkLogo();
   paintAxisEdge();
-  if (barH) barH.textContent = "Holding " + usd(p.value);
+  const hb = holdBar(p);
+  if (barH) barH.textContent = hb.hold;
   if (barP) {
-    barP.textContent = pnlText(p.d, p.p);
-    barP.className = cls(p.p);
+    barP.textContent = hb.pnl;
+    barP.className = hb.clsName;
   }
   if (est) est.innerHTML = quoteSummary();
   paintQuoteExtras();
@@ -1484,14 +1495,19 @@ function paintLive() {
     const h = state.holdings.find((x) => x.mint === row.dataset.mint);
     if (!h) return;
     const price = state.prices[h.mint] || 0;
-    const entry = entryOf(h.mint, price);
+    const entry = entryOf(h.mint);
     const value = h.ui * price;
-    const d = value - h.ui * entry;
-    const pct = entry ? ((price - entry) / entry) * 100 : 0;
     const hn = $(".hold-n", row);
     const pn = $(".pnl", row);
     if (hn) hn.textContent = usd(value);
-    if (pn) pn.innerHTML = `<b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span>`;
+    if (pn) {
+      if (!(entry > 0) || !(price > 0)) pn.innerHTML = "<b>—</b><span>—</span>";
+      else {
+        const d = value - h.ui * entry;
+        const pct = ((price - entry) / entry) * 100;
+        pn.innerHTML = `<b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span>`;
+      }
+    }
   });
   tickChart();
   paintEntryLine();
@@ -2531,6 +2547,7 @@ function render() {
   state.scrollToTab = false;
   const t = state.active;
   const p = activePnl();
+  const hb = holdBar(p);
   const price = t ? (state.prices[t.id] || t.usdPrice || 0) : 0;
   const chg = t && p.entry ? ((price - p.entry) / p.entry) * 100 : (t?.stats24h?.priceChange || 0);
   app.innerHTML = `
@@ -2549,8 +2566,8 @@ function render() {
       <div class="panel">${panel()}</div>`}
     </div>
     <div class="bar">
-      <span id="bar-hold">Holding ${usd(p.value)}</span>
-      <span id="bar-pnl" class="${cls(p.d)}">${pnlText(p.d, p.p)}</span>
+      <span id="bar-hold">${hb.hold}</span>
+      <span id="bar-pnl" class="${hb.clsName}">${hb.pnl}</span>
     </div>
     <nav class="nav">
       <button type="button" data-nav="spot" class="${state.view==="spot"?"on":""}"><svg viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>Spot</button>
@@ -2652,7 +2669,7 @@ function tokenHead(t, price, chg) {
       <div><div class="k">Price</div><div class="v">${priceLabel(price)}</div></div>
       <div><div class="k">Liquidity</div><div class="v">${usd(t.liquidity || 0)}</div></div>
       <div><div class="k">1h Vol</div><div class="v">${usd((s1.buyVolume || 0) + (s1.sellVolume || 0))}</div></div>
-      <div><div class="k">Fees Paid</div><div class="v" id="stat-fees">${t.fees == null ? "—" : statMoney(t.fees)}</div></div>
+      <div><div class="k">Fees Paid</div><div class="v fee-sol" id="stat-fees">${feeHtml(t.fees)}</div></div>
       <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
@@ -2684,14 +2701,15 @@ function holdingsPanel() {
   if (!state.holdings.length) return head + `<div class="k" style="padding:16px 0">No token balances in this wallet yet. Tokens you buy will appear here.</div>`;
   const rows = [...state.holdings].sort((a, b) => b.ui * (state.prices[b.mint] || 0) - a.ui * (state.prices[a.mint] || 0)).map((h) => {
     const price = state.prices[h.mint] || 0;
-    const entry = entryOf(h.mint, price);
+    const entry = entryOf(h.mint);
     const value = h.ui * price;
-    const d = value - h.ui * entry;
-    const pct = entry ? ((price - entry) / entry) * 100 : 0;
+    const pnl = !(entry > 0) || !(price > 0)
+      ? `<b>—</b><span>—</span>`
+      : `<b class="${cls(value - h.ui * entry)}">${signed(value - h.ui * entry)}</b><span class="${cls(((price - entry) / entry) * 100)}">${price >= entry ? "▲" : "▼"} ${Math.abs(((price - entry) / entry) * 100).toFixed(2)}%</span>`;
     return `<div class="row" data-mint="${h.mint}">
       <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(h.icon)}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
-      <div class="pnl"><b class="${cls(d)}">${signed(d)}</b><span class="${cls(pct)}">${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%</span></div>
+      <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
     </div>`;
   }).join("");
