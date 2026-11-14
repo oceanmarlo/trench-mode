@@ -1873,6 +1873,7 @@ function render() {
       <button type="button" data-nav="portfolio" class="${state.view==="portfolio"?"on":""}"><svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2"/></svg>Portfolio</button>
     </nav>
     ${state.searchOpen ? searchSheet() : ""}
+    ${state.view === "alpha" && state.alpha.open ? alphaFilterSheet() : ""}
     ${state.toast ? `<div class="toast"><span>${/^(Bought|Sold)/.test(state.toast) ? "✓ " : ""}${esc(state.toast)}</span><button id="toast-x">✕</button></div>` : ""}
   `;
   bind();
@@ -2028,6 +2029,12 @@ const ALPHA_NUM = [
 ];
 const ALPHA_RC_KEYS = ["lpMin", "rcMax", "noDanger"];
 const ALPHA_BOOL = [["noFreeze", "Freeze off"], ["noMint", "Mint off"], ["verified", "Verified"], ["noDanger", "No RugCheck dangers"]];
+const ALPHA_SECS = [
+  ["market", "Market", ["mcapMin", "mcapMax", "liqMin", "volMin", "chgMin", "chgMax"]],
+  ["age", "Age & Holders", ["ageMinH", "ageMaxH", "holdersMin", "top10Max", "devMax"]],
+  ["safety", "Safety (Audit)", ["noFreeze", "noMint", "verified", "scoreMin"]],
+  ["rug", "RugCheck", ["noDanger", "rcMax", "lpMin"]]
+];
 const ALPHA_SORTS = [["mcap", "MCap"], ["liq", "Liq"], ["vol", "Vol 24h"], ["chg", "Chg"], ["age", "Age"], ["holders", "Holders"], ["top10", "Top10"], ["score", "Organic"], ["lp", "LP lock"], ["rc", "RugCheck"]];
 const ALPHA_BUILTIN = {
   "Safer": { noFreeze: true, noMint: true, top10Max: "30", liqMin: "25k", holdersMin: "300", lpMin: "90", noDanger: true },
@@ -2037,14 +2044,16 @@ const ALPHA_BUILTIN = {
 const alphaSaved = (() => { try { return JSON.parse(localStorage.getItem(ALPHA_KEY)) || {}; } catch (_) { return {}; } })();
 const alphaSrcOk = (s) => ALPHA_SOURCES.some(([k]) => k === s);
 state.alpha = {
-  src: alphaSrcOk(alphaSaved.src) ? alphaSaved.src : "recent", iv: alphaSaved.iv || "24h",
+  src: alphaSrcOk(alphaSaved.src) ? alphaSaved.src : "recent", iv: ALPHA_IVS.includes(alphaSaved.iv) ? alphaSaved.iv : "24h",
   sort: alphaSaved.sort || "feed", dir: alphaSaved.dir || "desc",
+  ageUnit: alphaSaved.ageUnit === "m" || alphaSaved.ageUnit === "d" ? alphaSaved.ageUnit : "h",
+  sec: Object.prototype.hasOwnProperty.call(alphaSaved, "sec") ? alphaSaved.sec : "market",
   f: alphaSaved.f || {}, open: false, rows: [], loading: false, err: "", at: 0,
   cols: { recent: [], aboutToGraduate: [], graduated: [] }, jupOk: false, pumpFallback: false
 };
 function saveAlpha() {
   const a = state.alpha;
-  localStorage.setItem(ALPHA_KEY, JSON.stringify({ src: a.src, iv: a.iv, sort: a.sort, dir: a.dir, f: a.f }));
+  localStorage.setItem(ALPHA_KEY, JSON.stringify({ src: a.src, iv: a.iv, sort: a.sort, dir: a.dir, f: a.f, ageUnit: a.ageUnit, sec: a.sec }));
 }
 function alphaPresets() { try { return JSON.parse(localStorage.getItem(ALPHA_PRESETS_KEY)) || {}; } catch (_) { return {}; } }
 
@@ -2156,14 +2165,19 @@ async function rcFetch(mint) {
 }
 
 function alphaFields(t, iv) {
-  const st = t["stats" + iv] || t.stats1h || {};
+  const win = ALPHA_IVS.includes(iv) ? iv : "24h";
+  // 24h keeps the old fallback. Other windows use only that window so a 5m filter cannot read 1h stats.
+  const st = t["stats" + win] || (win === "24h" ? (t.stats1h || {}) : {});
   const s24 = t.stats24h || {};
+  const volSt = win === "24h" ? s24 : (t["stats" + win] || {});
   const born = t.firstPool?.createdAt || t.createdAt;
   const a = t.audit || {};
   return {
     mcap: t.mcap ?? (t.circSupply && t.usdPrice ? t.circSupply * t.usdPrice : null),
     liq: t.liquidity ?? null,
-    vol: (s24.buyVolume || 0) + (s24.sellVolume || 0),
+    vol: win === "24h"
+      ? (s24.buyVolume || 0) + (s24.sellVolume || 0)
+      : (volSt.buyVolume == null && volSt.sellVolume == null ? null : (Number(volSt.buyVolume) || 0) + (Number(volSt.sellVolume) || 0)),
     chg: st.priceChange ?? null,
     ageH: born ? (Date.now() - new Date(born).getTime()) / 3.6e6 : null,
     holders: t.holderCount ?? null,
@@ -2210,7 +2224,7 @@ function alphaRcPass(x, f) {
 
 function alphaList() {
   const a = state.alpha;
-  const iv = "24h";
+  const iv = ALPHA_IVS.includes(a.iv) ? a.iv : "24h";
   const feed = a.sort === "feed";
   const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score", lp: "lp", rc: "rc" }[a.sort] || "vol";
   const dir = a.dir === "asc" ? 1 : -1;
@@ -2383,36 +2397,157 @@ function paintAlphaList() {
   });
   const r = box.querySelector("[data-alpha-retry]");
   if (r) r.onclick = () => loadAlpha().catch(() => {});
-  const cnt = $("#alpha-fcount");
-  if (cnt) cnt.textContent = alphaActiveCount() ? String(alphaActiveCount()) : "";
+  paintFilterChrome();
 }
 
 function alphaActiveCount() {
   const f = state.alpha.f;
   return ALPHA_NUM.filter(([k]) => parseAmt(f[k]) != null).length + ALPHA_BOOL.filter(([k]) => f[k]).length;
 }
+function alphaSecCount(id) {
+  const keys = (ALPHA_SECS.find(([k]) => k === id) || [])[2] || [];
+  const f = state.alpha.f;
+  return keys.filter((k) => ALPHA_BOOL.some(([b]) => b === k) ? !!f[k] : parseAmt(f[k]) != null).length;
+}
+function alphaFEq(f, p) {
+  const keys = new Set([...Object.keys(f || {}), ...Object.keys(p || {})]);
+  for (const k of keys) {
+    const av = f?.[k], bv = p?.[k];
+    if (av === bv || (!av && !bv)) continue;
+    return false;
+  }
+  return true;
+}
+function ageMul() {
+  return state.alpha.ageUnit === "m" ? 1 / 60 : state.alpha.ageUnit === "d" ? 24 : 1;
+}
+// ageMinH / ageMaxH stay in hours so old saves and the Fresh preset keep working. The unit dropdown only changes what the box shows.
+function ageStore(display) {
+  const n = parseAmt(display);
+  if (n == null) return String(display ?? "");
+  return String(Math.round(n * ageMul() * 1e8) / 1e8);
+}
+function ageShow(stored) {
+  if (stored == null || stored === "") return "";
+  const n = parseAmt(stored);
+  if (n == null) return String(stored);
+  return String(Math.round((n / ageMul()) * 1e6) / 1e6);
+}
+function paintFilterChrome() {
+  const n = alphaActiveCount();
+  const cnt = document.getElementById("alpha-fcount");
+  if (cnt) { cnt.textContent = n ? String(n) : ""; cnt.hidden = !n; }
+  document.querySelectorAll("[data-sec-n]").forEach((el) => {
+    const c = alphaSecCount(el.dataset.secN);
+    el.textContent = c ? String(c) : "";
+    el.hidden = !c;
+  });
+  const ap = document.querySelector("[data-alpha-apply] .n");
+  if (ap) ap.textContent = n ? "(" + n + ")" : "";
+}
+function afInput(key, placeholder) {
+  const age = key === "ageMinH" || key === "ageMaxH";
+  const val = age ? ageShow(state.alpha.f[key]) : (state.alpha.f[key] ?? "");
+  return `<input data-alpha-f="${key}" value="${esc(val)}" inputmode="decimal" autocomplete="off" placeholder="${esc(placeholder)}">`;
+}
+function afSwitch(key, label) {
+  return `<label class="af-sw"><input type="checkbox" data-alpha-b="${key}" ${state.alpha.f[key] ? "checked" : ""}><span class="knob"></span><span>${label}</span></label>`;
+}
 
-function alphaView() {
+function alphaFilterSheet() {
   const a = state.alpha;
   const presets = { ...ALPHA_BUILTIN, ...alphaPresets() };
   const user = alphaPresets();
-  const ivLabel = "24h";
-  const feedNote = a.pumpFallback ? "Jupiter feed failed — New is on PumpPortal until it recovers." : "Same feed as jup.ag/spot/alphascan.";
+  const n = alphaActiveCount();
+  const iv = ALPHA_IVS.includes(a.iv) ? a.iv : "24h";
+  const unit = a.ageUnit || "h";
+  const sortOpts = [["feed", "Feed order"], ...ALPHA_SORTS];
+  const bodies = {
+    market: `<label class="af-field">Vol / Chg window
+        <select data-alpha-iv>${ALPHA_IVS.map((w) => `<option value="${w}"${w === iv ? " selected" : ""}>${w}</option>`).join("")}</select>
+      </label>
+      <div class="af-lab">MCap</div>
+      <div class="af-pair">${afInput("mcapMin", "e.g. 50k")}<span>–</span>${afInput("mcapMax", "e.g. 2m")}</div>
+      <div class="af-row">
+        <label class="af-field">Liquidity min${afInput("liqMin", "e.g. 25k")}</label>
+        <label class="af-field">${iv} Vol min${afInput("volMin", "e.g. 100k")}</label>
+      </div>
+      <div class="af-lab">Chg % (${iv})</div>
+      <div class="af-pair">${afInput("chgMin", "e.g. 20")}<span>–</span>${afInput("chgMax", "e.g. 500")}</div>`,
+    age: `<div class="af-age">
+        <label class="af-field">Age min${afInput("ageMinH", "e.g. 5")}</label>
+        <label class="af-field">Age max${afInput("ageMaxH", "e.g. 24")}</label>
+        <label class="af-field">Unit
+          <select data-alpha-age-unit>
+            <option value="m"${unit === "m" ? " selected" : ""}>m</option>
+            <option value="h"${unit === "h" ? " selected" : ""}>h</option>
+            <option value="d"${unit === "d" ? " selected" : ""}>d</option>
+          </select>
+        </label>
+      </div>
+      <div class="af-row">
+        <label class="af-field">Holders min${afInput("holdersMin", "e.g. 100")}</label>
+        <label class="af-field">Top-10 % max${afInput("top10Max", "e.g. 30")}</label>
+      </div>
+      <label class="af-field">Dev hold % max${afInput("devMax", "e.g. 5")}</label>`,
+    safety: `<div class="af-bools">
+        ${afSwitch("noFreeze", "Freeze off")}${afSwitch("noMint", "Mint off")}${afSwitch("verified", "Verified")}
+      </div>
+      <label class="af-field">Organic score min${afInput("scoreMin", "e.g. 50")}</label>`,
+    rug: `${afSwitch("noDanger", "No dangers")}
+      <div class="af-row">
+        <label class="af-field">RugCheck score max${afInput("rcMax", "e.g. 20")}</label>
+        <label class="af-field">LP locked/burned % min${afInput("lpMin", "e.g. 90")}</label>
+      </div>
+      <div class="k af-note">These load slowly. RugCheck runs only for rows that already pass the other filters, at most 3/s, cached 30 min. Lower score is safer. <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a></div>`
+  };
+  const secs = ALPHA_SECS.map(([id, title]) => {
+    const c = alphaSecCount(id);
+    const on = a.sec === id;
+    return `<button type="button" class="af-sec${on ? " on" : ""}" data-alpha-sec="${id}" aria-expanded="${on}">
+      <span>${title}</span><span class="af-badge" data-sec-n="${id}" ${c ? "" : "hidden"}>${c || ""}</span><span class="chev">${on ? "▴" : "▾"}</span>
+    </button>${on ? `<div class="af-body">${bodies[id]}</div>` : ""}`;
+  }).join("");
+  const presetHtml = Object.keys(presets).map((name) => {
+    const on = alphaFEq(a.f, presets[name]);
+    return `<span class="preset"><button type="button" data-alpha-preset="${esc(name)}" class="${on ? "on" : ""}">${esc(name)}</button>${user[name] ? `<button type="button" class="x" data-alpha-del="${esc(name)}" aria-label="Delete preset">✕</button>` : ""}</span>`;
+  }).join("");
+  return `<div class="sheet-root open af-root" id="alpha-sheet">
+    <div class="sheet-backdrop" data-alpha-apply></div>
+    <div class="sheet af-sheet" role="dialog" aria-label="Alpha filters">
+      <div class="sheet-head"><div class="grab"></div><h2>Filters</h2><button type="button" class="sheet-x" data-alpha-apply aria-label="Close">✕</button></div>
+      <div class="af-top">
+        <div class="chips small presets-row">${presetHtml}</div>
+        <div class="af-sortrow">
+          <label class="af-field">Sort
+            <select data-alpha-sort-sel>${sortOpts.map(([k, l]) => `<option value="${k}"${a.sort === k ? " selected" : ""}>${k === "vol" ? "Vol " + iv : l}</option>`).join("")}</select>
+          </label>
+          <button type="button" data-alpha-dir class="af-dir" aria-label="Sort direction">${a.dir === "asc" ? "Asc ↑" : "Desc ↓"}</button>
+        </div>
+      </div>
+      <div class="sheet-body">${secs}</div>
+      <div class="af-foot">
+        <button type="button" data-alpha-clear>Reset</button>
+        <button type="button" data-alpha-save>Save</button>
+        <button type="button" class="apply" data-alpha-apply>Apply <span class="n">${n ? "(" + n + ")" : ""}</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function alphaView() {
+  const a = state.alpha;
+  const n = alphaActiveCount();
+  const ivLabel = ALPHA_IVS.includes(a.iv) ? a.iv : "24h";
+  const feedNote = a.pumpFallback ? `<div class="k al-feed">Jupiter feed failed — New is on PumpPortal until it recovers.</div>` : "";
   return `<div class="alpha">
     <div class="al-top"><h2>Alpha</h2><button type="button" class="al-refresh" data-alpha-refresh aria-label="Refresh">↻</button></div>
     <div class="chips">${ALPHA_SOURCES.map(([k, l]) => `<button type="button" data-alpha-src="${k}" class="${a.src === k ? "on" : ""}">${l}</button>`).join("")}</div>
-    <div class="chips small presets-row">
-      <button type="button" class="${a.open ? "on" : ""}" data-alpha-filters>Filters <span id="alpha-fcount" class="tab-n">${alphaActiveCount() || ""}</span></button>
-      ${Object.keys(presets).map((n) => `<span class="preset"><button type="button" data-alpha-preset="${esc(n)}">${esc(n)}</button>${user[n] ? `<button type="button" class="x" data-alpha-del="${esc(n)}" aria-label="Delete preset">✕</button>` : ""}</span>`).join("")}
+    <div class="al-tools">
+      <button type="button" class="al-filter-btn ${a.open ? "on" : ""}" data-alpha-filters>Filters <span id="alpha-fcount" class="af-badge" ${n ? "" : "hidden"}>${n || ""}</span></button>
     </div>
-    ${a.open ? `<div class="al-filters">
-      <div class="al-grid">${ALPHA_NUM.map(([k, l]) => `<label><span>${l === "Chg % min" || l === "Chg % max" ? l + " (" + ivLabel + ")" : l}</span><input data-alpha-f="${k}" value="${esc(a.f[k] ?? "")}" inputmode="text" autocomplete="off" placeholder="${/Max|max/.test(l) && /%/.test(l) ? "e.g. 30" : /h\)/.test(l) ? "hours" : /%|Organic/.test(l) ? "e.g. 10" : "e.g. 50k"}"></label>`).join("")}</div>
-      <div class="al-bools">${ALPHA_BOOL.map(([k, l]) => `<label><input type="checkbox" data-alpha-b="${k}" ${a.f[k] ? "checked" : ""}> ${l}</label>`).join("")}</div>
-      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. ${feedNote} Filters apply on top of that list. Missing data fails an active filter.</div>
-      <div class="al-actions"><button type="button" data-alpha-clear>Clear</button><button type="button" data-alpha-save class="save">Save preset</button></div>
-    </div>` : ""}
-    <div class="al-sort">${ALPHA_SORTS.map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
-    <div class="al-head">${[["age", "Token · age"], ["mcap", "MCap / Liq"], ["vol", "Vol / Holders"], ["chg", `Chg ${ivLabel} / Top10`]].map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
+    ${feedNote}
+    <div class="al-head">${[["age", "Token · age"], ["mcap", "MCap / Liq"], ["vol", `Vol ${ivLabel}`], ["chg", `Chg ${ivLabel}`]].map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
     <div id="alpha-list">${alphaRowsHtml()}</div>
   </div>`;
 }
@@ -2436,9 +2571,36 @@ function bindAlpha() {
   if (fb) fb.onclick = () => { a.open = !a.open; render(); };
   const rf = $("[data-alpha-refresh]");
   if (rf) rf.onclick = () => { loadAlpha().catch(() => {}); };
-  // Typing only repaints the list so the input keeps focus.
+  const sortSel = document.querySelector("[data-alpha-sort-sel]");
+  if (sortSel) sortSel.onchange = () => {
+    const k = sortSel.value;
+    a.sort = k;
+    if (k === "age" || k === "top10" || k === "rc") a.dir = "asc";
+    else if (k !== "feed") a.dir = "desc";
+    rerender();
+  };
+  const dir = document.querySelector("[data-alpha-dir]");
+  if (dir) dir.onclick = () => { a.dir = a.dir === "asc" ? "desc" : "asc"; rerender(); };
+  const ivSel = document.querySelector("[data-alpha-iv]");
+  if (ivSel) ivSel.onchange = () => { if (ALPHA_IVS.includes(ivSel.value)) a.iv = ivSel.value; rerender(); };
+  const unitSel = document.querySelector("[data-alpha-age-unit]");
+  if (unitSel) unitSel.onchange = () => {
+    if (unitSel.value === "m" || unitSel.value === "h" || unitSel.value === "d") a.ageUnit = unitSel.value;
+    rerender();
+  };
+  document.querySelectorAll("[data-alpha-sec]").forEach((b) => b.onclick = () => {
+    a.sec = a.sec === b.dataset.alphaSec ? "" : b.dataset.alphaSec;
+    rerender();
+  });
+  document.querySelectorAll("[data-alpha-apply]").forEach((b) => b.onclick = (ev) => {
+    ev.stopPropagation();
+    a.open = false;
+    render();
+  });
+  // Typing only repaints the list so the input keeps focus. Age boxes store hours.
   document.querySelectorAll("[data-alpha-f]").forEach((i) => i.oninput = () => {
-    a.f[i.dataset.alphaF] = i.value;
+    const k = i.dataset.alphaF;
+    a.f[k] = (k === "ageMinH" || k === "ageMaxH") ? ageStore(i.value) : i.value;
     i.classList.toggle("bad", i.value.trim() !== "" && parseAmt(i.value) == null);
     saveAlpha();
     paintAlphaList();
@@ -2464,7 +2626,8 @@ function bindAlpha() {
     a.open = true;
     rerender();
   });
-  document.querySelectorAll("[data-alpha-del]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-alpha-del]").forEach((b) => b.onclick = (ev) => {
+    ev.stopPropagation();
     const all = alphaPresets();
     delete all[b.dataset.alphaDel];
     localStorage.setItem(ALPHA_PRESETS_KEY, JSON.stringify(all));
