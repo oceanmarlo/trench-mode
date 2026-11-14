@@ -94,6 +94,9 @@ const usd = (n) => {
   if (n == null || Number.isNaN(n)) return "—";
   const a = Math.abs(n);
   const sign = n < 0 ? "-" : "";
+  // $42.5B was printing $42551.05M. Step up before the label rounds to 1000 of the last unit.
+  if (a >= 999.995e9) return sign + "$" + (a / 1e12).toFixed(2) + "T";
+  if (a >= 999.995e6) return sign + "$" + (a / 1e9).toFixed(2) + "B";
   if (a >= 1e6) return sign + "$" + (a / 1e6).toFixed(2) + "M";
   if (a >= 1000) return sign + "$" + (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
   if (a >= 1) return sign + "$" + a.toFixed(2);
@@ -122,7 +125,10 @@ const usd = (n) => {
 };
 const qty = (n) => {
   if (!n) return "0";
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  const a = Math.abs(n);
+  if (a >= 999.995e9) return (n / 1e12).toFixed(2) + "T";
+  if (a >= 999.995e6) return (n / 1e9).toFixed(2) + "B";
+  if (a >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1000) return (n / 1000).toFixed(2) + "K";
   if (n >= 1) return n.toFixed(2);
   const t = n.toPrecision(3);
@@ -145,7 +151,10 @@ const solText = (n) => {
 };
 const compactCount = (n) => {
   const v = Number(n) || 0;
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  const a = Math.abs(v);
+  if (a >= 999.995e9) return (v / 1e12).toFixed(2) + "T";
+  if (a >= 999.995e6) return (v / 1e9).toFixed(2) + "B";
+  if (a >= 1e6) return (v / 1e6).toFixed(2) + "M";
   if (v >= 1e3) return (v / 1e3).toFixed(v >= 1e4 ? 1 : 2) + "K";
   return String(v);
 };
@@ -4046,6 +4055,8 @@ function solAmt(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const a = Math.abs(Number(n));
   if (a === 0) return "0";
+  if (a >= 999.995e9) return (a / 1e12).toFixed(2) + "T";
+  if (a >= 999.995e6) return (a / 1e9).toFixed(2) + "B";
   if (a >= 1e6) return (a / 1e6).toFixed(2) + "M";
   if (a >= 1000) return (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
   if (a >= 100) return a.toFixed(1);
