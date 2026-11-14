@@ -1692,7 +1692,7 @@ function ensureChart() {
       tickMarkFormatter: (time, type) => tickMarkText(time, type)
     },
     crosshair: { mode: L.CrosshairMode.Normal },
-    localization: { priceFormatter: fmtAxis, timeFormatter: (time) => tickMarkText(time, state.tf === "1s" || state.tf === "15s" ? 4 : 3) },
+    localization: { priceFormatter: fmtAxis, timeFormatter: (time) => tickMarkText(time, (resolvedTf() === "1s" || resolvedTf() === "15s") ? 4 : 3) },
     handleScale: { axisPressedMouseMove: true, pinch: true, mouseWheel: true },
     handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
   });
@@ -1745,7 +1745,8 @@ function pad2(n) { return String(n).padStart(2, "0"); }
 function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
-  const sec = state.tf === "1s" || state.tf === "15s";
+  const tf = resolvedTf();
+  const sec = tf === "1s" || tf === "15s";
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
 }
 // lightweight-charts labels are UTC unless we format them. Match the footer clock (local).
@@ -1757,7 +1758,8 @@ function tickMarkText(time, type) {
   if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
   if (type === 2) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  if (type === 4 || state.tf === "1s" || state.tf === "15s") return clock + ":" + pad2(d.getSeconds());
+  const tf = resolvedTf();
+  if (type === 4 || tf === "1s" || tf === "15s") return clock + ":" + pad2(d.getSeconds());
   return clock;
 }
 function timePaneWidth(host) {
