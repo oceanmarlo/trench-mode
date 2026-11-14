@@ -85,10 +85,15 @@ const state = {
 };
 
 const tapeVol = (n) => {
-  const a = Math.abs(n || 0);
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const a = Math.abs(Number(n));
+  if (!(a > 0)) return "$0.00";
   if (a >= 100) return "$" + a.toFixed(2);
   if (a >= 1) return "$" + a.toFixed(4);
-  return "$" + a.toFixed(5);
+  // A 1.74 Bonk fill is about $0.000004. Five decimals printed that as $0.00000.
+  const fine = "$" + a.toFixed(5);
+  if (fine !== "$0.00000") return fine;
+  return usd(a);
 };
 const usd = (n) => {
   if (n == null || Number.isNaN(n)) return "—";
@@ -3170,7 +3175,7 @@ function tokenHead(t, price, chg) {
     <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
       ${chartToolsHtml()}
       <div id="chart-slot" class="chart-slot"></div>
-      <div class="chart-label" id="chart-legend"><div class="lg-sym">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · jup.ag</div><div class="lg-ohlc" id="ohlc"></div><div class="lg-inds" id="ind-leg"></div></div>
+      <div class="chart-label" id="chart-legend"><div class="lg-sym">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · ${resolvedTf()} · jup.ag</div><div class="lg-ohlc" id="ohlc"></div><div class="lg-inds" id="ind-leg"></div></div>
       ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div><button type="button" class="chart-full-btn" aria-label="Exit full screen">✕</button></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
     <div class="chart-foot">${scaleButtons()}<span id="utc">${clockLabel()}</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>`;
