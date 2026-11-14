@@ -3034,7 +3034,9 @@ function holderMarks(h, token) {
 function holderRows() {
   const t = state.active || {};
   if (!state.holders.length) {
-    const msg = state.holdersError || (state.holdersLoading ? "Loading holders…" : "No holders yet.");
+    const n = Number(t.holderCount);
+    const msg = state.holdersError
+      || (state.holdersLoading ? "Loading holders…" : (n > 0 ? "Addresses not in yet." : "No holders yet."));
     return `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
   }
   return state.holders.slice(0, 40).map((h, i) => {
