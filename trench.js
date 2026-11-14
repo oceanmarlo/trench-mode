@@ -31,6 +31,7 @@ const state = {
   searchOpen: false,
   marketOpen: false,
   results: [],
+  spotScan: { kind: "trending", rows: [], loading: false, err: "" },
   toast: null,
   status: "Connecting to Jupiter…",
   wallet: null,
@@ -326,7 +327,7 @@ async function loadHolders() {
 let searchTimer = 0;
 let searchSeq = 0;
 function searchRows() {
-  return (state.results || []).slice(0, 12).map((t) => `<button class="row" data-pick="${t.id}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> <span>${usd(t.mcap)}</span></button>`).join("");
+  return (state.results || []).slice(0, 12).map((t) => `<button class="row" data-pick="${t.id}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> ${lpPullBadge(t)} <span>${usd(t.mcap)}</span></button>`).join("");
 }
 function paintResults() {
   const box = $("#results");
@@ -349,12 +350,84 @@ function search(q) {
       const list = await jup(SEARCH + "?query=" + encodeURIComponent(q));
       if (seq !== searchSeq) return;
       state.results = list || [];
+      rcWantFront((state.results || []).filter((t) => spotGate(t) === "checking").map((t) => t.id));
       paintResults();
     } catch (err) {
       const box = $("#results");
       if (box && seq === searchSeq) box.innerHTML = `<div class="k" style="padding:12px 0">${esc(err.message)}</div>`;
     }
   }, 450);
+}
+
+const MAJORS = new Set([
+  SOL,
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+]);
+const SPOT_LISTS = [["trending", "Trending"], ["top", "Top"]];
+function spotAlways(t) {
+  if (!t?.id) return false;
+  if (MAJORS.has(t.id) || t.isVerified) return true;
+  return state.holdings.some((h) => h.mint === t.id);
+}
+function spotGate(t) {
+  if (spotAlways(t)) return "allow";
+  return alphaLiqState(t);
+}
+function lpPullBadge(t) {
+  const g = spotGate(t);
+  if (g === "allow" || alphaLiqOk(g)) return "";
+  if (g === "checking") return `<i class="b wait">LP…</i>`;
+  return `<span class="lp-pull">LP can be pulled</span>`;
+}
+function spotScanParts() {
+  const gated = (state.spotScan.rows || []).map((t) => ({ t, g: spotGate(t) }));
+  const checking = gated.filter((r) => r.g === "checking").length;
+  const hidden = gated.filter((r) => r.g !== "allow" && !alphaLiqOk(r.g)).length;
+  rcWantFront(gated.filter((r) => r.g === "checking").map((r) => r.t.id));
+  return { list: gated.filter((r) => r.g === "allow" || alphaLiqOk(r.g)), hidden, checking };
+}
+function spotScanHtml() {
+  const s = state.spotScan;
+  const { list, hidden, checking } = spotScanParts();
+  const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)</div>`;
+  const chips = `<div class="chips scan-chips">${SPOT_LISTS.map(([k, l]) => `<button type="button" data-scan="${k}" class="${s.kind === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  const body = s.loading && !s.rows.length ? `<div class="k">Loading…</div>` : s.err && !s.rows.length ? `<div class="k">${esc(s.err)}</div>` : list.map(({ t, g }) => `<button class="row" data-pick="${t.id}" data-liq="${g}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> <span>${usd(t.mcap)}</span></button>`).join("");
+  return chips + note + body;
+}
+function paintScan() {
+  const box = $("#results");
+  const q = $("#q");
+  if (!box) return;
+  // A typed query still has to refresh so RugCheck can replace the waiting badge.
+  if (q && q.value.trim()) { paintResults(); return; }
+  box.innerHTML = spotScanHtml();
+  box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
+  box.querySelectorAll("[data-scan]").forEach((b) => b.onclick = () => {
+    if (state.spotScan.kind === b.dataset.scan) return;
+    state.spotScan.kind = b.dataset.scan;
+    loadSpotScan().catch(() => {});
+  });
+}
+let spotScanSeq = 0;
+async function loadSpotScan() {
+  const s = state.spotScan;
+  const seq = ++spotScanSeq;
+  s.loading = true;
+  s.err = "";
+  paintScan();
+  try {
+    const path = s.kind === "top" ? "toptraded" : "toptrending";
+    const list = await jup("https://api.jup.ag/tokens/v2/" + path + "/1h");
+    if (seq !== spotScanSeq) return;
+    s.rows = Array.isArray(list) ? list : [];
+  } catch (err) {
+    if (seq !== spotScanSeq) return;
+    s.err = err.message || String(err);
+  } finally {
+    if (seq === spotScanSeq) { s.loading = false; paintScan(); }
+  }
 }
 
 async function pollPrices(force = false) {
@@ -2097,6 +2170,7 @@ function rcRepaint() {
   clearTimeout(rc.paintTimer);
   rc.paintTimer = setTimeout(() => {
     if (state.view === "alpha") paintAlphaList();
+    if (state.searchOpen) paintScan();
     paintRcHead();
   }, 300);
 }
@@ -3097,7 +3171,7 @@ function bindSheetSwipe(root) {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.infoOpen) closeSheet(); });
 
 function searchSheet() {
-  return `<div class="sheet" id="search-sheet"><div class="grab"></div><h2>Search <button type="button" id="search-close" aria-label="Close" style="float:right;background:none;border:0;color:var(--muted);font-size:18px">✕</button></h2><input id="q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name, ticker or contract address" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="results">${searchRows()}</div></div>`;
+  return `<div class="sheet" id="search-sheet"><div class="grab"></div><h2>Search <button type="button" id="search-close" aria-label="Close" style="float:right;background:none;border:0;color:var(--muted);font-size:18px">✕</button></h2><input id="q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Name, ticker or contract address" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="results">${spotScanHtml()}</div></div>`;
 }
 
 function bind() {
@@ -3207,7 +3281,7 @@ function bind() {
   const c = $("#connect");
   if (c) c.onclick = () => (state.wallet ? openWalletPicker() : connect());
   const so = $("#search-open");
-  if (so) so.onclick = () => { state.searchOpen = true; render(); };
+  if (so) so.onclick = () => { state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
   const q = $("#q");
   if (q) {
     q.oninput = () => search(q.value.trim());
