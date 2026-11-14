@@ -1782,28 +1782,6 @@ function ensureChart() {
 }
 // Keep the TradingView mark a child of the chart library. Reparenting it makes
 // lightweight-charts throw removeChild when a pane is added or removed.
-function priceScaleCanvas(host) {
-  const tall = [...host.querySelectorAll("canvas")].filter((c) => c.clientHeight > 48 && c.clientWidth > 0);
-  const narrow = tall.filter((c) => c.clientWidth <= 96);
-  if (!narrow.length) return null;
-  return narrow.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
-}
-// The fullscreen button used to sit on the price scale and slice the top tick ("231.0" instead of "231.00M").
-function parkFullBtn() {
-  const btn = document.getElementById("chart-full");
-  const host = chartUi.host;
-  if (!btn || !host || !host.isConnected) return;
-  const scale = priceScaleCanvas(host);
-  const wrap = btn.offsetParent;
-  if (!scale || !wrap) {
-    btn.style.left = "auto";
-    btn.style.right = "70px";
-    return;
-  }
-  const left = scale.getBoundingClientRect().left - wrap.getBoundingClientRect().left - btn.offsetWidth - 6;
-  btn.style.right = "auto";
-  btn.style.left = Math.max(36, Math.round(left)) + "px";
-}
 function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
   const host = chartUi.host;
@@ -1946,7 +1924,6 @@ function paintAxisEdge() {
     right.style.width = "";
   }
   parkLogo();
-  parkFullBtn();
 }
 
 // The library's crosshair time is painted on the tick canvas, so it slices the
@@ -2628,7 +2605,6 @@ window.addEventListener("resize", () => {
   const w = $("#chart-wrap");
   if (w && !state.chartFull && !chartUi.dragging) w.style.height = state.chartH + "px";
   parkLogo();
-  parkFullBtn();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
 
@@ -2842,13 +2818,12 @@ function tokenHead(t, price, chg) {
       <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
-    <div class="tf"><div class="tf-scroll">${tfButtons()}</div><span class="tf-tools"><button type="button" id="chart-style" class="${state.chartStyle === "line" ? "on" : ""}" aria-label="${state.chartStyle === "line" ? "Show candles" : "Show line"}">${styleIcon()}</button><button type="button" id="fx" class="${state.inds.length ? "on" : ""}" aria-label="Indicators">fx</button></span></div>
+    <div class="tf"><div class="tf-scroll">${tfButtons()}</div><span class="tf-tools"><button type="button" id="chart-style" class="${state.chartStyle === "line" ? "on" : ""}" aria-label="${state.chartStyle === "line" ? "Show candles" : "Show line"}">${styleIcon()}</button><button type="button" id="fx" class="${state.inds.length ? "on" : ""}" aria-label="Indicators">fx</button><button type="button" class="chart-full-btn" id="chart-full" aria-label="Full screen">⤢</button></span></div>
     <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : clampChartH(state.chartH) + "px"}">
       ${chartToolsHtml()}
       <div id="chart-slot" class="chart-slot"></div>
       <div class="chart-label" id="chart-legend"><div class="lg-sym">${esc(t.symbol)}/${state.chartMode === "mc" ? "MC" : "USD"} · jup.ag</div><div class="lg-ohlc" id="ohlc"></div><div class="lg-inds" id="ind-leg"></div></div>
-      <button type="button" class="chart-full-btn" id="chart-full" aria-label="${state.chartFull ? "Exit full screen" : "Full screen"}">${state.chartFull ? "✕" : "⤢"}</button>
-      ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
+      ${state.chartFull ? `<div class="tf tf-full"><div class="tf-scroll">${tfButtons()}</div><button type="button" class="chart-full-btn" aria-label="Exit full screen">✕</button></div>` : `<div class="chart-grip" id="chart-grip" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart" title="Drag to resize · double-click to reset"><span></span></div>`}
     </div>
     <div class="chart-foot">${scaleButtons()}<span id="utc">${clockLabel()}</span><button type="button" id="chart-mode" class="${state.chartMode === "mc" ? "on" : ""}">${state.chartMode === "mc" ? "MCap" : "Price"} ⇄</button></div>`;
 }
@@ -4227,8 +4202,7 @@ function bind() {
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   bindChartResize();
   $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
-  const cf = $("#chart-full");
-  if (cf) cf.onclick = () => { state.chartFull = !state.chartFull; render(); };
+  document.querySelectorAll(".chart-full-btn").forEach((cf) => cf.onclick = () => { state.chartFull = !state.chartFull; render(); });
   const cm = $("#chart-mode");
   if (cm) cm.onclick = () => { state.chartMode = state.chartMode === "mc" ? "price" : "mc"; localStorage.setItem(CHART_MODE_KEY, state.chartMode); render(); };
   document.querySelectorAll("[data-txf]").forEach((b) => b.onclick = () => {
