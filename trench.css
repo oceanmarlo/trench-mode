@@ -91,12 +91,14 @@ button { font: inherit; }
 .mc-line { display: flex; align-items: baseline; gap: 8px; padding-top: 10px; padding-bottom: 2px; }
 .mc-line .px { color: var(--text); font-size: 28px; font-weight: 750; letter-spacing: -0.4px; line-height: 1.1; }
 .mc-line .chg { font-size: 15px; font-weight: 650; }
-.stats { display: flex; align-items: flex-end; gap: 8px; padding-top: 10px; padding-bottom: 8px; }
+.stats { display: flex; align-items: flex-end; gap: 4px; padding-top: 10px; padding-bottom: 8px; }
 .stats > div { flex: 1; min-width: 0; }
-.stats > div:first-child { flex: 1.05; }
-.stats > div:nth-child(4) { flex: 1.35; }
+.stats > div:first-child { flex: 1.1; }
+.stats > div:nth-child(2) { flex: 1.25; }
+.stats > div:nth-child(3) { flex: 1.15; }
+.stats > div:nth-child(4) { flex: 1.2; }
 .stats .k { color: var(--faint); font-size: 11px; white-space: nowrap; }
-.stats .v { font-size: 12px; font-weight: 650; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stats .v { font-size: 11px; font-weight: 650; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-more {
   width: 28px; height: 28px; border-radius: 50%; border: 0; flex: none;
   background: #1c2128; color: #d7dde4; font-size: 16px; line-height: 1;
