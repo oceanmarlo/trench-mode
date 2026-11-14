@@ -97,7 +97,13 @@ const usd = (n) => {
   if (a >= 1e6) return sign + "$" + (a / 1e6).toFixed(2) + "M";
   if (a >= 1000) return sign + "$" + (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
   if (a >= 1) return sign + "$" + a.toFixed(2);
-  if (a >= 0.01) return sign + "$" + a.toFixed(4);
+  if (a >= 0.01) {
+    // $0.40 was printing $0.4000 in the holding row.
+    let text = a.toFixed(4).replace(/0+$/, "");
+    const frac = text.split(".")[1] || "";
+    if (frac.length < 2) text += "0".repeat(2 - frac.length);
+    return sign + "$" + text;
+  }
   if (!(a > 0)) return sign + "$0.00";
   // 5 leading zeros makes toPrecision return "0.00000100", which read as a zero string.
   const m = a.toFixed(18).match(/^0\.(0*)([1-9]\d{0,2})/);
