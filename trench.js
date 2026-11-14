@@ -3615,10 +3615,13 @@ function onCurve(t) {
 function solAmt(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const a = Math.abs(Number(n));
+  if (a === 0) return "0";
   if (a >= 1e6) return (a / 1e6).toFixed(2) + "M";
   if (a >= 1000) return (a / 1000).toFixed(a >= 10000 ? 1 : 2) + "K";
   if (a >= 100) return a.toFixed(1);
-  return a.toFixed(2);
+  if (a >= 1) return a.toFixed(2);
+  if (a >= 0.01) return a.toFixed(3);
+  return a.toFixed(6).replace(/0+$/, "");
 }
 function deltaText(n) {
   if (n == null || !Number.isFinite(Number(n))) return "-";
