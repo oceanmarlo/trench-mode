@@ -133,7 +133,7 @@ function jupHeaders(url, h = {}) {
 
 // Every call to api.jup.ag goes through one queue so the whole app stays under
 // the free plan (1 RPS, 60 s sliding window). /swap/v2/execute has its own bucket.
-const MAIN_GAP_MS = 2000; // hard floor: <= 1 keyed request per 2 s
+const MAIN_GAP_MS = 2150; // hard floor: <= 1 keyed request per 2 s (with jitter margin)
 let coolUntil = 0;
 let lastMain = 0;
 let mainChain = Promise.resolve();
@@ -223,6 +223,9 @@ let candleBusy = false;
 async function loadCandles() {
   const t = state.active;
   if (!t || candleBusy) return;
+  // While the stream is live the current bar is built from ticks; re-sync with datapi every 5 s.
+  if (state.candles.length && streamLive() && Date.now() - (loadCandles.at || 0) < 5000) return;
+  loadCandles.at = Date.now();
   const tf = state.tf;
   const interval = { "15s": "15_SECOND", "1m": "1_MINUTE", "3m": "3_MINUTE", "15m": "15_MINUTE", "1h": "1_HOUR", "4h": "4_HOUR", "1D": "1_DAY" }[state.tf] || "1_MINUTE";
   const to = new Date().toISOString();
@@ -467,12 +470,14 @@ async function connect(silent = false) {
         state.holdings = [];
         state.sol = 0;
         if (state.wallet) loadHoldings().catch(() => {});
+        streamSync();
         render();
         scheduleQuote(0);
       });
       injected.on("disconnect", () => { state.wallet = null; state.holdings = []; state.sol = 0; render(); });
     }
     render();
+    streamSync();
     await loadHoldings().catch((err) => { state.status = "Balance load failed: " + err.message; });
     scheduleQuote(0);
   } catch (err) {
@@ -1060,12 +1065,12 @@ function parseAmt(v) {
 
 // ---- RugCheck (api.rugcheck.xyz): free, keyless, CORS *, ~15-request burst bucket ----
 // Only GET /v1/tokens/{mint}/report/summary (~300 B). Fetched lazily for rows that pass
-// the other filters, max 3 in flight, >=250 ms apart, cached 30 min in memory + localStorage.
+// the other filters, max 3 in flight, >=340 ms apart (<= 3/s), cached 30 min in memory + localStorage.
 const RC_URL = "https://api.rugcheck.xyz/v1/tokens/";
 const RC_STORE = "trench-rugcheck";
 const RC_TTL = 30 * 60 * 1000;
 const RC_MAX_INFLIGHT = 3;
-const RC_GAP_MS = 250;
+const RC_GAP_MS = 340; // <= 3 req/s (RugCheck free tier)
 const rc = {
   cache: (() => {
     try {
@@ -1242,6 +1247,14 @@ async function loadAlpha() {
       const o = old.get(r.id);
       return o && o.updatedAt && r.updatedAt && new Date(o.updatedAt) > new Date(r.updatedAt) ? { ...r, ...o } : r;
     });
+    if (a.src === "recent") {
+      // Keep launches that arrived over the stream / PumpPortal but aren't in the REST list yet.
+      const have = new Set(a.rows.map((r) => r.id));
+      const extra = [...old.values()].filter((r) => !have.has(r.id));
+      a.rows = [...extra, ...a.rows]
+        .sort((x, y) => new Date(y.firstPool?.createdAt || y.createdAt || 0) - new Date(x.firstPool?.createdAt || x.createdAt || 0))
+        .slice(0, 100);
+    }
     a.at = Date.now();
     feedMark("alphaList");
     streamSync();
@@ -1271,7 +1284,7 @@ function alphaRowsHtml() {
     const badges = [
       `<i class="b ${x.mintOff ? "ok" : "bad"}" title="Mint authority ${x.mintOff ? "disabled" : "enabled"}">M</i>`,
       `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
-    ].join("");
+    ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}">
       <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(t.icon)}" alt="" loading="lazy">` : "●"}</span>
@@ -1330,7 +1343,7 @@ function alphaView() {
     ${a.open ? `<div class="al-filters">
       <div class="al-grid">${ALPHA_NUM.map(([k, l]) => `<label><span>${l === "Chg % min" || l === "Chg % max" ? l + " (" + ivLabel + ")" : l}</span><input data-alpha-f="${k}" value="${esc(a.f[k] ?? "")}" inputmode="text" autocomplete="off" placeholder="${/Max|max/.test(l) && /%/.test(l) ? "e.g. 30" : /h\)/.test(l) ? "hours" : /%|Organic/.test(l) ? "e.g. 10" : "e.g. 50k"}"></label>`).join("")}</div>
       <div class="al-bools">${ALPHA_BOOL.map(([k, l]) => `<label><input type="checkbox" data-alpha-b="${k}" ${a.f[k] ? "checked" : ""}> ${l}</label>`).join("")}</div>
-      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. Token data: Jupiter. Missing data fails an active filter.</div>
+      <div class="k al-note">LP lock and risk data: <a href="https://rugcheck.xyz" target="_blank" rel="noopener">RugCheck.xyz</a> (free API, checked only for rows that pass the other filters, cached 30 min). RugCheck score: lower is safer. Token data: Jupiter (live stream). New pump.fun launches: PumpPortal. Missing data fails an active filter.</div>
       <div class="al-actions"><button type="button" data-alpha-clear>Clear</button><button type="button" data-alpha-save class="save">Save preset</button></div>
     </div>` : ""}
     <div class="al-sort">${ALPHA_SORTS.map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
@@ -1618,7 +1631,7 @@ function bind() {
 const STREAM_URL = "wss://api.jup.ag/stream/v1/ws";
 const stream = {
   ws: null, open: false, retry: 0, lastMsg: 0, lastPrice: 0, lastAct: 0,
-  sent: { prices: new Set(), txns: new Set(), assets: new Set(), recent: false },
+  sent: { prices: new Set(), txns: new Set(), assets: new Set(), pnl: new Set(), "user-trades": new Set(), recent: false },
   dirty: { live: false, tape: false, alpha: false }, raf: 0, alphaAt: 0
 };
 const feeds = {};
@@ -1647,7 +1660,7 @@ function streamConnect() {
     stream.open = true;
     stream.retry = 0;
     stream.lastMsg = Date.now();
-    stream.sent = { prices: new Set(), txns: new Set(), assets: new Set(), recent: false };
+    stream.sent = { prices: new Set(), txns: new Set(), assets: new Set(), pnl: new Set(), "user-trades": new Set(), recent: false };
     streamSync();
   };
   ws.onmessage = (e) => {
@@ -1657,6 +1670,8 @@ function streamConnect() {
     if (d.type === "prices") onStreamPrices(d.data || []);
     else if (d.type === "actions") onStreamActions(d.data || []);
     else if (d.type === "asset-updates") onStreamAssets(d.data || []);
+    else if (d.type === "pnl") onStreamPnl(d.data || {});
+    else if (d.type === "user-trades") onStreamUserTrades(d.data || []);
   };
   ws.onclose = () => { stream.open = false; if (stream.ws === ws) stream.ws = null; streamRetry(); };
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
@@ -1670,12 +1685,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) stre
 function streamSend(type, payload) {
   if (stream.ws?.readyState === 1) stream.ws.send(JSON.stringify({ type, ...payload }));
 }
-function syncSet(kind, want) {
+function syncSet(kind, want, field = "assets") {
   const sent = stream.sent[kind];
   const add = [...want].filter((x) => !sent.has(x));
   const del = [...sent].filter((x) => !want.has(x));
-  if (del.length) streamSend("unsubscribe:" + kind, { assets: del });
-  if (add.length) streamSend("subscribe:" + kind, { assets: add });
+  if (del.length) streamSend("unsubscribe:" + kind, { [field]: del });
+  if (add.length) streamSend("subscribe:" + kind, { [field]: add });
   stream.sent[kind] = new Set(want);
 }
 // Subscribe to exactly what is on screen.
@@ -1690,11 +1705,109 @@ function streamSync() {
   syncSet("prices", prices);
   syncSet("txns", new Set(a ? [a] : []));
   syncSet("assets", assets);
+  const wallets = new Set(state.wallet ? [state.wallet] : []);
+  syncSet("pnl", wallets, "addresses");
+  syncSet("user-trades", wallets, "addresses");
   const recent = state.view === "alpha" && state.alpha.src === "recent";
   if (recent !== stream.sent.recent) {
     streamSend((recent ? "subscribe" : "unsubscribe") + ":assets,recent", {});
     stream.sent.recent = recent;
   }
+  if (recent) pumpConnect();
+}
+
+// Wallet push: balances + average cost for every token the wallet holds.
+const NATIVE_SOL = "So11111111111111111111111111111111111111111";
+let pnlRenderTimer = 0;
+function onStreamPnl(data) {
+  const w = state.wallet;
+  const mine = w && data[w];
+  if (!mine) return;
+  feedMark("walletPnlStream");
+  let changed = false;
+  const missing = [];
+  for (const [mint, row] of Object.entries(mine)) {
+    const bal = row?.balance;
+    if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint), String(row.pnl.averageCost));
+    if (!bal) continue;
+    if (mint === NATIVE_SOL) { state.sol = Number(bal.balance) || 0; changed = true; continue; }
+    if (mint === SOL) continue;
+    const ui = Number(bal.balance) || 0;
+    const i = state.holdings.findIndex((h) => h.mint === mint);
+    if (ui <= 0) { if (i >= 0) { state.holdings.splice(i, 1); changed = true; } continue; }
+    const next = { mint, amount: Number(bal.amount) || 0, decimals: bal.decimals ?? 0, ui };
+    if (i >= 0) Object.assign(state.holdings[i], next);
+    else { state.holdings.push(next); missing.push(mint); }
+    changed = true;
+  }
+  if (missing.length) {
+    datapi("https://datapi.jup.ag/v1/assets?ids=" + missing.join(",")).then((meta) => {
+      (Array.isArray(meta) ? meta : meta?.assets || []).forEach((m) => {
+        const h = state.holdings.find((x) => x.mint === m.id);
+        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon });
+      });
+      streamSync();
+      render();
+    }).catch(() => {});
+  }
+  if (!changed) return;
+  // Balance screens re-render at most twice a second; elsewhere just repaint live numbers.
+  if (state.view === "portfolio" || state.tab === "holdings" || state.tab === "trade") {
+    clearTimeout(pnlRenderTimer);
+    pnlRenderTimer = setTimeout(() => render(), 500);
+  } else { stream.dirty.live = true; streamFlush(); }
+}
+function onStreamUserTrades(list) {
+  feedMark("walletTradesStream");
+  onStreamActions(list);
+}
+
+// ---------------- PumpPortal (wss://pumpportal.fun/api/data) ----------------
+// Free, no key: new pump.fun tokens + migrations. ONE connection only (their rule; extra
+// connections risk an hour ban), opened the first time Alpha > New is shown, slow backoff.
+const pump = { ws: null, retry: 0, wanted: false };
+function pumpConnect() {
+  pump.wanted = true;
+  if (pump.ws && pump.ws.readyState <= 1) return;
+  let ws;
+  try { ws = new WebSocket("wss://pumpportal.fun/api/data"); } catch (_) { return pumpRetry(); }
+  pump.ws = ws;
+  ws.onopen = () => {
+    pump.retry = 0;
+    ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+    ws.send(JSON.stringify({ method: "subscribeMigration" }));
+  };
+  ws.onmessage = (e) => {
+    let d;
+    try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (d.txType === "create" && d.mint) onPumpNew(d);
+    else if (d.txType === "migrate" && d.mint) onPumpMigrate(d);
+  };
+  ws.onclose = () => { if (pump.ws === ws) pump.ws = null; pumpRetry(); };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+function pumpRetry() {
+  if (!pump.wanted) return;
+  setTimeout(pumpConnect, Math.min(60000, 5000 * 2 ** pump.retry++));
+}
+function onPumpNew(d) {
+  feedMark("pumpNew");
+  const al = state.alpha;
+  if (al.src !== "recent" || al.rows.some((r) => r.id === d.mint)) return;
+  const solPx = state.prices[SOL] || 0;
+  al.rows.unshift({
+    id: d.mint, symbol: d.symbol, name: d.name, launchpad: "pump.fun", createdAt: new Date().toISOString(),
+    mcap: d.marketCapSol && solPx ? d.marketCapSol * solPx : null, dev: d.traderPublicKey, _pump: true, stats1h: {}, stats24h: {}, audit: {}
+  });
+  if (al.rows.length > 100) al.rows.length = 100;
+  stream.dirty.alpha = true;
+  streamFlush();
+  streamSync(); // ask Jupiter's stream for the full token object as soon as it's indexed
+}
+function onPumpMigrate(d) {
+  feedMark("pumpMigrate");
+  const r = state.alpha.rows.find((x) => x.id === d.mint);
+  if (r) { r._migrated = true; stream.dirty.alpha = true; streamFlush(); }
 }
 
 function onStreamPrices(list) {
