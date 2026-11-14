@@ -1904,8 +1904,7 @@ function setChartData() {
     chartUi.line.setData(linePts);
     chartUi.volume.setData(vols);
     chartUi.key = key;
-    chartUi.chart.timeScale().fitContent();
-    chartUi.chart.timeScale().applyOptions({ secondsVisible: resolvedTf() === "1s" || resolvedTf() === "15s" });
+    frameCandles(bars.length);
   } else {
     bars.forEach((b, i) => {
       if (b.time >= chartUi.lastTime) {
@@ -1924,6 +1923,22 @@ function setChartData() {
   paintDrawings();
 }
 
+// fitContent stretches a handful of bars across the whole plot, so a new coin's
+// only candle becomes a slab that covers the drawing toolbar. Keep a normal width.
+function frameCandles(n) {
+  const ts = chartUi.chart && chartUi.chart.timeScale();
+  if (!ts) return;
+  const sec = resolvedTf() === "1s" || resolvedTf() === "15s";
+  if (n > 0 && n < 40) {
+    ts.applyOptions({ secondsVisible: sec, barSpacing: 8, rightOffset: 8, minBarSpacing: 4 });
+    const to = n - 1 + 8;
+    try { ts.setVisibleLogicalRange({ from: to - 48, to }); }
+    catch (_) { ts.fitContent(); }
+  } else {
+    ts.applyOptions({ secondsVisible: sec, barSpacing: 6, rightOffset: 4, minBarSpacing: 0.5 });
+    ts.fitContent();
+  }
+}
 function priceSeries() {
   return state.chartStyle === "line" && chartUi.line ? chartUi.line : chartUi.candles;
 }
@@ -3978,7 +3993,7 @@ function bind() {
     state.scaleMode = b.dataset.scale;
     try { localStorage.setItem(SCALE_KEY, state.scaleMode); } catch (_) {}
     applyScale();
-    if (state.scaleMode === "auto") chartUi.chart?.timeScale().fitContent();
+    if (state.scaleMode === "auto") frameCandles(state.candles.length);
     document.querySelectorAll("[data-scale]").forEach((x) => x.classList.toggle("on", x.dataset.scale === state.scaleMode));
   });
   document.querySelector(".tf-scroll .on")?.scrollIntoView({ inline: "center", block: "nearest" });

@@ -139,7 +139,7 @@ button { font: inherit; }
 .tools {
   position: absolute; left: 0; top: 24px; z-index: 6;
   display: grid; gap: 0; color: #8b939e;
-  background: rgba(7,9,14,.72); border-radius: 8px; padding: 2px 0;
+  background: #07090e; border-radius: 8px; padding: 2px 0;
 }
 .tools button { width: 28px; height: 26px; padding: 0; border: 0; background: transparent; color: inherit; }
 .tools button.on { color: #c7f284; }
