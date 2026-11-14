@@ -3965,7 +3965,7 @@ function bind() {
   document.querySelector(".tf-scroll .on")?.scrollIntoView({ inline: "center", block: "nearest" });
   if (chartUi.draw) chartUi.draw.classList.toggle("off", state.tool === "cross");
   const tokenSearch = $("#token-search");
-  if (tokenSearch) tokenSearch.onclick = () => { state.searchOpen = true; render(); };
+  if (tokenSearch) tokenSearch.onclick = () => { state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
   const share = $("#share");
   if (share) share.onclick = () => {
     const t = state.active;
