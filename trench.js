@@ -106,6 +106,12 @@ function clockLabel(d = new Date()) {
   const mm = Math.abs(off) % 60;
   return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + " (UTC" + sign + hh + (mm ? ":" + p(mm) : "") + ")";
 }
+function statMoney(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—";
+  const a = Math.abs(Number(n));
+  if (a > 0 && a < 0.01) return (n < 0 ? "-" : "") + priceLabel(a);
+  return usd(n);
+}
 const moveLabel = (pct) => {
   const n = Number(pct) || 0;
   const mult = Math.abs(1 + n / 100);
@@ -994,6 +1000,8 @@ function paintLive() {
     const px = state.prices[t.id] || t.usdPrice || 0;
     mc.textContent = usd((t.circSupply || 0) * px || t.mcap || 0);
   }
+  const feeEl = $("#stat-fees");
+  if (feeEl && t) feeEl.textContent = t.fees == null ? "—" : statMoney(t.fees);
   if (chg && t) {
     const c = t.stats24h?.priceChange || 0;
     chg.textContent = moveLabel(c);
@@ -1298,7 +1306,10 @@ function paintAxisEdge() {
     host.appendChild(bar);
   }
   const range = chart.timeScale().getVisibleRange();
-  bar.textContent = range ? axisClock(range.from) : "";
+  const x = range ? chart.timeScale().timeToCoordinate(range.from) : null;
+  // Cover a clipped left tick. Skip when that tick is already drawn under the overlay, or the two labels stack.
+  const show = x == null ? !!range : x < 8 || x > 56;
+  bar.textContent = range && show ? axisClock(range.from) : "";
 }
 
 function paintLegend(bar, vol, param) {
@@ -2123,7 +2134,7 @@ function tokenHead(t, price, chg) {
       <div><div class="k">Price</div><div class="v">${priceLabel(price)}</div></div>
       <div><div class="k">Liquidity</div><div class="v">${usd(t.liquidity || 0)}</div></div>
       <div><div class="k">1h Vol</div><div class="v">${usd((s1.buyVolume || 0) + (s1.sellVolume || 0))}</div></div>
-      <div><div class="k">Fees Paid</div><div class="v">${t.fees == null ? "—" : usd(t.fees)}</div></div>
+      <div><div class="k">Fees Paid</div><div class="v" id="stat-fees">${t.fees == null ? "—" : statMoney(t.fees)}</div></div>
       <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>

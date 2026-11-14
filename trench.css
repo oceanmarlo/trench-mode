@@ -95,7 +95,7 @@ button { font: inherit; }
 .stats > div { flex: 1; min-width: 0; }
 .stats > div:first-child { flex: 1.15; }
 .stats .k { color: var(--faint); font-size: 11px; white-space: nowrap; }
-.stats .v { font-size: 12px; font-weight: 650; margin-top: 2px; white-space: nowrap; }
+.stats .v { font-size: 12px; font-weight: 650; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-more {
   width: 28px; height: 28px; border-radius: 50%; border: 0; flex: none;
   background: #1c2128; color: #d7dde4; font-size: 16px; line-height: 1;
