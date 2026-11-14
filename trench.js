@@ -2146,10 +2146,13 @@ function buildIndSeries() {
     chartUi.extraMap.stochD = addLine({ color: "#f5c542", title: "" }, p);
   }
   if (want.has("chop")) {
-    const s = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: "" }, paneOf.chop);
+    // Hiding this pane's price scale throws "Value is null" inside lightweight-charts on resize.
+    const s = chart.addSeries(L.HistogramSeries, {
+      priceLineVisible: false, lastValueVisible: false, title: "",
+      priceFormat: { type: "custom", formatter: () => "", minMove: 1 }
+    }, paneOf.chop);
     chartUi.extra.push(s);
     chartUi.extraMap.chop = s;
-    try { s.priceScale().applyOptions({ visible: false }); } catch (_) {}
   }
   chartUi.volume.applyOptions({ visible: want.has("vol") });
   chartUi.indLayout = indLayout();
@@ -2185,7 +2188,10 @@ function fillIndicators(full) {
     pushSeries(m.stochK, finitePts(times, st.k), full);
     pushSeries(m.stochD, finitePts(times, st.d), full);
   }
-  if (m.chop) pushSeries(m.chop, chopPoints(times, closes), full);
+  if (m.chop) {
+    pushSeries(m.chop, chopPoints(times, closes), full);
+    try { m.chop.priceScale().applyOptions({ textColor: "#07090e", borderVisible: false }); } catch (_) {}
+  }
   if (full) requestAnimationFrame(paintPaneTags);
 }
 function applyStyle() {
