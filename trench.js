@@ -1782,6 +1782,28 @@ function ensureChart() {
 }
 // Keep the TradingView mark a child of the chart library. Reparenting it makes
 // lightweight-charts throw removeChild when a pane is added or removed.
+function priceScaleCanvas(host) {
+  const tall = [...host.querySelectorAll("canvas")].filter((c) => c.clientHeight > 48 && c.clientWidth > 0);
+  const narrow = tall.filter((c) => c.clientWidth <= 96);
+  if (!narrow.length) return null;
+  return narrow.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+}
+// The fullscreen button used to sit on the price scale and slice the top tick ("231.0" instead of "231.00M").
+function parkFullBtn() {
+  const btn = document.getElementById("chart-full");
+  const host = chartUi.host;
+  if (!btn || !host || !host.isConnected) return;
+  const scale = priceScaleCanvas(host);
+  const wrap = btn.offsetParent;
+  if (!scale || !wrap) {
+    btn.style.left = "auto";
+    btn.style.right = "70px";
+    return;
+  }
+  const left = scale.getBoundingClientRect().left - wrap.getBoundingClientRect().left - btn.offsetWidth - 6;
+  btn.style.right = "auto";
+  btn.style.left = Math.max(36, Math.round(left)) + "px";
+}
 function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
   const host = chartUi.host;
@@ -1924,6 +1946,7 @@ function paintAxisEdge() {
     right.style.width = "";
   }
   parkLogo();
+  parkFullBtn();
 }
 
 // The library's crosshair time is painted on the tick canvas, so it slices the
@@ -2605,6 +2628,7 @@ window.addEventListener("resize", () => {
   const w = $("#chart-wrap");
   if (w && !state.chartFull && !chartUi.dragging) w.style.height = state.chartH + "px";
   parkLogo();
+  parkFullBtn();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
 
@@ -3036,9 +3060,10 @@ function alphaFields(t, iv) {
   return {
     mcap: t.mcap ?? (t.circSupply && t.usdPrice ? t.circSupply * t.usdPrice : null),
     liq: t.liquidity ?? null,
-    vol: win === "24h"
-      ? (s24.buyVolume || 0) + (s24.sellVolume || 0)
-      : (volSt.buyVolume == null && volSt.sellVolume == null ? null : (Number(volSt.buyVolume) || 0) + (Number(volSt.sellVolume) || 0)),
+    // Missing buy and sell volume is unknown, not zero. A real 0 still prints $0.00.
+    vol: volSt.buyVolume == null && volSt.sellVolume == null
+      ? null
+      : (Number(volSt.buyVolume) || 0) + (Number(volSt.sellVolume) || 0),
     chg: st.priceChange ?? null,
     ageH: born ? (Date.now() - new Date(born).getTime()) / 3.6e6 : null,
     holders: t.holderCount ?? null,
