@@ -1898,15 +1898,23 @@ function parkLogo() {
   logo.style.setProperty("z-index", "8", "important");
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
-function visibleSpansDays() {
+function visibleSpanSec() {
   try {
     const range = chartUi.chart && chartUi.chart.timeScale().getVisibleRange();
-    if (!range) return false;
-    const a = new Date(Number(range.from) * 1000);
-    const b = new Date(Number(range.to) * 1000);
-    if (!Number.isFinite(a.getTime()) || !Number.isFinite(b.getTime())) return false;
-    return a.toDateString() !== b.toDateString();
-  } catch (_) { return false; }
+    if (!range) return 0;
+    const span = Number(range.to) - Number(range.from);
+    return Number.isFinite(span) && span > 0 ? span : 0;
+  } catch (_) { return 0; }
+}
+// Dates only when the window is multi-day. Crossing midnight is not enough:
+// a 5m chart of 300 bars is ~25h, and a date on every tick prints "Nov 13" twice.
+function axisWantsDay() {
+  const tf = resolvedTf();
+  if (tf === "4h" || tf === "1D") return true;
+  if (tf === "1s" || tf === "15s" || tf === "1m" || tf === "3m" || tf === "5m") return false;
+  // 15m of 300 bars is about three days. Clock ticks repeat ("19:00" then "19:00").
+  if (tf === "15m") return visibleSpanSec() > 20 * 3600;
+  return visibleSpanSec() > 36 * 3600;
 }
 function axisDay(d) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -1915,8 +1923,7 @@ function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
   const tf = resolvedTf();
-  // A clock beside a day tick (01:00 then Nov 5) is the wrong unit.
-  if (tf === "4h" || tf === "1D" || (tf !== "1s" && tf !== "15s" && visibleSpansDays())) return axisDay(d);
+  if (axisWantsDay()) return axisDay(d);
   const sec = tf === "1s" || tf === "15s";
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
 }
@@ -1927,12 +1934,13 @@ function tickMarkText(time, type) {
   if (!Number.isFinite(d.getTime())) return null;
   const tf = resolvedTf();
   if (type === 0) return String(d.getFullYear());
+  const sec = type === 4 || tf === "1s" || tf === "15s";
+  const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
   // A month tick is a UTC boundary. Locally that is often the previous evening,
   // so a month-only label sits after a later day ("Oct 12" then "Oct"). Always print the day.
-  if (tf === "4h" || tf === "1D" || type === 1 || type === 2) return axisDay(d);
-  const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  if (type === 4 || tf === "1s" || tf === "15s") return clock + ":" + pad2(d.getSeconds());
-  if (visibleSpansDays()) return axisDay(d);
+  // On an overnight 5m chart a day tick beside a clock tick collides, so those stay clocks.
+  if (axisWantsDay()) return axisDay(d);
+  if ((type === 1 || type === 2) && tf !== "1s" && tf !== "15s" && tf !== "1m" && tf !== "3m" && tf !== "5m" && tf !== "15m") return axisDay(d);
   return clock;
 }
 function timePaneWidth(host) {
