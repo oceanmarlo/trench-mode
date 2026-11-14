@@ -955,14 +955,29 @@ function sellTokens() {
 }
 function idleQuoteStatus() {
   if (!state.active) return null;
+  const invalid = amountInputError();
+  if (invalid) return invalid;
   if (state.side === "buy" && state.active.id === SOL) return "SOL is the pay token";
   if (state.side === "sell" && !orderParams()) return "No balance";
   return null;
 }
 
+function amountInputError() {
+  const text = String(state.side === "buy" ? state.amount : state.sellPct).trim();
+  const n = Number(text);
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) || !Number.isFinite(n) || n <= 0) {
+    return state.side === "buy" ? "Enter a valid amount" : "Enter a percent above 0";
+  }
+  if (state.side === "sell") return n > 100 ? "Percent cannot exceed 100" : "";
+  const units = n * 1e9;
+  if (units < 1) return "Minimum amount is 0.000000001 SOL";
+  if (!Number.isSafeInteger(Math.round(units))) return "Amount is too large";
+  return "";
+}
+
 function orderParams() {
   const t = state.active;
-  if (!t) return null;
+  if (!t || amountInputError()) return null;
   if (state.side === "buy") {
     const n = Number(state.amount);
     if (!n || n <= 0) return null;
@@ -1118,7 +1133,8 @@ function protectRaw() {
     const p = orderParams();
     return p ? String(p.amount) : "";
   }
-  return state.quote?.outAmount ? String(state.quote.outAmount) : "";
+  const quote = currentQuote();
+  return quote?.outAmount ? String(quote.outAmount) : "";
 }
 function buildTriggerOrder(extra = {}) {
   const t = state.active;
@@ -1130,14 +1146,14 @@ function buildTriggerOrder(extra = {}) {
     const sl = stopFromEntry(entry, extra.slMode || state.slMode, extra.slPct != null ? extra.slPct : state.slPct, extra.slPrice != null ? extra.slPrice : state.slPrice);
     if (!sl.ok) return sl;
     const body = buildStopBody({ mint: t.id, amount: amount || "0", wallet, stop: sl.stop, now: extra.now });
-    return { ok: true, kind: "stop", ...body, stop: sl.stop, pct: sl.pct, entry, line: "Stop " + priceLabel(sl.stop) + " (−" + sl.pct.toFixed(1) + "%)" };
+    return { ok: true, kind: "stop", symbol: t.symbol, ...body, stop: sl.stop, pct: sl.pct, entry, line: "Stop " + priceLabel(sl.stop) + " (−" + sl.pct.toFixed(1) + "%)" };
   }
   if (state.orderType === "trail" || extra.kind === "trail") {
     const high = extra.high != null ? Number(extra.high) : armTrailHigh(false);
     const tr = trailFromHigh(high, extra.trailPct != null ? extra.trailPct : state.trailPct);
     if (!tr.ok) return tr;
     const body = buildTrailBody({ mint: t.id, amount: amount || "0", wallet, bps: tr.bps, now: extra.now });
-    return { ok: true, kind: "trail", ...body, high: tr.high, trigger: tr.trigger, bps: tr.bps, line: "High " + priceLabel(tr.high) + " · trigger " + priceLabel(tr.trigger) };
+    return { ok: true, kind: "trail", symbol: t.symbol, ...body, high: tr.high, trigger: tr.trigger, bps: tr.bps, line: "High " + priceLabel(tr.high) + " · trigger " + priceLabel(tr.trigger) };
   }
   return { ok: false, reason: "Market order" };
 }
@@ -1251,6 +1267,7 @@ function saveAuth(r) {
   if (!triggerAuth.access) throw new Error(r.error || r.message || "Jupiter did not return a session.");
 }
 async function triggerToken() {
+  const unchanged = orderGuard();
   if (triggerAuth.wallet && triggerAuth.wallet !== state.wallet) {
     triggerAuth.access = ""; triggerAuth.refresh = ""; triggerAuth.exp = 0;
   }
@@ -1262,9 +1279,10 @@ async function triggerToken() {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ refreshToken: triggerAuth.refresh })
       });
+      unchanged();
       saveAuth(r);
       return triggerAuth.access;
-    } catch (_) { triggerAuth.refresh = ""; triggerAuth.access = ""; }
+    } catch (_) { unchanged(); triggerAuth.refresh = ""; triggerAuth.access = ""; }
   }
   const w = state.provider;
   if (!w) throw new Error("Connect a wallet first.");
@@ -1273,11 +1291,14 @@ async function triggerToken() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ walletPubkey: state.wallet, type: "message" })
     });
+    unchanged();
     const sig = await w.signMessage(new TextEncoder().encode(ch.challenge));
+    unchanged();
     const verified = await jup(TRIGGER + "/auth/verify", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "message", walletPubkey: state.wallet, signature: asSig58(sig), authMode: "access_refresh" })
     });
+    unchanged();
     saveAuth(verified);
     return triggerAuth.access;
   }
@@ -1286,11 +1307,14 @@ async function triggerToken() {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ walletPubkey: state.wallet, type: "transaction" })
   });
+  unchanged();
   const signed = await w.signTransaction(b64ToBytes(ch.transaction));
+  unchanged();
   const verified = await jup(TRIGGER + "/auth/verify", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ type: "transaction", walletPubkey: state.wallet, signedTransaction: bytesToB64(signed), authMode: "access_refresh" })
   });
+  unchanged();
   saveAuth(verified);
   return triggerAuth.access;
 }
@@ -1305,20 +1329,27 @@ async function ensureVault(headers) {
   }
 }
 function rememberOrder(created, built) {
-  state.stops = [{ id: created.id, kind: built.kind, mint: state.active.id, symbol: state.active.symbol, line: built.line }].concat(state.stops.filter((s) => s.id !== created.id)).slice(0, 20);
+  state.stops = [{ id: created.id, kind: built.kind, mint: built.craft.inputMint, symbol: built.symbol, line: built.line }].concat(state.stops.filter((s) => s.id !== created.id)).slice(0, 20);
   saveOrderPrefs();
 }
-async function submitTrigger(built) {
+async function submitTrigger(built, unchanged = orderGuard()) {
   if (!built.ok) throw new Error(built.reason || "Can't build that stop.");
   if (!built.create.inputAmount || built.create.inputAmount === "0") throw new Error("No tokens to protect.");
+  const w = state.provider;
+  unchanged();
+  if (built.craft.inputMint !== state.active?.id || built.create.userPubkey !== state.wallet) throw new Error("Order changed. Review it and try again.");
   const token = await triggerToken();
+  unchanged();
   const headers = { "content-type": "application/json", Authorization: "Bearer " + token };
   await ensureVault(headers);
+  unchanged();
   state.status = "Confirm the deposit in your wallet…";
   paintLive();
   const deposit = await jup(TRIGGER + "/deposit/craft", { method: "POST", headers, body: JSON.stringify(built.craft) });
+  unchanged();
   if (!deposit.requestId || !deposit.transaction) throw new Error(deposit.error || deposit.message || "Jupiter did not return a deposit.");
-  const signed = await state.provider.signTransaction(b64ToBytes(deposit.transaction));
+  const signed = await w.signTransaction(b64ToBytes(deposit.transaction));
+  unchanged();
   const createBody = { ...built.create, depositRequestId: deposit.requestId, depositSignedTx: bytesToB64(signed) };
   if (built.kind === "trail") delete createBody.triggerPriceUsd;
   state.status = "Placing stop…";
@@ -1327,8 +1358,9 @@ async function submitTrigger(built) {
   if (!created.id) throw new Error(created.error || created.message || "Stop was not created.");
   rememberOrder(created, built);
   if (built.kind === "trail") {
-    const px = Number(state.prices[state.active.id] || state.active.usdPrice || built.high || 0);
-    if (px > 0) state.trailMark[state.active.id] = px;
+    const mint = built.craft.inputMint;
+    const px = Number(state.prices[mint] || built.high || 0);
+    if (px > 0) state.trailMark[mint] = px;
     state.stopLive[created.id] = { high: px, trigger: px * (1 - built.bps / 10000), trailingBps: built.bps };
   }
   return created;
@@ -1353,15 +1385,45 @@ async function refreshStopLive() {
 
 let quoteTimer = 0;
 let quoteSeq = 0;
+function quoteParamsKey() {
+  const params = orderParams();
+  if (!params) return "";
+  const q = new URLSearchParams(params);
+  if (state.wallet) q.set("taker", state.wallet);
+  return q.toString();
+}
+function currentQuote() {
+  return state.quote?._params === quoteParamsKey() ? state.quote : null;
+}
+// Capture the user's intent before any async order/auth/wallet work. Live prices
+// may move; mint, side, amount, wallet and protection settings must not change.
+function orderGuard() {
+  const w = state.provider;
+  const intent = () => JSON.stringify([state.wallet, state.active?.id, state.side,
+    state.amount, state.sellPct, state.orderType, state.slMode, state.slPct, state.slPrice, state.trailPct]);
+  const before = intent();
+  return () => {
+    if (state.provider !== w || intent() !== before) throw new Error("Order changed. Review it and try again.");
+  };
+}
 function scheduleQuote(ms = 400) {
   clearTimeout(quoteTimer);
+  // Invalidate at the edit, not after the debounce: an older response must not
+  // refill the preview while the user is typing the next amount.
+  ++quoteSeq;
+  if (!currentQuote()) {
+    state.quote = null;
+    state.quoting = !!orderParams();
+    state.status = idleQuoteStatus() || "Quoting…";
+    paintLive();
+  }
   quoteTimer = setTimeout(() => refreshQuote().catch(() => {}), ms);
 }
 
 async function refreshQuote() {
-  const params = orderParams();
+  const key = quoteParamsKey();
   const seq = ++quoteSeq;
-  if (!params) {
+  if (!key) {
     state.quote = null;
     state.quoting = false;
     const idle = idleQuoteStatus();
@@ -1369,15 +1431,14 @@ async function refreshQuote() {
     paintLive();
     return null;
   }
+  if (!currentQuote()) state.quote = null;
   state.quoting = true;
   paintLive();
   try {
-    const q = new URLSearchParams(params);
-    if (state.wallet) q.set("taker", state.wallet);
-    const order = await jup(SWAP + "/order?" + q.toString());
-    if (seq !== quoteSeq) return order;
+    const order = await jup(SWAP + "/order?" + key);
+    if (seq !== quoteSeq || key !== quoteParamsKey()) return null;
     order._at = Date.now();
-    order._params = q.toString();
+    order._params = key;
     state.quote = order;
     state.status = order.errorMessage ? order.errorMessage : "Live · Jupiter";
     return order;
@@ -1426,9 +1487,13 @@ async function heliusSendSigned(signed) {
 async function sendMarket() {
   const w = state.provider;
   if (!w?.signTransaction && !w?.signAndSend) throw new Error("This wallet can't sign transactions here.");
+  const unchanged = orderGuard();
+  if (!orderParams()) throw new Error(idleQuoteStatus() || "Enter a valid order.");
   // Orders are single-use and expire fast, so always take a fresh one for the click.
   clearTimeout(quoteTimer);
   const order = await refreshQuote();
+  unchanged();
+  if (!order || order._params !== quoteParamsKey()) throw new Error("Order changed. Review it and try again.");
   if (!order?.transaction) throw new Error(order?.errorMessage || order?.error || "Jupiter did not return a transaction.");
   state.status = "Confirm in your wallet…";
   paintLive();
@@ -1438,6 +1503,8 @@ async function sendMarket() {
     // signTransaction (not signAndSend): JupiterZ/gasless routes need Jupiter to add
     // its signature at /execute, so the wallet must not broadcast it itself.
     const signed = await w.signTransaction(unsigned);
+    unchanged();
+    if (order._params !== quoteParamsKey()) throw new Error("Order changed. Review it and try again.");
     state.status = "Sending…";
     paintLive();
     done = null;
@@ -1495,10 +1562,10 @@ async function trade() {
   }
 }
 
-async function boughtRaw(before, quoted) {
+async function boughtRaw(before, quoted, mint) {
   for (let i = 0; i < 3; i++) {
     await loadHoldings().catch(() => {});
-    const now = Number(state.holdings.find((h) => h.mint === state.active?.id)?.amount) || 0;
+    const now = Number(state.holdings.find((h) => h.mint === mint)?.amount) || 0;
     if (now > before) return String(Math.floor(now - before));
     await sleep(700);
   }
@@ -1520,7 +1587,9 @@ async function placeProtect() {
   const t = state.active;
   if (!t) return;
   const preview = orderPreview();
+  if (!orderParams()) { state.status = idleQuoteStatus() || "Enter a valid order."; state.toast = state.status; render(); return; }
   if (!preview.ok) { state.toast = preview.reason || preview.line; state.status = state.toast; render(); return; }
+  const unchanged = orderGuard();
   state.busy = true;
   const side = state.side;
   state.status = side === "buy" ? "Getting order…" : "Building stop…";
@@ -1530,7 +1599,8 @@ async function placeProtect() {
     let amount = "";
     let entry = orderRefPrice();
     if (side === "buy") {
-      if (!state.quote) await refreshQuote().catch(() => {});
+      if (!currentQuote()) await refreshQuote().catch(() => {});
+      unchanged();
       const est = Number(state.quote?.outUsdValue);
       const px = Number(state.prices[t.id] || t.usdPrice || 0);
       const usdEst = Number.isFinite(est) && est > 0 ? est : amountUsd(state.quote?.outAmount, t.decimals || 6, px) || Number(state.amount) * (state.prices[SOL] || 0);
@@ -1538,9 +1608,10 @@ async function placeProtect() {
       const before = Number(state.holdings.find((h) => h.mint === t.id)?.amount) || 0;
       const fill = await sendMarket();
       bought = true;
+      unchanged();
       entry = Number(state.prices[t.id] || t.usdPrice || entry);
       if (entry) localStorage.setItem(entryKey(t.id), String(entry));
-      amount = await boughtRaw(before, fill.outAmount);
+      amount = await boughtRaw(before, fill.outAmount, t.id);
     } else {
       const params = orderParams();
       if (!params) throw new Error("No balance to protect.");
@@ -1549,9 +1620,10 @@ async function placeProtect() {
       const usdEst = amountUsd(amount, t.decimals || 6, px);
       if (usdEst && usdEst < 10) throw new Error("Jupiter stops need at least $10. This is about " + usd(usdEst) + ".");
     }
+    unchanged();
     const built = buildTriggerOrder({ amount, entry, userPubkey: state.wallet });
     if (!built.ok) throw new Error(built.reason || "Can't build that stop.");
-    await submitTrigger(built);
+    await submitTrigger(built, unchanged);
     state.toast = built.kind === "trail"
       ? "Trailing stop set · Jupiter keeps it with the tab closed"
       : "Stop set at " + priceLabel(built.stop) + " · tab can close";
@@ -1570,17 +1642,22 @@ async function placeProtect() {
 async function cancelStop(id) {
   if (!id || state.busy) return;
   if (window.__orderDry) { state.toast = "Cancel not sent"; render(); return; }
+  const unchanged = orderGuard();
+  const w = state.provider;
   state.busy = true;
   state.status = "Cancelling…";
   render();
   try {
     const token = await triggerToken();
+    unchanged();
     const headers = { Authorization: "Bearer " + token, "content-type": "application/json" };
     const cancel = await jup(TRIGGER + "/orders/price/cancel/" + id, { method: "POST", headers });
+    unchanged();
     if (!cancel.transaction) throw new Error(cancel.error || cancel.message || "Jupiter did not return a withdrawal.");
     state.status = "Confirm the withdrawal in your wallet…";
     paintLive();
-    const signed = await state.provider.signTransaction(b64ToBytes(cancel.transaction));
+    const signed = await w.signTransaction(b64ToBytes(cancel.transaction));
+    unchanged();
     await jup(TRIGGER + "/orders/price/confirm-cancel/" + id, {
       method: "POST", headers,
       body: JSON.stringify({ signedTransaction: bytesToB64(signed), cancelRequestId: cancel.requestId })
@@ -1674,6 +1751,10 @@ function paintLive() {
   if (est) est.innerHTML = quoteSummary();
   paintQuoteExtras();
   if (stat) stat.textContent = state.quoting ? "Quoting…" : state.status;
+  const go = $("#go");
+  if (go) go.disabled = state.busy || (!!state.wallet && !orderParams());
+  const amt = $("#amt");
+  if (amt) amt.setAttribute("aria-invalid", String(!!amountInputError()));
   document.querySelectorAll("[data-mint]").forEach((row) => {
     const h = state.holdings.find((x) => x.mint === row.dataset.mint);
     if (!h) return;
@@ -4084,7 +4165,7 @@ function quoteBits(q) {
   return { hops: plan.length, line: parts.join(" · ") };
 }
 function paintQuoteExtras() {
-  const bits = quoteBits(state.quote);
+  const bits = quoteBits(currentQuote());
   const n = $("#route-n");
   if (n) {
     n.hidden = !bits.hops;
@@ -4100,6 +4181,7 @@ function paintQuoteExtras() {
 function quoteSummary() {
   const t = state.active;
   if (!t) return "—";
+  if (!currentQuote()) return state.quoting && orderParams() ? "…" : "—";
   if (state.quote?.errorMessage && state.wallet) return `<span class="down">${esc(state.quote.errorMessage)}</span>`;
   if (!state.quote?.outAmount) return state.quoting ? "…" : "—";
   const outDec = state.side === "buy" ? (t.decimals || 6) : 9;
@@ -4139,8 +4221,8 @@ function tradePanel() {
     </div>
     <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n < 1 ? n.toFixed(1) : String(n)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n}%</button>`).join("")}</div>
     <div class="amt-row">
-      <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" value="${state.side === "buy" ? state.amount : state.sellPct}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
-      <button class="go ${state.side}" id="go" ${state.busy ? "disabled" : ""}>${state.busy ? "…" : label}</button>
+      <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" aria-invalid="${!!amountInputError()}" value="${esc(state.side === "buy" ? state.amount : state.sellPct)}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
+      <button class="go ${state.side}" id="go" ${state.busy || (state.wallet && !orderParams()) ? "disabled" : ""}>${state.busy ? "…" : label}</button>
     </div>
     ${orderFields()}
     <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
@@ -4651,11 +4733,10 @@ function bind() {
   document.querySelectorAll("[data-pct]").forEach((b) => b.onclick = () => { state.sellPct = Number(b.dataset.pct); render(); scheduleQuote(0); });
   const amt = $("#amt");
   if (amt) amt.oninput = () => {
-    const v = Number(String(amt.value).replace(",", "."));
-    if (!Number.isFinite(v)) return;
-    if (state.side === "sell") state.sellPct = Math.min(100, Math.max(0, v));
+    const v = amt.value.replace(",", ".");
+    // Keep invalid/incomplete text as invalid state, never the last valid spend.
+    if (state.side === "sell") state.sellPct = v;
     else state.amount = v;
-    state.quote = null;
     scheduleQuote(700);
   };
   const go = $("#go");
