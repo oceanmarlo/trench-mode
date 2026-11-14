@@ -3081,7 +3081,7 @@ function holderPctText(p) {
   if (p > 0 && p < 0.01) return "<0.01%";
   return p.toFixed(2) + "%";
 }
-// LP and Dev only when the payload proves it. Rank is not proof.
+// LP, Curve, and Dev only when the payload proves it. Rank is not proof.
 function holderMarks(h, token) {
   const blobs = [];
   for (const raw of h.tags || []) {
@@ -3090,12 +3090,14 @@ function holderMarks(h, token) {
   }
   for (const raw of h.holderTags || []) blobs.push(String(raw));
   const pool = typeof token.graduatedPool === "string" ? token.graduatedPool : "";
-  const lp = (pool && h.address === pool) || blobs.some((s) => {
+  // A bonding-curve escrow is not a whale. The holders payload tags it.
+  const curve = blobs.some((s) => /bonding\s*curve/i.test(String(s)));
+  const lp = !curve && ((pool && h.address === pool) || blobs.some((s) => {
     const v = String(s).toLowerCase();
     return v === "pool" || v === "lp" || v.includes("liquidity pool");
-  });
+  }));
   const dev = (token.dev && h.address === token.dev) || blobs.some((s) => /^dev(eloper)?$/i.test(String(s)));
-  return [lp ? "LP" : "", dev ? "Dev" : ""].filter(Boolean);
+  return [curve ? "Curve" : "", lp ? "LP" : "", dev ? "Dev" : ""].filter(Boolean);
 }
 function holderRows() {
   const t = state.active || {};
@@ -3107,7 +3109,7 @@ function holderRows() {
   }
   return state.holders.slice(0, 40).map((h, i) => {
     const addr = h.address || "";
-    const tags = holderMarks(h, t).map((tag) => `<span class="htag ${tag === "LP" ? "lp" : "dev"}">${tag}</span>`).join("");
+    const tags = holderMarks(h, t).map((tag) => `<span class="htag ${tag === "Dev" ? "dev" : "lp"}">${tag}</span>`).join("");
     const who = addr
       ? `<a class="haddr" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" data-copy="${esc(addr)}">${esc(shortAddr(addr))}</a>${tags}`
       : `<span class="haddr">—</span>`;
@@ -4318,7 +4320,8 @@ function drawNetTrend() {
   const rawLo = Math.min(...vals), rawHi = Math.max(...vals);
   let lo = rawLo, hi = rawHi;
   if (lo === hi) {
-    const pad = Math.max(Math.abs(lo) * 0.05, 1);
+    // A $1 floor turned a -$0.00256 net into a two-dollar scale.
+    const pad = Math.max(Math.abs(lo), 1e-9) * 0.08;
     lo -= pad;
     hi += pad;
   }
@@ -4343,7 +4346,8 @@ function drawNetTrend() {
   ctx.lineTo(xOf(0), zeroY);
   ctx.closePath();
   if (!crosses) {
-    const up = vals[vals.length - 1] >= 0;
+    // Color the whole series, not the last point. An all-negative net is red.
+    const up = rawLo >= 0;
     const grad = ctx.createLinearGradient(0, top, 0, bot);
     grad.addColorStop(0, up ? "rgba(61,220,132,.40)" : "rgba(255,77,141,.08)");
     grad.addColorStop(1, up ? "rgba(61,220,132,.04)" : "rgba(255,77,141,.40)");
@@ -4372,7 +4376,9 @@ function drawNetTrend() {
   ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
   ctx.fillStyle = "rgba(243,245,247,.8)";
   ctx.textBaseline = "top";
-  ctx.fillText(usd(vals[vals.length - 1]), 2, 1);
+  // The top of the plot is the high. The latest sample sits at the right edge,
+  // so stamping it here made a declining series read the same number twice.
+  ctx.fillText(usd(rawHi), 2, 1);
   ctx.textBaseline = "bottom";
   ctx.fillText(usd(rawLo), 2, h - 1);
 }
