@@ -134,10 +134,12 @@ function statMoney(n) {
   return usd(n);
 }
 const moveLabel = (pct) => {
-  const n = Number(pct) || 0;
+  const n = Number(pct);
+  if (!Number.isFinite(n)) return "—";
   const mult = Math.abs(1 + n / 100);
-  const digits = mult >= 10 ? 0 : 2;
-  return (n >= 0 ? "▲ " : "▼ ") + mult.toFixed(digits) + "x (24h)";
+  const digits = mult >= 10 ? 0 : mult >= 0.1 ? 2 : mult >= 0.01 ? 3 : 4;
+  const text = mult === 0 ? "0" : mult.toFixed(digits);
+  return (n >= 0 ? "▲ " : "▼ ") + text + "x (24h)";
 };
 const SUB = "₀₁₂₃₄₅₆₇₈₉";
 const priceLabel = (n) => {
