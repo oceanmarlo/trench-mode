@@ -159,10 +159,17 @@ function statMoney(n) {
 }
 const moveLabel = (pct) => {
   const n = Number(pct);
-  if (!Number.isFinite(n)) return "—";
+  if (pct == null || !Number.isFinite(n)) return "—";
   const mult = Math.abs(1 + n / 100);
-  const digits = mult >= 10 ? 0 : mult >= 0.1 ? 2 : mult >= 0.01 ? 3 : 4;
-  const text = mult === 0 ? "0" : mult.toFixed(digits);
+  let digits = mult >= 10 ? 0 : mult >= 0.1 ? 2 : mult >= 0.01 ? 3 : 4;
+  let text = mult === 0 ? "0" : mult.toFixed(digits);
+  // A tiny drop must not read as a down arrow on a flat 1.00x.
+  if (n !== 0 && /^1(?:\.0+)?$/.test(text)) {
+    for (const d of [3, 4, 5, 6]) {
+      text = mult.toFixed(d);
+      if (!/^1(?:\.0+)?$/.test(text)) break;
+    }
+  }
   return (n >= 0 ? "▲ " : "▼ ") + text + "x (24h)";
 };
 const SUB = "₀₁₂₃₄₅₆₇₈₉";
@@ -3891,9 +3898,18 @@ function solAmt(n) {
   if (m && m[1].length >= 2) return "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
   return a.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
+function pctText(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  if (v === 0) return "0.00%";
+  let d = 2;
+  while (d < 6 && Number(v.toFixed(d)) === 0) d++;
+  if (Number(v.toFixed(d)) === 0) return "—";
+  return signed(v, d) + "%";
+}
 function deltaText(n) {
   if (n == null || !Number.isFinite(Number(n))) return "-";
-  return signed(Number(n)) + "%";
+  return pctText(n);
 }
 function deltaCls(n) {
   if (n == null || !Number.isFinite(Number(n))) return "v flat";
@@ -4130,7 +4146,7 @@ function paintSheet() {
   });
   root.querySelectorAll("[data-sw]").forEach((el) => {
     const pc = v.wins[el.dataset.sw];
-    const txt = pc == null ? "—" : signed(pc) + "%";
+    const txt = pc == null ? "—" : pctText(pc);
     if (el.textContent !== txt) el.textContent = txt;
     el.className = pc == null ? "flat" : cls(pc);
   });
