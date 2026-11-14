@@ -1065,6 +1065,8 @@ function placeOrderMenu() {
   const menu = document.querySelector(".market-menu");
   const btn = document.getElementById("market");
   if (!menu || !btn) return;
+  // The menu is position:fixed. Do not float it over the search sheet.
+  if (state.searchOpen || document.getElementById("search-sheet")) { menu.remove(); return; }
   const r = btn.getBoundingClientRect();
   const w = menu.offsetWidth || 148;
   const h = menu.offsetHeight || 112;
@@ -1860,11 +1862,18 @@ function axisClock(ts) {
 function tickMarkText(time, type) {
   const d = new Date(Number(time) * 1000);
   if (!Number.isFinite(d.getTime())) return null;
+  const tf = resolvedTf();
+  // A one-candle 4h or daily chart asks for a clock tick (UTC midnight is 19:00 here).
+  // That unit is wrong next to a date scale. Always print a date.
+  if (tf === "4h" || tf === "1D") {
+    if (type === 0) return String(d.getFullYear());
+    if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
   if (type === 0) return String(d.getFullYear());
   if (type === 1) return d.toLocaleDateString(undefined, { month: "short" });
   if (type === 2) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const clock = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-  const tf = resolvedTf();
   if (type === 4 || tf === "1s" || tf === "15s") return clock + ":" + pad2(d.getSeconds());
   return clock;
 }
@@ -4174,6 +4183,15 @@ document.addEventListener("click", (e) => {
   document.querySelector(".market-menu")?.remove();
 });
 
+function openSearch() {
+  state.infoOpen = false;
+  state.marketOpen = false;
+  if (state.alpha) state.alpha.open = false;
+  state.searchOpen = true;
+  state.scrollTop = 0;
+  render();
+  loadSpotScan().catch(() => {});
+}
 function searchSheet() {
   const q = state.searchQ || "";
   const body = q.length >= 2 ? searchResultHtml() : spotScanHtml();
@@ -4206,7 +4224,12 @@ function bind() {
     return placeProtect();
   };
   const market = $("#market");
-  if (market) market.onclick = (e) => { e.stopPropagation(); state.marketOpen = !state.marketOpen; render(); };
+  if (market) market.onclick = (e) => {
+    e.stopPropagation();
+    if (state.searchOpen) return;
+    state.marketOpen = !state.marketOpen;
+    render();
+  };
   const scMenu = document.querySelector(".scroll");
   if (scMenu) scMenu.addEventListener("scroll", () => { if (state.marketOpen) placeOrderMenu(); }, { passive: true });
   document.querySelectorAll("[data-otype]").forEach((b) => b.onclick = (e) => {
@@ -4294,7 +4317,7 @@ function bind() {
   document.querySelector(".tf-scroll .on")?.scrollIntoView({ inline: "center", block: "nearest" });
   if (chartUi.draw) chartUi.draw.classList.toggle("off", state.tool === "cross");
   const tokenSearch = $("#token-search");
-  if (tokenSearch) tokenSearch.onclick = () => { state.infoOpen = false; state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
+  if (tokenSearch) tokenSearch.onclick = () => openSearch();
   const share = $("#share");
   if (share) share.onclick = () => {
     const t = state.active;
@@ -4348,7 +4371,7 @@ function bind() {
   const c = $("#connect");
   if (c) c.onclick = () => (state.wallet ? openWalletPicker() : connect());
   const so = $("#search-open");
-  if (so) so.onclick = () => { state.infoOpen = false; state.searchOpen = true; render(); loadSpotScan().catch(() => {}); };
+  if (so) so.onclick = () => openSearch();
   const q = $("#q");
   if (q) {
     q.oninput = () => search(q.value.trim());
