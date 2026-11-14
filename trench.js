@@ -1985,6 +1985,7 @@ function paintCrosshairTime(param) {
   const label = x != null ? axisClock(ts) : "";
   if (!label || !Number.isFinite(x)) {
     el.textContent = "";
+    host.querySelectorAll(".axis-edge:not(.axis-cross)").forEach((lab) => { lab.style.visibility = ""; });
     return;
   }
   el.textContent = label;
@@ -1996,7 +1997,7 @@ function paintCrosshairTime(param) {
   const groups = timeLabelGroups(host) || [];
   for (const g of groups) {
     const overlap = Math.min(g[1], right) - Math.max(g[0], left);
-    if (overlap < 4) continue;
+    if (overlap < 1) continue;
     if (g[0] >= left - 1 && g[1] <= right + 1) continue;
     const cut = document.createElement("div");
     cut.className = "axis-cut";
@@ -2005,6 +2006,21 @@ function paintCrosshairTime(param) {
     cut.style.width = (g[1] + 3 - cLeft) + "px";
     host.appendChild(cut);
   }
+  // The pill sits above the edge labels. Overlap was leaving "08:00:0".
+  // Hide the label and cover its box so neither a slice nor the native tick shows.
+  host.querySelectorAll(".axis-edge:not(.axis-cross)").forEach((lab) => {
+    if (!lab.textContent) { lab.style.visibility = ""; return; }
+    const labLeft = lab.offsetLeft;
+    const labRight = labLeft + lab.offsetWidth;
+    const overlap = Math.min(labRight, right) - Math.max(labLeft, left);
+    if (overlap <= 0) { lab.style.visibility = ""; return; }
+    lab.style.visibility = "hidden";
+    const cut = document.createElement("div");
+    cut.className = "axis-cut";
+    cut.style.left = Math.max(0, labLeft) + "px";
+    cut.style.width = Math.max(4, labRight - labLeft) + "px";
+    host.appendChild(cut);
+  });
 }
 
 function paintLegend(bar, vol, param) {
@@ -3730,7 +3746,7 @@ function solAmt(n) {
   if (a >= 0.01) return a.toFixed(3);
   if (a >= 0.001) return a.toFixed(4).replace(/0+$/, "");
   // The header cell clips "0.000157" to "0.0000". Use the price subscript so a real fee is not a fake zero.
-  const m = a.toFixed(12).match(/^0\.(0*)([1-9]\d{0,2})/);
+  const m = a.toFixed(12).match(/^0\.(0*)([1-9]\d?)/);
   if (m && m[1].length >= 2) return "0.0" + String(m[1].length).replace(/\d/g, (d) => SUB[d]) + m[2];
   return a.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
