@@ -1106,10 +1106,15 @@ function rcWant(mints) {
 }
 function rcPump() {
   while (rc.inflight < RC_MAX_INFLIGHT && rc.queue.length) {
-    const wait = Math.max(rc.coolUntil - Date.now(), rc.last + RC_GAP_MS - Date.now());
-    if (wait > 0) { setTimeout(rcPump, wait); return; }
+    // Sliding window: never more than 3 request starts in any 1000 ms, plus the min gap.
+    const now = Date.now();
+    rc.starts = (rc.starts || []).filter((t) => now - t < 1000);
+    const winWait = rc.starts.length >= 3 ? 1000 - (now - rc.starts[0]) + 20 : 0;
+    const wait = Math.max(rc.coolUntil - now, rc.last + RC_GAP_MS - now, winWait);
+    if (wait > 0) { clearTimeout(rc.timer); rc.timer = setTimeout(rcPump, wait); return; }
     const mint = rc.queue.shift();
-    rc.last = Date.now();
+    rc.last = now;
+    rc.starts.push(now);
     rc.inflight++;
     rcFetch(mint).finally(() => { rc.inflight--; rcPump(); });
   }
