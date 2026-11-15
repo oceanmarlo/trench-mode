@@ -2206,9 +2206,15 @@ function parkLogo() {
   const onScreen = r.width > 2 && r.bottom > 0 && r.top < window.innerHeight;
   logo.style.setProperty("visibility", onScreen ? "visible" : "hidden", "important");
   if (!onScreen) return;
-  logo.style.setProperty("position", "fixed", "important");
-  logo.style.setProperty("left", Math.round(r.left + 1) + "px", "important");
-  logo.style.setProperty("top", Math.round(r.top + 1) + "px", "important");
+  // Keep the library-owned pane cell, which moves when indicators are toggled.
+  // Absolute positioning stays inside the scroll clip; fixed escaped over the
+  // browser header. Offset from that cell back to the chart's top-left corner.
+  logo.style.setProperty("position", "absolute", "important");
+  const parent = logo.offsetParent;
+  if (!parent) return;
+  const pr = parent.getBoundingClientRect();
+  logo.style.setProperty("left", (r.left - pr.left + 1) + "px", "important");
+  logo.style.setProperty("top", (r.top - pr.top + 1) + "px", "important");
   logo.style.setProperty("right", "auto", "important");
   logo.style.setProperty("bottom", "auto", "important");
   logo.style.setProperty("margin", "0", "important");
