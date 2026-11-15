@@ -3637,15 +3637,16 @@ function socialsHtml(t) {
 }
 function rcView(t) {
   const r = t && rcGet(t.id);
-  if (!r || r.missing) return { cls: "wait", mark: "…", label: "RugCheck loading" };
+  if (!r) return { cls: "wait", mark: "…", label: "RugCheck loading" };
+  if (r.missing) return { cls: "wait", mark: "?", label: "RugCheck unavailable — retrying automatically" };
   if (r.level === "danger") return { cls: "bad", mark: "✕", label: "RugCheck danger" };
   return { cls: "ok", mark: "✓", label: "RugCheck safe" };
 }
 function rcLineInner(t) {
   const r = rcGet(t.id);
   const a = t.audit || {};
-  const score = r && !r.missing && r.score != null ? String(Math.round(r.score)) : "…";
-  const lp = r && !r.missing && r.lp != null ? pctShown(r.lp) : "…";
+  const score = r?.missing ? "unavailable" : r && r.score != null ? String(Math.round(r.score)) : "…";
+  const lp = r?.missing ? "—" : r && r.lp != null ? pctShown(r.lp) : "…";
   const auth = (off) => off == null ? "—" : (off ? `<span class="ok">off</span>` : `<span class="bad">on</span>`);
   const top = pctShown(a.topHoldersPercentage);
   return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
@@ -3818,6 +3819,7 @@ function parseAmt(v) {
 const RC_URL = "https://api.rugcheck.xyz/v1/tokens/";
 const RC_STORE = "trench-rugcheck";
 const RC_TTL = 30 * 60 * 1000;
+const RC_RETRY_MS = 60000;
 const RC_MAX_INFLIGHT = 3;
 const RC_GAP_MS = 340; // <= 3 req/s (RugCheck free tier)
 const rc = {
@@ -3832,7 +3834,10 @@ const rc = {
 };
 function rcGet(mint) {
   const v = rc.cache.get(mint);
-  return v && Date.now() - v.at < RC_TTL ? v : null;
+  if (!v || Date.now() - v.at >= (v.missing ? RC_RETRY_MS : RC_TTL)) return null;
+  // Do not trust a malformed success cached by an older version either.
+  if (!v.missing && (!Number.isFinite(v.score) || !Array.isArray(v.risks))) return null;
+  return v;
 }
 function rcSave() {
   clearTimeout(rc.saveTimer);
@@ -3891,8 +3896,10 @@ function rcPump() {
 }
 async function rcFetch(mint) {
   let retry = false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
   try {
-    const res = await fetch(RC_URL + mint + "/report/summary", { cache: "no-store" });
+    const res = await fetch(RC_URL + mint + "/report/summary", { cache: "no-store", signal: controller.signal });
     if (res.status === 429) {
       retry = true;
       const ra = Number(res.headers.get("retry-after"));
@@ -3900,25 +3907,27 @@ async function rcFetch(mint) {
       if (!rc.queue.includes(mint)) rc.queue.unshift(mint);
       return;
     }
-    if (!res.ok) { rc.cache.set(mint, { at: Date.now(), missing: true }); return; }
-    const d = await res.json();
-    const risks = (d.risks || []).map((r) => ({ name: r.name, level: r.level }));
-    const level = risks.some((r) => r.level === "danger") ? "danger" : risks.some((r) => r.level === "warn") ? "warn" : "good";
-    rc.cache.set(mint, {
-      at: Date.now(),
-      lp: typeof d.lpLockedPct === "number" ? d.lpLockedPct : null,
-      score: typeof d.score_normalised === "number" ? d.score_normalised : null,
-      level,
-      risks: risks.slice(0, 6)
-    });
+    if (!res.ok) throw new Error("RugCheck unavailable");
+    rc.cache.set(mint, { at: Date.now(), ...rcSummary(await res.json()) });
   } catch (_) {
-    rc.cache.set(mint, { at: Date.now() - RC_TTL + 60000, missing: true }); // retry after a minute
+    rc.cache.set(mint, { at: Date.now(), missing: true });
   } finally {
+    clearTimeout(timeout);
     if (!retry) rc.queued.delete(mint);
     rc.busy?.delete(mint);
     rcSave();
     rcRepaint();
   }
+}
+function rcSummary(d) {
+  if (!d || !Number.isFinite(d.score_normalised) || d.score_normalised < 0 || d.score_normalised > 100
+      || !Array.isArray(d.risks) || d.risks.some((r) => !r || typeof r.level !== "string")) {
+    throw new Error("Incomplete RugCheck summary");
+  }
+  const risks = d.risks.map((r) => ({ name: typeof r.name === "string" ? r.name : "", level: r.level }));
+  const level = risks.some((r) => r.level === "danger") ? "danger" : risks.some((r) => r.level === "warn") ? "warn" : "good";
+  return { lp: Number.isFinite(d.lpLockedPct) ? d.lpLockedPct : null,
+    score: d.score_normalised, level, risks: risks.slice(0, 6) };
 }
 
 function alphaFields(t, iv) {
@@ -5986,6 +5995,8 @@ function paintHeadStats() {
   const t = state.active;
   const st = document.querySelectorAll(".stats .v");
   if (!t || st.length < 3) return;
+  // Live ticks retry expired failures through the same cached, rate-limited queue.
+  rcWant([t.id]);
   const px = livePrice(t);
   st[0].textContent = px == null ? "—" : priceLabel(px);
   st[1].textContent = t.liquidity == null ? "—" : usd(t.liquidity);
