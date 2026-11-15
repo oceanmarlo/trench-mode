@@ -193,13 +193,17 @@ const moveLabel = (pct) => {
   const n = Number(pct);
   if (pct == null || !Number.isFinite(n)) return "—";
   const mult = Math.abs(1 + n / 100);
+  // A full wipe (-100%) is 0.00x, not a bare "0x".
+  if (mult === 0) return (n >= 0 ? "▲ " : "▼ ") + "0.00x (24h)";
   let digits = mult >= 10 ? 0 : mult >= 0.1 ? 2 : mult >= 0.01 ? 3 : 4;
-  let text = mult === 0 ? "0" : mult.toFixed(digits);
-  // A tiny drop must not read as a down arrow on a flat 1.00x.
-  if (n !== 0 && /^1(?:\.0+)?$/.test(text)) {
-    for (const d of [3, 4, 5, 6]) {
-      text = mult.toFixed(d);
-      if (!/^1(?:\.0+)?$/.test(text)) break;
+  let text = mult.toFixed(digits);
+  // Keep enough digits that a real move is not 1.00x or 0.0000x.
+  if (n !== 0) {
+    while (digits < 8) {
+      const asNum = Number(text);
+      if (asNum !== 0 && Math.abs(asNum - 1) > 1e-12) break;
+      digits += 1;
+      text = mult.toFixed(digits);
     }
   }
   return (n >= 0 ? "▲ " : "▼ ") + text + "x (24h)";
