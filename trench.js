@@ -3171,7 +3171,7 @@ window.addEventListener("resize", () => {
   if (chartUi.chart) applyPaneHeights();
   parkLogo();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.chartFull) { state.chartFull = false; render(); } });
+
 
 
 function shortAddr(a) {
@@ -4695,7 +4695,28 @@ function bindSheetSwipe(root) {
   head.addEventListener("pointerup", end);
   head.addEventListener("pointercancel", end);
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.infoOpen) closeSheet(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // Match search / Token Info / wallet: dismiss the topmost overlay first.
+  if (state.infoOpen) { closeSheet(); return; }
+  if (state.searchOpen) {
+    state.searchOpen = false;
+    state.searchQ = "";
+    state.results = [];
+    state.searching = false;
+    render();
+    return;
+  }
+  if (state.alpha?.open) { state.alpha.open = false; render(); return; }
+  if (state.marketOpen) {
+    state.marketOpen = false;
+    document.querySelector(".market-menu")?.remove();
+    const btn = $("#market");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  if (state.chartFull) { state.chartFull = false; render(); }
+});
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#est-more")) return;
   e.preventDefault();
