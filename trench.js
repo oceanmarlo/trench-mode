@@ -295,7 +295,7 @@ function holdingValue(mint, amount) {
   return price == null ? null : amount * price;
 }
 function portfolioValue() {
-  if (!state.wallet || ((state.holdingsLoading || state.holdingsError) && !state.holdings.length)) return null;
+  if (!state.wallet || state.holdingsError || (state.holdingsLoading && !state.holdings.length)) return null;
   let total = holdingValue(SOL, state.sol);
   if (total == null) return null;
   for (const h of state.holdings) {
@@ -719,17 +719,20 @@ async function balancesFromJupiter(owner) {
 
 async function balancesFromRpc(owner) {
   const sol = await rpc("getBalance", [owner]);
+  if (typeof sol?.value !== "number" || !Number.isFinite(sol.value) || sol.value < 0) throw new Error("Invalid SOL balance response");
+  // Both programs must succeed; a failed request is not evidence of zero tokens.
   const lists = await Promise.all(TOKEN_PROGRAMS.map((programId) =>
-    rpc("getTokenAccountsByOwner", [owner, { programId }, { encoding: "jsonParsed" }]).catch(() => ({ value: [] }))));
+    rpc("getTokenAccountsByOwner", [owner, { programId }, { encoding: "jsonParsed" }])));
+  if (lists.some((r) => !Array.isArray(r?.value))) throw new Error("Incomplete token balances response");
   const byMint = new Map();
-  lists.flatMap((r) => r?.value || []).forEach((row) => {
+  lists.flatMap((r) => r.value).forEach((row) => {
     const info = row.account.data.parsed.info;
     const prev = byMint.get(info.mint);
     const amount = Number(info.tokenAmount.amount) + (prev ? prev.amount : 0);
     const dec = info.tokenAmount.decimals;
     byMint.set(info.mint, { mint: info.mint, amount, decimals: dec, ui: ui(amount, dec) });
   });
-  return { sol: (sol?.value || 0) / 1e9, rows: [...byMint.values()] };
+  return { sol: sol.value / 1e9, rows: [...byMint.values()] };
 }
 
 async function loadHoldingMetadata(mints, owner) {
@@ -3583,6 +3586,7 @@ function holdingsPanel() {
   if (state.holdingsLoading && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Loading holdings…</div>`;
   if (state.holdingsError && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Couldn't load holdings: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>`;
   if (!state.holdings.length) return head + `<div class="k" style="padding:16px 0">No token balances in this wallet yet. Tokens you buy will appear here.</div>`;
+  const warning = state.holdingsError ? `<div class="k" role="status" style="padding:8px 0">Last known balances · Refresh failed: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>` : "";
   const rows = [...state.holdings].sort((a, b) => (holdingValue(b.mint, b.ui) ?? -1) - (holdingValue(a.mint, a.ui) ?? -1)).map((h) => {
     const price = holdingPrice(h.mint);
     const entry = entryOf(h.mint);
@@ -3597,7 +3601,7 @@ function holdingsPanel() {
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
     </div>`;
   }).join("");
-  return head + rows;
+  return head + warning + rows;
 }
 
 // ---------------- Alpha: Jupiter AlphaScan (New / Graduating / Graduated) ----------------
