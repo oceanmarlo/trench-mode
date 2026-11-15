@@ -2703,8 +2703,8 @@ function pushSeries(series, points, full) {
 }
 function indLayout() { return state.inds.join(","); }
 function paneIds() { return PANE_INDS.filter((id) => state.inds.includes(id)); }
-// A saved 260px chart cannot hold RSI and MACD. Grow for panes, but never past
-// chartFitMax — otherwise Amount/Connect/Est. Received fall below the phone fold.
+// Auto-grow for panes only up to chartFitMax so the default trade dock fits.
+// An explicit larger resize is still allowed within clampChartH's viewport cap.
 function paneNeedH() {
   const n = paneIds().length;
   return n ? 230 + n * 76 : 0;
@@ -2713,11 +2713,9 @@ function chartHeight() {
   const fit = chartFitMax();
   const need = paneNeedH();
   const pref = Number(state.chartH) || 260;
-  // Prefer the user size; grow for panes only while the trade dock still fits.
-  let h = pref;
-  if (need > h) h = Math.min(need, fit);
-  if (need > fit) h = fit;
-  h = clampChartH(h);
+  // The auto-fit is a growth floor, not a replacement for the chosen size.
+  // Resetting to fit here made pointerup and the next live tick undo every drag.
+  const h = clampChartH(Math.max(pref, Math.min(need, fit)));
   state.chartH = h;
   return h;
 }
