@@ -16,6 +16,35 @@ function iconUrl(url) {
   }
   return cid ? "https://gateway.pinata.cloud/ipfs/" + cid : raw;
 }
+const tokenIconFailures = new Map();
+function tokenIcon(url, attrs = "") {
+  let src = iconUrl(url);
+  if (!src) return "●";
+  try {
+    const u = new URL(src);
+    if (!/^https?:$/.test(u.protocol) && !/^data:image\//i.test(src)) return "●";
+    // Some token metadata points at a profile/search page, not an image.
+    // Keep genuine image CDNs (pbs.twimg.com, gstatic, etc.) working.
+    if (/(^|\.)(x|twitter)\.com$/i.test(u.hostname)
+      || (/(^|\.)google\.com$/i.test(u.hostname) && u.pathname === "/search")) return "●";
+    src = u.href;
+  } catch (_) { return "●"; }
+  if ((tokenIconFailures.get(src) || 0) > Date.now()) return "●";
+  tokenIconFailures.delete(src);
+  return `<img data-token-icon src="${esc(src)}" alt="" ${attrs}>`;
+}
+function tokenIconFailed(img) {
+  if (!img?.matches?.("img[data-token-icon]")) return;
+  const src = img.currentSrc || img.src;
+  // A failed URL must not be requested again on every price/list repaint.
+  // Retry after five minutes (or a reload), not hundreds of times per minute.
+  tokenIconFailures.set(src, Date.now() + 5 * 60 * 1000);
+  if (tokenIconFailures.size > 512) tokenIconFailures.delete(tokenIconFailures.keys().next().value);
+  for (const node of document.querySelectorAll("img[data-token-icon]")) {
+    if ((node.currentSrc || node.src) === src) node.replaceWith(document.createTextNode("●"));
+  }
+}
+document.addEventListener("error", (e) => tokenIconFailed(e.target), true);
 // Swap API V2 (/order + /execute). Same request/response shape as Ultra v1, which Jupiter no longer maintains.
 const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
@@ -3438,7 +3467,7 @@ function tokenHead(t, price, chg) {
   const short = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : "";
   const starred = isStarred(mint);
   return `<div class="token-head">
-      <div class="tok-av">${t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="" width="42" height="42">` : "●"}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
+      <div class="tok-av">${tokenIcon(t.icon, 'width="42" height="42"')}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
       <div class="tok-name">
         <div class="sym">${esc(t.symbol)} <span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
         <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
@@ -3494,7 +3523,7 @@ function holdingsPanel() {
       ? `<b>—</b><span>—</span>`
       : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${h.icon ? `<img src="${esc(iconUrl(h.icon))}" alt="">` : "●"}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
+      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
@@ -3932,7 +3961,7 @@ function alphaRowsHtml() {
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${alphaLiqState(t)}">
-      <span class="al-tok"><span class="tok-av">${t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="" loading="lazy">` : "●"}</span>
+      <span class="al-tok"><span class="tok-av">${tokenIcon(t.icon, 'loading="lazy"')}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
@@ -4274,7 +4303,7 @@ function quoteSummary() {
   let inUsd = inQuote > 0 ? inQuote : 0;
   if (!(inUsd > 0)) inUsd = state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx;
   const pct = outUsd > 0 && inUsd > 0 ? ((outUsd - inUsd) / inUsd) * 100 : null;
-  const icon = state.side === "buy" ? (t.icon ? `<img src="${esc(iconUrl(t.icon))}" alt="">` : "●") : `<img src="${SOL_ICON}" alt="">`;
+  const icon = state.side === "buy" ? tokenIcon(t.icon) : `<img src="${SOL_ICON}" alt="">`;
   const more = quoteBits(state.quote).line
     ? `<button type="button" id="est-more" aria-label="Route details" aria-expanded="${state.quoteOpen}"><span class="chev">${state.quoteOpen ? "⌄" : "›"}</span></button>`
     : "";
@@ -4286,11 +4315,11 @@ function tradePanel() {
   const t = state.active;
   if (!t) return "";
   const bal = tradeBal();
-  const balIcon = iconUrl(state.side === "buy" ? SOL_ICON : t.icon);
+  const balIcon = tokenIcon(state.side === "buy" ? SOL_ICON : t.icon);
   const label = goLabel();
   const engine = state.orderType === "market" ? "Jupiter Swap" : "Jupiter Trigger";
   return `<div class="trade-top">
-      <span class="bal"><span class="mini">${balIcon ? `<img src="${balIcon}" alt="">` : "●"}</span> <span id="trade-bal">${bal}</span></span>
+      <span class="bal"><span class="mini">${balIcon}</span> <span id="trade-bal">${bal}</span></span>
       <span class="trade-right"><span class="market-wrap"><button class="market" type="button" id="market" aria-expanded="${state.marketOpen}">${orderTypeLabel()} <span>▾</span></button>${orderMenu()}</span>
       <div class="seg">
         <button class="buy ${state.side==="buy"?"on":""}" data-side="buy">Buy</button>
