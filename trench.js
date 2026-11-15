@@ -3734,7 +3734,8 @@ function alphaAuthOff(t) {
 }
 function alphaOnCurvePad(t) {
   if (!t || alphaGraduated(t)) return false;
-  if (!Number.isFinite(Number(t.bondingCurve))) return false;
+  // Unknown progress is not proof of a live curve: Number(null/false/"") is 0.
+  if (!Number.isFinite(t.bondingCurve) || t.bondingCurve < 0 || t.bondingCurve > 100) return false;
   const pad = String(t.launchpad || t.metaLaunchpad || "").toLowerCase();
   return CURVE_PADS.has(pad);
 }
@@ -3745,7 +3746,7 @@ function alphaLiqState(t) {
   if (!alphaAuthOff(t)) return "auth";
   const r = rcGet(t.id);
   if (!r) return "checking";
-  if (r.missing || typeof r.lp !== "number" || r.lp < LP_LOCK_MIN) return "unlocked";
+  if (r.missing || !Number.isFinite(r.lp) || r.lp < LP_LOCK_MIN) return "unlocked";
   return "locked";
 }
 function alphaLiqOk(s) { return s === "curve" || s === "locked"; }
