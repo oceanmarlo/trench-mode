@@ -510,8 +510,17 @@ function paintResults() {
   box.innerHTML = searchResultHtml();
   box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
 }
-function pick(mint) {
+function closeSearch() {
+  // Dismissing the sheet must cancel both the debounce and in-flight responses.
+  clearTimeout(searchTimer);
+  ++searchSeq;
   state.searchOpen = false;
+  state.searchQ = "";
+  state.results = [];
+  state.searching = false;
+}
+function pick(mint) {
+  closeSearch();
   state.view = "spot";
   render();
   loadToken(mint).catch((err) => { state.status = err.message; render(); });
@@ -529,9 +538,10 @@ function search(q) {
   state.results = [];
   state.searching = true;
   paintResults();
+  const query = state.searchQ;
   searchTimer = setTimeout(async () => {
     try {
-      const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(state.searchQ));
+      const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(query));
       if (seq !== searchSeq) return;
       state.results = Array.isArray(list) ? list : [];
       state.searching = false;
@@ -4788,10 +4798,7 @@ document.addEventListener("keydown", (e) => {
   // Match search / Token Info / wallet: dismiss the topmost overlay first.
   if (state.infoOpen) { closeSheet(); return; }
   if (state.searchOpen) {
-    state.searchOpen = false;
-    state.searchQ = "";
-    state.results = [];
-    state.searching = false;
+    closeSearch();
     render();
     return;
   }
@@ -4989,9 +4996,9 @@ function bind() {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
   const info = $("#info");
-  if (info) info.onclick = (e) => { e.stopPropagation(); state.searchOpen = false; document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
+  if (info) info.onclick = (e) => { e.stopPropagation(); closeSearch(); document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
   const rcBadge = $("#rc-badge");
-  if (rcBadge) rcBadge.onclick = (e) => { e.stopPropagation(); state.searchOpen = false; document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
+  if (rcBadge) rcBadge.onclick = (e) => { e.stopPropagation(); closeSearch(); document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
   document.querySelectorAll("[data-sell]").forEach((b) => b.onclick = async (e) => {
     e.stopPropagation();
     const mint = b.dataset.sell;
@@ -5027,13 +5034,12 @@ function bind() {
   if (q) {
     q.oninput = () => search(q.value.trim());
     q.onkeydown = (e) => {
-      if (e.key === "Escape") { state.searchOpen = false; state.searchQ = ""; state.results = []; state.searching = false; render(); }
       if (e.key === "Enter" && q.value.trim()) pick((state.results[0] && state.results[0].id) || q.value.trim());
     };
     setTimeout(() => q.focus(), 0);
   }
   const sc = $("#search-close");
-  if (sc) sc.onclick = () => { state.searchOpen = false; state.searchQ = ""; state.results = []; state.searching = false; render(); };
+  if (sc) sc.onclick = () => { closeSearch(); render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   bindChartResize();
   $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
