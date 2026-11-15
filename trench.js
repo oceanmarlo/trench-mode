@@ -963,6 +963,11 @@ function idleQuoteStatus() {
   if (invalid) return invalid;
   if (state.side === "buy" && state.active.id === SOL) return "SOL is the pay token";
   if (state.side === "sell" && !orderParams()) return "No balance";
+  // Stop / trail params must be valid before a protect order looks "Live".
+  if (state.orderType === "msl" || state.orderType === "trail") {
+    const p = orderPreview();
+    if (!p.ok) return p.reason || p.line || "Enter a valid stop";
+  }
   return null;
 }
 
@@ -1261,13 +1266,22 @@ function trailNote() {
 function paintOrderPreview() {
   const p = orderPreview();
   const el = document.getElementById("sl-live") || document.getElementById("trail-live");
-  if (!el) return;
-  el.textContent = p.line;
-  el.classList.toggle("down", !p.ok);
+  if (el) {
+    el.textContent = p.line;
+    el.classList.toggle("down", !p.ok);
+  }
   syncPresetButtons("slpct", state.slPct, state.slMode !== "price");
   syncPresetButtons("trail", state.trailPct);
   const note = document.getElementById("trail-note");
   if (note) note.textContent = trailNote();
+  // Keep status / go in sync with stop-trail validity without waiting on a re-quote.
+  const idle = idleQuoteStatus();
+  if (idle) state.status = idle;
+  else if (currentQuote() && !state.quoting) state.status = state.quote?.errorMessage || "Live · Jupiter";
+  const stat = document.getElementById("status");
+  if (stat) stat.textContent = state.status;
+  const go = document.getElementById("go");
+  if (go && state.wallet) go.disabled = !!state.busy || !orderParams() || !p.ok;
 }
 function asSig58(sig) {
   if (!sig) throw new Error("Wallet did not sign.");
@@ -1457,7 +1471,8 @@ async function refreshQuote() {
     order._at = Date.now();
     order._params = key;
     state.quote = order;
-    state.status = order.errorMessage ? order.errorMessage : "Live · Jupiter";
+    const idle = idleQuoteStatus();
+    state.status = order.errorMessage ? order.errorMessage : (idle || "Live · Jupiter");
     return order;
   } catch (err) {
     if (seq === quoteSeq) { state.quote = null; state.status = err.message; }
@@ -1957,7 +1972,21 @@ function finitePts(times, vals, colorOf) {
   return out;
 }
 
-function clampChartH(h) { return Math.round(Math.min(Math.max(h, 140), Math.max(220, window.innerHeight * 0.85))); }
+// Leave room on a phone for the token header chrome + trade dock under the chart.
+// Without this, RSI/MACD/Stoch/Chop auto-grew the chart past the fold and hid Amount/Connect.
+function chartFitMax() {
+  const vh = window.innerHeight || 844;
+  const sc = typeof document !== "undefined" ? document.querySelector(".scroll") : null;
+  const scH = sc && sc.clientHeight > 120 ? sc.clientHeight : Math.max(280, vh - 140);
+  // Stats/tf above the chart ~190–230px; trade dock + padding ~200px.
+  const chrome = 430;
+  const fit = Math.floor(scH - chrome);
+  return Math.max(180, Math.min(Math.floor(vh * 0.48), fit > 120 ? fit : Math.floor(vh * 0.36)));
+}
+function clampChartH(h) {
+  const cap = Math.max(chartFitMax(), Math.min(window.innerHeight * 0.85, chartFitMax() + 80));
+  return Math.round(Math.min(Math.max(h, 140), Math.max(220, cap)));
+}
 function chartScale() {
   const t = state.active;
   return state.chartMode === "mc" && t?.circSupply ? t.circSupply : 1;
@@ -2659,15 +2688,21 @@ function pushSeries(series, points, full) {
 }
 function indLayout() { return state.inds.join(","); }
 function paneIds() { return PANE_INDS.filter((id) => state.inds.includes(id)); }
-// A saved 260px chart cannot hold RSI and MACD. The resize listener used to
-// snap back to that saved height and crush the candle pane, so the price pill
-// sat on the top edge and the RSI label sat on the volume bars.
+// A saved 260px chart cannot hold RSI and MACD. Grow for panes, but never past
+// chartFitMax — otherwise Amount/Connect/Est. Received fall below the phone fold.
 function paneNeedH() {
   const n = paneIds().length;
   return n ? 230 + n * 76 : 0;
 }
 function chartHeight() {
-  const h = clampChartH(Math.max(state.chartH || 260, paneNeedH()));
+  const fit = chartFitMax();
+  const need = paneNeedH();
+  const pref = Number(state.chartH) || 260;
+  // Prefer the user size; grow for panes only while the trade dock still fits.
+  let h = pref;
+  if (need > h) h = Math.min(need, fit);
+  if (need > fit) h = fit;
+  h = clampChartH(h);
   state.chartH = h;
   return h;
 }
@@ -2678,6 +2713,7 @@ function ensurePaneRoom() {
   const wrap = $("#chart-wrap");
   if (wrap) wrap.style.height = h + "px";
   if (h !== before && chartUi.chart) applyPaneHeights();
+  else if (chartUi.chart) applyPaneHeights();
 }
 function schedulePaneTags() {
   if (chartUi.tagFrame) cancelAnimationFrame(chartUi.tagFrame);
@@ -2688,8 +2724,17 @@ function schedulePaneTags() {
 function applyPaneHeights() {
   if (!chartUi.chart) return;
   const panes = chartUi.chart.panes();
+  const n = Math.max(0, panes.length - 1);
+  if (!n) { schedulePaneTags(); return; }
+  const total = state.chartFull
+    ? (document.querySelector("#chart-wrap")?.clientHeight || window.innerHeight)
+    : (state.chartH || chartHeight());
+  // Keep a usable candle pane; shrink indicator panes together when the phone is tight.
+  const candleMin = state.chartFull ? 160 : 120;
+  const room = Math.max(n * 36, total - candleMin);
+  const each = Math.max(36, Math.min(68, Math.floor(room / n)));
   for (let i = 1; i < panes.length; i++) {
-    try { panes[i].setHeight(68); } catch (_) {}
+    try { panes[i].setHeight(each); } catch (_) {}
   }
   schedulePaneTags();
 }
@@ -4241,7 +4286,7 @@ function tradePanel() {
     <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n < 1 ? n.toFixed(1) : String(n)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n}%</button>`).join("")}</div>
     <div class="amt-row">
       <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" aria-invalid="${!!amountInputError()}" value="${esc(state.side === "buy" ? state.amount : state.sellPct)}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
-      <button class="go ${state.side}" id="go" ${state.busy || (state.wallet && !orderParams()) ? "disabled" : ""}>${state.busy ? "…" : label}</button>
+      <button class="go ${state.side}" id="go" ${state.busy || (state.wallet && (!orderParams() || !orderPreview().ok)) ? "disabled" : ""}>${state.busy ? "…" : label}</button>
     </div>
     ${orderFields()}
     <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
@@ -4837,7 +4882,8 @@ function bind() {
   const trailIn = $("#trail-in");
   if (trailIn) trailIn.oninput = () => {
     const v = trailIn.value.replace(",", ".");
-    state.trailPct = v === "" ? "" : Number(v);
+    // Keep the typed text so incomplete values stay invalid, not the last good %.
+    state.trailPct = v;
     saveOrderPrefs();
     paintOrderPreview();
   };
