@@ -702,19 +702,33 @@ async function rpc(method, params) {
 
 const HOLDINGS = "https://api.jup.ag/ultra/v1/holdings/";
 
+function tokenBalanceRow(mint, rawAmount, decimals) {
+  // Missing/malformed data is not a zero balance; reject the whole snapshot.
+  const validAmount = typeof rawAmount === "string" ? /^\d+$/.test(rawAmount) : typeof rawAmount === "number";
+  const amount = Number(rawAmount);
+  if (typeof mint !== "string" || !mint || !validAmount || !Number.isInteger(amount) || amount < 0 ||
+      !Number.isInteger(decimals) || decimals < 0 || decimals > 255) throw new Error("Invalid token balance response");
+  return { mint, amount, decimals, ui: ui(amount, decimals) };
+}
+
 async function balancesFromJupiter(owner) {
   // Ultra holdings has its own rate bucket, so it doesn't eat the price/search budget.
   const res = await rawFetch(HOLDINGS + owner, {});
   if (!res.ok) throw new Error("holdings " + res.status);
   const d = await res.json();
-  const rows = Object.entries(d.tokens || {}).map(([mint, accts]) => {
+  if (typeof d?.uiAmount !== "number" || !Number.isFinite(d.uiAmount) || d.uiAmount < 0) throw new Error("Invalid SOL balance response");
+  if (!d.tokens || typeof d.tokens !== "object" || Array.isArray(d.tokens)) throw new Error("Incomplete token balances response");
+  const rows = Object.entries(d.tokens).map(([mint, accts]) => {
+    if (!Array.isArray(accts)) throw new Error("Invalid token balance response");
+    const parsed = accts.map((a) => ({ ...tokenBalanceRow(mint, a?.amount, a?.decimals), ata: a.isAssociatedTokenAccount }));
+    const dec = parsed[0]?.decimals ?? 0;
+    if (parsed.some((a) => a.decimals !== dec)) throw new Error("Inconsistent token balance decimals");
     // Swaps spend the associated token account, so count that one when it exists.
-    const ata = (accts || []).filter((a) => a.isAssociatedTokenAccount);
-    const amount = (ata.length ? ata : accts || []).reduce((n, a) => n + Number(a.amount || 0), 0);
-    const dec = accts?.[0]?.decimals ?? 0;
-    return { mint, amount, decimals: dec, ui: ui(amount, dec) };
+    const ata = parsed.filter((a) => a.ata);
+    const amount = (ata.length ? ata : parsed).reduce((n, a) => n + a.amount, 0);
+    return tokenBalanceRow(mint, amount, dec);
   });
-  return { sol: Number(d.uiAmount || 0), rows };
+  return { sol: d.uiAmount, rows };
 }
 
 async function balancesFromRpc(owner) {
@@ -726,11 +740,11 @@ async function balancesFromRpc(owner) {
   if (lists.some((r) => !Array.isArray(r?.value))) throw new Error("Incomplete token balances response");
   const byMint = new Map();
   lists.flatMap((r) => r.value).forEach((row) => {
-    const info = row.account.data.parsed.info;
-    const prev = byMint.get(info.mint);
-    const amount = Number(info.tokenAmount.amount) + (prev ? prev.amount : 0);
-    const dec = info.tokenAmount.decimals;
-    byMint.set(info.mint, { mint: info.mint, amount, decimals: dec, ui: ui(amount, dec) });
+    const info = row?.account?.data?.parsed?.info;
+    const next = tokenBalanceRow(info?.mint, info?.tokenAmount?.amount, info?.tokenAmount?.decimals);
+    const prev = byMint.get(next.mint);
+    if (prev && prev.decimals !== next.decimals) throw new Error("Inconsistent token balance decimals");
+    byMint.set(next.mint, tokenBalanceRow(next.mint, next.amount + (prev ? prev.amount : 0), next.decimals));
   });
   return { sol: sol.value / 1e9, rows: [...byMint.values()] };
 }
