@@ -746,24 +746,43 @@ async function loadHoldingMetadata(mints, owner) {
     } catch (_) {} // A missing label must not hide the balance or stop later batches.
   }
 }
+let holdingsRequest = null;
 async function loadHoldings() {
   if (!state.wallet) return;
   const owner = state.wallet;
+  // Only the latest snapshot may land; pushes received while it is in flight win.
+  const request = { owner, balances: new Map(), sol: null };
+  holdingsRequest = request;
   state.holdingsLoading = true;
   state.holdingsError = "";
   if (state.view === "portfolio" || state.tab === "holdings") render();
   let bal;
   try {
     try { bal = await withTimeout(balancesFromJupiter(owner), 10000); }
-    catch (_) { bal = await withTimeout(balancesFromRpc(owner), 12000); }
+    catch (_) {
+      if (state.wallet !== owner || holdingsRequest !== request) return;
+      bal = await withTimeout(balancesFromRpc(owner), 12000);
+    }
   } catch (err) {
-    if (state.wallet === owner) { state.holdingsError = err.message || String(err); state.holdingsLoading = false; render(); }
+    if (state.wallet === owner && holdingsRequest === request) {
+      holdingsRequest = null;
+      state.holdingsError = err.message || String(err);
+      state.holdingsLoading = false;
+      render();
+    }
     return;
   }
-  if (state.wallet !== owner) return;
+  if (state.wallet !== owner || holdingsRequest !== request) return;
+  holdingsRequest = null;
   state.holdingsLoading = false;
-  state.sol = bal.sol;
-  const rows = bal.rows.filter((h) => h.ui > 0 && h.mint !== SOL);
+  state.holdingsError = "";
+  state.sol = request.sol ?? bal.sol;
+  const snapshot = new Map(bal.rows.map((h) => [h.mint, h]));
+  for (const [mint, row] of request.balances) {
+    if (row) snapshot.set(mint, row);
+    else snapshot.delete(mint); // Do not resurrect a balance sold during the request.
+  }
+  const rows = [...snapshot.values()].filter((h) => h.ui > 0 && h.mint !== SOL);
   const old = new Map(state.holdings.map((h) => [h.mint, h]));
   state.holdings = rows.map((h) => {
     const o = old.get(h.mint);
@@ -954,6 +973,7 @@ async function useWallet(w, silent) {
     if (state.walletOff) state.walletOff();
     state.walletOff = w.onChange((a) => {
       if (state.provider?.id !== w.id || a === state.wallet) return;
+      holdingsRequest = null;
       state.wallet = a;
       state.holdings = [];
       state.sol = 0;
@@ -975,6 +995,7 @@ async function useWallet(w, silent) {
 async function disconnectWallet() {
   const w = state.provider;
   if (state.walletOff) { try { state.walletOff(); } catch (_) {} state.walletOff = null; }
+  holdingsRequest = null;
   state.provider = null; state.wallet = null; state.holdings = []; state.sol = 0;
   localStorage.removeItem(WALLET_PREF);
   closeWalletPicker();
@@ -5566,12 +5587,23 @@ function onStreamPnl(data) {
     const bal = row?.balance;
     if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint, w), String(row.pnl.averageCost));
     if (!bal) continue;
-    if (mint === NATIVE_SOL) { state.sol = Number(bal.balance) || 0; changed = true; continue; }
+    const pending = holdingsRequest?.owner === w ? holdingsRequest : null;
+    if (mint === NATIVE_SOL) {
+      state.sol = Number(bal.balance) || 0;
+      if (pending) pending.sol = state.sol;
+      changed = true;
+      continue;
+    }
     if (mint === SOL) continue;
     const ui = Number(bal.balance) || 0;
     const i = state.holdings.findIndex((h) => h.mint === mint);
-    if (ui <= 0) { if (i >= 0) { state.holdings.splice(i, 1); changed = true; } continue; }
+    if (ui <= 0) {
+      if (pending) pending.balances.set(mint, null);
+      if (i >= 0) { state.holdings.splice(i, 1); changed = true; }
+      continue;
+    }
     const next = { mint, amount: Number(bal.amount) || 0, decimals: bal.decimals ?? 0, ui };
+    if (pending) pending.balances.set(mint, next);
     if (i >= 0) Object.assign(state.holdings[i], next);
     else { state.holdings.push(next); missing.push(mint); }
     changed = true;
