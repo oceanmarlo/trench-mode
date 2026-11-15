@@ -241,9 +241,9 @@ const SUB = "₀₁₂₃₄₅₆₇₈₉";
 function livePrice(t) {
   if (!t) return null;
   const live = Number(state.prices[t.id]);
-  if (live > 0) return live;
+  if (Number.isFinite(live) && live > 0) return live;
   const p = Number(t.usdPrice);
-  return p > 0 ? p : null;
+  return Number.isFinite(p) && p > 0 ? p : null;
 }
 function mcapText(t) {
   if (!t) return "—";
@@ -275,7 +275,7 @@ function entryOf(mint) {
 }
 function holdBar(p) {
   if (!(p.amount > 0)) return { hold: "Holding —", pnl: "—", clsName: "" };
-  if (!(p.entry > 0)) return { hold: "Holding " + usd(p.value), pnl: "—", clsName: "" };
+  if (p.value == null || !(p.entry > 0)) return { hold: "Holding " + usd(p.value), pnl: "—", clsName: "" };
   return { hold: "Holding " + usd(p.value), pnl: pnlText(p.d, p.p), clsName: cls(p.p) };
 }
 function feeHtml(n) {
@@ -283,17 +283,37 @@ function feeHtml(n) {
   return `<img class="fee-ico" alt="" width="12" height="12" src="${SOL_ICON}"><span>${esc(solAmt(n))}</span>`;
 }
 
+function holdingPrice(mint) {
+  return livePrice(state.active?.id === mint ? state.active : { id: mint });
+}
+function holdingValue(mint, amount) {
+  if (!(amount > 0)) return 0;
+  const price = holdingPrice(mint);
+  return price == null ? null : amount * price;
+}
+function portfolioValue() {
+  if (!state.wallet || ((state.holdingsLoading || state.holdingsError) && !state.holdings.length)) return null;
+  let total = holdingValue(SOL, state.sol);
+  if (total == null) return null;
+  for (const h of state.holdings) {
+    const value = holdingValue(h.mint, h.ui);
+    // An unpriced balance is not worthless. Do not present a subtotal as net worth.
+    if (value == null) return null;
+    total += value;
+  }
+  return total;
+}
 function activePnl() {
   const t = state.active;
   if (!t) return { value: 0, d: 0, p: 0, amount: 0 };
   const held = state.holdings.find((h) => h.mint === t.id);
   const amount = held ? held.ui : 0;
-  const price = state.prices[t.id] || t.usdPrice || 0;
-  const entry = entryOf(t.id, price);
-  const value = amount * price;
+  const price = holdingPrice(t.id);
+  const entry = entryOf(t.id);
+  const value = holdingValue(t.id, amount);
   const cost = amount * entry;
-  const d = value - cost;
-  const p = amount && cost ? (d / cost) * 100 : 0;
+  const d = value != null && cost > 0 ? value - cost : null;
+  const p = d != null ? (d / cost) * 100 : null;
   return { value, d, p, amount, price, entry };
 }
 
@@ -1779,10 +1799,16 @@ function holdPnlHtml(d, pct) {
 function paintLive() {
   const t = state.active;
   const pf = $("#pf-total");
-  if (pf && state.wallet) pf.textContent = usd(state.sol * (state.prices[SOL] || 0) + state.holdings.reduce((n, h) => n + h.ui * (state.prices[h.mint] || 0), 0));
+  if (pf) pf.textContent = usd(portfolioValue());
+  const solRow = $("[data-pf-sol]");
+  if (solRow) {
+    $(".meta span", solRow).textContent = usd(holdingPrice(SOL));
+    $(".hold-n", solRow).textContent = usd(holdingValue(SOL, state.sol));
+    $(".hold-q", solRow).textContent = solText(state.sol);
+  }
   const p = activePnl();
   const solPx = $("#sol-px");
-  if (solPx) solPx.textContent = usd(state.prices[SOL] || 0);
+  if (solPx) solPx.textContent = usd(holdingPrice(SOL));
   const chg = $("#chg");
   const live = $("#live");
   const barH = $("#bar-hold");
@@ -1840,9 +1866,9 @@ function paintLive() {
   document.querySelectorAll("[data-mint]").forEach((row) => {
     const h = state.holdings.find((x) => x.mint === row.dataset.mint);
     if (!h) return;
-    const price = state.prices[h.mint] || 0;
+    const price = holdingPrice(h.mint);
     const entry = entryOf(h.mint);
-    const value = h.ui * price;
+    const value = holdingValue(h.mint, h.ui);
     const hn = $(".hold-n", row);
     const pn = $(".pnl", row);
     if (hn) hn.textContent = usd(value);
@@ -3525,10 +3551,10 @@ function holdingsPanel() {
   if (state.holdingsLoading && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Loading holdings…</div>`;
   if (state.holdingsError && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Couldn't load holdings: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>`;
   if (!state.holdings.length) return head + `<div class="k" style="padding:16px 0">No token balances in this wallet yet. Tokens you buy will appear here.</div>`;
-  const rows = [...state.holdings].sort((a, b) => b.ui * (state.prices[b.mint] || 0) - a.ui * (state.prices[a.mint] || 0)).map((h) => {
-    const price = state.prices[h.mint] || 0;
+  const rows = [...state.holdings].sort((a, b) => (holdingValue(b.mint, b.ui) ?? -1) - (holdingValue(a.mint, a.ui) ?? -1)).map((h) => {
+    const price = holdingPrice(h.mint);
     const entry = entryOf(h.mint);
-    const value = h.ui * price;
+    const value = holdingValue(h.mint, h.ui);
     const pnl = !(entry > 0) || !(price > 0)
       ? `<b>—</b><span>—</span>`
       : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
@@ -4254,15 +4280,14 @@ function bindAlpha() {
 
 function portfolioView() {
   const w = state.wallet;
-  const solPx = state.prices[SOL] || 0;
-  const tokUsd = state.holdings.reduce((n, h) => n + h.ui * (state.prices[h.mint] || 0), 0);
-  const total = state.sol * solPx + tokUsd;
+  const solPx = holdingPrice(SOL);
+  const total = portfolioValue();
   const top = `<div class="token-head"><div class="tok-name"><div class="sym">Portfolio</div>
       <div class="sub">${w ? `<span>${w.slice(0, 4)}…${w.slice(-4)}</span><button type="button" class="copy" data-copy="${w}" aria-label="Copy">⧉</button>` : `<span>No wallet connected</span>`}</div></div>
       <div class="mc"><div class="px" id="pf-total">${w ? usd(total) : "—"}</div><div class="k">Net worth</div></div></div>`;
   if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Jupiter, Phantom, Solflare, Backpack…) to see your balances.")}</div>`;
   const solRow = `<div class="row" data-pf-sol><div class="who"><div class="tok-av"><img src="${SOL_ICON}" alt=""></div><div class="meta"><b>SOL</b><span>${usd(solPx)}</span></div></div>
-      <div><div class="hold-n">${usd(state.sol * solPx)}</div><div class="hold-q">${solText(state.sol)}</div></div><div></div><div></div></div>`;
+      <div><div class="hold-n">${usd(holdingValue(SOL, state.sol))}</div><div class="hold-q">${solText(state.sol)}</div></div><div></div><div></div></div>`;
   return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
 }
 
