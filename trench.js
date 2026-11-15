@@ -268,8 +268,11 @@ const raw = (ui, decimals) => Math.round(Number(ui) * 10 ** decimals).toString()
 const ui = (amount, decimals) => Number(amount) / 10 ** decimals;
 
 
-function entryKey(mint) { return "trench-entry:" + mint; }
+function entryKey(mint, owner = state.wallet) { return "trench-entry:" + (owner || "") + ":" + mint; }
 function entryOf(mint) {
+  // Legacy mint-only entries have no provable owner. Preserve them, but never
+  // use another wallet's cost basis for PnL, the chart entry line or a stop.
+  if (!state.wallet) return 0;
   const n = Number(localStorage.getItem(entryKey(mint)));
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
@@ -1138,7 +1141,7 @@ function orderRefPrice() {
   if (!t) return 0;
   const px = Number(state.prices[t.id] || t.usdPrice || 0);
   if (state.side === "buy") return px;
-  const saved = Number(localStorage.getItem(entryKey(t.id)));
+  const saved = entryOf(t.id);
   return saved > 0 ? saved : px;
 }
 function armTrailHigh(reset) {
@@ -1647,13 +1650,14 @@ async function trade() {
   state.busy = true;
   const side = state.side;
   const soldQty = sellTokens();
+  const owner = state.wallet;
   const solIn = state.amount;
   state.status = "Getting order…";
   render();
   try {
     const { done } = await sendMarket();
     const price = state.prices[t.id] || t.usdPrice;
-    if (side === "buy" && price) localStorage.setItem(entryKey(t.id), String(price));
+    if (side === "buy" && price) localStorage.setItem(entryKey(t.id, owner), String(price));
     state.txs.unshift({ side, symbol: t.symbol, sig: done.signature, sol: solIn, t: "now" });
     state.toast = (side === "buy" ? "Bought: " + solIn + " SOL of " : "Sold: " + qty(soldQty) + " ") + t.symbol;
     state.status = "Done · " + String(done.signature || "").slice(0, 8) + "…";
@@ -5560,7 +5564,7 @@ function onStreamPnl(data) {
   const missing = [];
   for (const [mint, row] of Object.entries(mine)) {
     const bal = row?.balance;
-    if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint), String(row.pnl.averageCost));
+    if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint, w), String(row.pnl.averageCost));
     if (!bal) continue;
     if (mint === NATIVE_SOL) { state.sol = Number(bal.balance) || 0; changed = true; continue; }
     if (mint === SOL) continue;
