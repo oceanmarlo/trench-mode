@@ -1958,6 +1958,18 @@ const INDS = [
   { id: "chop", name: "Chop Zone", group: "Pane" }
 ];
 const PANE_INDS = ["rsi", "macd", "stoch", "chop"];
+const PANE_H_KEY = "trench-pane-heights";
+const PANE_MIN_H = 48;
+const PANE_MAX_H = 320;
+const PRICE_MIN_H = 120;
+function loadPaneHeights() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANE_H_KEY));
+    return Object.fromEntries(PANE_INDS.filter((id) => Number.isFinite(saved?.[id]))
+      .map((id) => [id, Math.max(PANE_MIN_H, Math.min(PANE_MAX_H, saved[id]))]));
+  } catch (_) { return {}; }
+}
+state.paneHeights = loadPaneHeights();
 function loadList(key, fallback) {
   try {
     const v = JSON.parse(localStorage.getItem(key));
@@ -2108,7 +2120,8 @@ function chartFitMax() {
 }
 function clampChartH(h) {
   const cap = Math.max(chartFitMax(), Math.min(window.innerHeight * 0.85, chartFitMax() + 80));
-  return Math.round(Math.min(Math.max(h, 140), Math.max(220, cap)));
+  const floor = paneIds().length ? PRICE_MIN_H + paneIds().length * PANE_MIN_H + 48 : 140;
+  return Math.round(Math.min(Math.max(h, floor), Math.max(220, cap, floor + 80)));
 }
 function chartScale() {
   const t = state.active;
@@ -2243,7 +2256,8 @@ function ensureChart() {
   host.className = "lwc-host";
   const chart = L.createChart(host, {
     autoSize: true,
-    layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true },
+    layout: { background: { type: "solid", color: "#07090e" }, textColor: "#8b939e", fontSize: 10, attributionLogo: true,
+      panes: { enableResize: false, separatorColor: "#313b47" } },
     grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.06)" } },
     rightPriceScale: { borderVisible: false, entireTextOnly: true, alignLabels: false, scaleMargins: { top: 0.12, bottom: 0.22 } },
     timeScale: {
@@ -2291,8 +2305,11 @@ function ensureChart() {
   const tags = document.createElement("div");
   tags.className = "pane-tags";
   host.appendChild(tags);
+  const grips = document.createElement("div");
+  grips.className = "pane-grips";
+  host.appendChild(grips);
   if (chartUi.tagObs) chartUi.tagObs.disconnect();
-  chartUi.tagObs = new ResizeObserver(() => schedulePaneTags());
+  chartUi.tagObs = new ResizeObserver(() => { applyPaneHeights(); schedulePaneTags(); });
   chartUi.tagObs.observe(host);
   chart.subscribeCrosshairMove((param) => {
     chartUi.cross = param;
@@ -2304,7 +2321,8 @@ function ensureChart() {
     paintScaleClash();
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); paintCrosshairTime(chartUi.cross); });
-  Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, extra: [], extraMap: {}, indLayout: "" });
+  Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, grips, extra: [], extraMap: {}, indLayout: "" });
+  bindPaneResize(grips);
   bindDraw(draw);
   parkLogo();
   requestAnimationFrame(watchDraw);
@@ -2849,21 +2867,104 @@ function schedulePaneTags() {
   chartUi.tagTimer = setTimeout(() => paintPaneTags(chartUi.cross), 60);
 }
 function applyPaneHeights() {
-  if (!chartUi.chart) return;
+  if (!chartUi.chart || chartUi.dragging) return;
   const panes = chartUi.chart.panes();
   const n = Math.max(0, panes.length - 1);
   if (!n) { schedulePaneTags(); return; }
-  const total = state.chartFull
-    ? (document.querySelector("#chart-wrap")?.clientHeight || window.innerHeight)
-    : (state.chartH || chartHeight());
-  // Keep a usable candle pane; shrink indicator panes together when the phone is tight.
-  const candleMin = state.chartFull ? 160 : 120;
-  const room = Math.max(n * 36, total - candleMin);
-  const each = Math.max(36, Math.min(68, Math.floor(room / n)));
-  for (let i = 1; i < panes.length; i++) {
-    try { panes[i].setHeight(each); } catch (_) {}
-  }
+  if (n !== paneIds().length) return; // Indicator rebuild has not run yet.
+  // Exclude the real time axis and separators, not guessed wrap dimensions.
+  const total = chartUi.host.clientHeight - chartUi.chart.timeScale().height() - n;
+  if (total <= 0) return;
+  const sizes = paneLayout(total, paneIds().map((id) => state.paneHeights[id] ?? 68));
+  panes.forEach((p, i) => p.setStretchFactor(sizes[i]));
   schedulePaneTags();
+}
+function paneLayout(total, wanted) {
+  const n = wanted.length;
+  const room = Math.max(n * PANE_MIN_H, total - PRICE_MIN_H);
+  const sizes = wanted.map((h) => Number.isFinite(h) ? Math.max(PANE_MIN_H, Math.min(PANE_MAX_H, h)) : 68);
+  const extra = sizes.reduce((s, h) => s + h - PANE_MIN_H, 0);
+  const ratio = extra ? Math.min(1, Math.max(0, room - n * PANE_MIN_H) / extra) : 0;
+  const fitted = sizes.map((h) => PANE_MIN_H + (h - PANE_MIN_H) * ratio);
+  return [Math.max(PRICE_MIN_H, total - fitted.reduce((s, h) => s + h, 0)), ...fitted];
+}
+function resizePanePair(sizes, index, delta) {
+  const next = sizes.slice();
+  const upperMin = index === 1 ? PRICE_MIN_H : PANE_MIN_H;
+  const upperMax = index === 1 ? Infinity : PANE_MAX_H;
+  const lo = Math.max(upperMin - sizes[index - 1], sizes[index] - PANE_MAX_H);
+  const hi = Math.min(upperMax - sizes[index - 1], sizes[index] - PANE_MIN_H);
+  const d = Math.max(lo, Math.min(hi, delta));
+  next[index - 1] += d;
+  next[index] -= d;
+  return next;
+}
+function savePaneHeights(sizes) {
+  paneIds().forEach((id, i) => { state.paneHeights[id] = sizes[i + 1]; });
+  try { localStorage.setItem(PANE_H_KEY, JSON.stringify(state.paneHeights)); } catch (_) {}
+}
+function setPaneSizes(sizes) {
+  chartUi.chart.panes().forEach((p, i) => p.setStretchFactor(sizes[i]));
+  schedulePaneTags();
+}
+function paintPaneGrips() {
+  const box = chartUi.grips;
+  if (!box || !chartUi.chart) return;
+  const ids = paneIds(), panes = chartUi.chart.panes();
+  const key = ids.join(",");
+  if (box.dataset.layout !== key) {
+    box.dataset.layout = key;
+    box.innerHTML = ids.map((id) => `<div class="pane-grip" data-pane-grip="${id}" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Resize ${INDS.find((x) => x.id === id).name} pane" title="Drag to resize · Arrow keys to adjust"><span></span></div>`).join("");
+  }
+  const top = chartUi.host.getBoundingClientRect().top;
+  [...box.children].forEach((grip, i) => {
+    const pane = panes[i + 1];
+    const element = pane?.getHTMLElement();
+    if (!element) return; // Library creates pane DOM on its next animation frame.
+    const y = element.getBoundingClientRect().top - top;
+    grip.style.top = y + "px";
+    grip.setAttribute("aria-valuemin", PANE_MIN_H);
+    grip.setAttribute("aria-valuemax", PANE_MAX_H);
+    grip.setAttribute("aria-valuenow", Math.round(pane.getHeight()));
+  });
+}
+function bindPaneResize(box) {
+  let drag = null;
+  box.onpointerdown = (ev) => {
+    const grip = ev.target.closest("[data-pane-grip]");
+    if (!grip || ev.button !== 0) return;
+    ev.preventDefault(); ev.stopPropagation();
+    const sizes = chartUi.chart.panes().map((p) => p.getHeight());
+    drag = { grip, pointer: ev.pointerId, y: ev.clientY, index: paneIds().indexOf(grip.dataset.paneGrip) + 1, sizes, next: sizes };
+    chartUi.dragging = true;
+    grip.classList.add("active");
+    grip.setPointerCapture(ev.pointerId);
+  };
+  box.onpointermove = (ev) => {
+    if (!drag || drag.pointer !== ev.pointerId) return;
+    ev.preventDefault();
+    drag.next = resizePanePair(drag.sizes, drag.index, ev.clientY - drag.y);
+    setPaneSizes(drag.next);
+  };
+  const end = (ev) => {
+    if (!drag || drag.pointer !== ev.pointerId) return;
+    savePaneHeights(drag.next);
+    drag.grip.classList.remove("active");
+    drag = null; chartUi.dragging = false;
+    applyPaneHeights();
+    if (chartUi.pendingRender) { chartUi.pendingRender = false; render(); }
+  };
+  box.onpointerup = end;
+  box.onpointercancel = end;
+  box.onlostpointercapture = end;
+  box.onkeydown = (ev) => {
+    const grip = ev.target.closest("[data-pane-grip]");
+    if (!grip || !["ArrowUp", "ArrowDown"].includes(ev.key)) return;
+    ev.preventDefault();
+    const i = paneIds().indexOf(grip.dataset.paneGrip) + 1;
+    const next = resizePanePair(chartUi.chart.panes().map((p) => p.getHeight()), i, ev.key === "ArrowUp" ? -8 : 8);
+    setPaneSizes(next); savePaneHeights(next);
+  };
 }
 function paintPaneTags(param) {
   const box = chartUi.tags;
@@ -2872,10 +2973,12 @@ function paintPaneTags(param) {
   const seriesId = { rsi: "rsi", macd: "macd", stoch: "stochK", chop: "chop" };
   const order = paneIds();
   const panes = chartUi.chart.panes();
-  let y = 0;
+  const top = chartUi.host.getBoundingClientRect().top;
   const html = [];
   panes.forEach((p, i) => {
-    const h = p.getHeight();
+    const element = p.getHTMLElement();
+    if (!element) return;
+    const y = element.getBoundingClientRect().top - top;
     const id = i > 0 ? order[i - 1] : "";
     if (id && names[id]) {
       let extra = "";
@@ -2883,11 +2986,11 @@ function paintPaneTags(param) {
       const row = series && param?.seriesData?.get(series);
       const v = row && (row.value != null ? row.value : row.close);
       if (id !== "chop" && v != null && Number.isFinite(Number(v))) extra = " " + (id === "rsi" || id === "stoch" ? Number(v).toFixed(1) : fmtAxis(v));
-      html.push(`<div class="pane-tag" style="top:${y + 2}px">${names[id]}${extra}</div>`);
+      html.push(`<div class="pane-tag" style="top:${y + 8}px">${names[id]}${extra}</div>`);
     }
-    y += h;
   });
   box.innerHTML = html.join("");
+  paintPaneGrips();
 }
 function buildIndSeries() {
   const chart = chartUi.chart;

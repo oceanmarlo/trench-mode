@@ -414,6 +414,11 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .draw-layer.off { pointer-events: none; }
 .pane-tags { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
 .pane-tag { position: absolute; left: 32px; font-size: 10px; color: #c5ccd4; font-weight: 650; text-shadow: 0 1px 2px #000; }
+.pane-grips { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
+.pane-grip { position: absolute; left: 32px; right: 0; height: 18px; transform: translateY(-50%); display: flex; align-items: center; justify-content: center; pointer-events: auto; touch-action: none; cursor: ns-resize; user-select: none; -webkit-user-select: none; }
+.pane-grip span { width: 44px; height: 4px; border-radius: 3px; background: #647181; box-shadow: 0 0 0 2px #07090e; }
+.pane-grip:hover span, .pane-grip.active span, .pane-grip:focus-visible span { background: var(--green-2); }
+.pane-grip:focus-visible { outline: 1px solid var(--green-2); outline-offset: -2px; }
 .draw-text-inp { position: absolute; z-index: 7; width: 128px; font-size: 16px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); background: #12171e; color: #fff; }
 .scale-btns { display: flex; gap: 10px; }
 .scale-btns button { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 0; }
