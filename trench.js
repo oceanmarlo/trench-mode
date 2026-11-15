@@ -1241,9 +1241,18 @@ function orderFields() {
   return `<div class="otype" id="otype">
     <div class="otype-row"><span>Trail %</span><input id="trail-in" inputmode="decimal" value="${esc(state.trailPct)}" aria-label="Trail percent"><span class="otype-chips">${chips}</span></div>
     <div class="live-stop${p.ok ? "" : " down"}" id="trail-live">${esc(p.line)}</div>
-    <div class="note">Jupiter Trigger trail · sells ${esc(state.trailPct)}% under the high · tab can close</div>
+    <div class="note" id="trail-note">${esc(trailNote())}</div>
     ${stops}
   </div>`;
+}
+function syncPresetButtons(attr, value, enabled = true) {
+  document.querySelectorAll("[data-" + attr + "]").forEach((b) => {
+    b.classList.toggle("on", enabled && Number(b.getAttribute("data-" + attr)) === Number(value));
+  });
+}
+function trailNote() {
+  const tr = trailFromHigh(1, state.trailPct);
+  return tr.ok ? "Jupiter Trigger trail · sells " + tr.pct + "% under the high · tab can close" : tr.reason;
 }
 function paintOrderPreview() {
   const p = orderPreview();
@@ -1251,6 +1260,10 @@ function paintOrderPreview() {
   if (!el) return;
   el.textContent = p.line;
   el.classList.toggle("down", !p.ok);
+  syncPresetButtons("slpct", state.slPct, state.slMode !== "price");
+  syncPresetButtons("trail", state.trailPct);
+  const note = document.getElementById("trail-note");
+  if (note) note.textContent = trailNote();
 }
 function asSig58(sig) {
   if (!sig) throw new Error("Wallet did not sign.");
@@ -1415,8 +1428,8 @@ function scheduleQuote(ms = 400) {
     state.quote = null;
     state.quoting = !!orderParams();
     state.status = idleQuoteStatus() || "Quoting…";
-    paintLive();
   }
+  paintLive();
   quoteTimer = setTimeout(() => refreshQuote().catch(() => {}), ms);
 }
 
@@ -1755,6 +1768,8 @@ function paintLive() {
   if (go) go.disabled = state.busy || (!!state.wallet && !orderParams());
   const amt = $("#amt");
   if (amt) amt.setAttribute("aria-invalid", String(!!amountInputError()));
+  syncPresetButtons("amt", state.amount, !amountInputError());
+  syncPresetButtons("pct", state.sellPct, !amountInputError());
   document.querySelectorAll("[data-mint]").forEach((row) => {
     const h = state.holdings.find((x) => x.mint === row.dataset.mint);
     if (!h) return;
@@ -4784,7 +4799,6 @@ function bind() {
     saveOrderPrefs();
     const inp = $("#trail-in");
     if (inp) inp.value = state.trailPct;
-    document.querySelectorAll("[data-trail]").forEach((x) => x.classList.toggle("on", Number(x.dataset.trail) === Number(state.trailPct)));
     paintOrderPreview();
   });
   const slIn = $("#sl-in");
