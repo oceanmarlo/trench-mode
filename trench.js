@@ -1263,6 +1263,15 @@ function trailNote() {
   const tr = trailFromHigh(1, state.trailPct);
   return tr.ok ? "Jupiter Trigger trail · sells " + tr.pct + "% under the high · tab can close" : tr.reason;
 }
+function setQuoteStatus(message, replace = false) {
+  // Price/preview repaints own only quote messages, never wallet progress or an
+  // order result (especially "Bought, stop not set"). A new quote/edit may reset
+  // a finished result, but nothing may replace status while an order is busy.
+  const ownsStatus = !state.status || state.status === state.quoteStatus
+    || state.status === "Live · Jupiter" || state.status === "Quoting…";
+  state.quoteStatus = message;
+  if (!state.busy && (replace || ownsStatus)) state.status = message;
+}
 function paintOrderPreview() {
   const p = orderPreview();
   const el = document.getElementById("sl-live") || document.getElementById("trail-live");
@@ -1276,8 +1285,8 @@ function paintOrderPreview() {
   if (note) note.textContent = trailNote();
   // Keep status / go in sync with stop-trail validity without waiting on a re-quote.
   const idle = idleQuoteStatus();
-  if (idle) state.status = idle;
-  else if (currentQuote() && !state.quoting) state.status = state.quote?.errorMessage || "Live · Jupiter";
+  if (idle) setQuoteStatus(idle);
+  else if (currentQuote() && !state.quoting) setQuoteStatus(state.quote?.errorMessage || "Live · Jupiter");
   const stat = document.getElementById("status");
   if (stat) stat.textContent = state.status;
   const go = document.getElementById("go");
@@ -1445,7 +1454,7 @@ function scheduleQuote(ms = 400) {
   if (!currentQuote()) {
     state.quote = null;
     state.quoting = !!orderParams();
-    state.status = idleQuoteStatus() || "Quoting…";
+    setQuoteStatus(idleQuoteStatus() || "Quoting…", true);
   }
   paintLive();
   quoteTimer = setTimeout(() => refreshQuote().catch(() => {}), ms);
@@ -1458,7 +1467,7 @@ async function refreshQuote() {
     state.quote = null;
     state.quoting = false;
     const idle = idleQuoteStatus();
-    if (idle) state.status = idle;
+    if (idle) setQuoteStatus(idle, true);
     paintLive();
     return null;
   }
@@ -1472,10 +1481,10 @@ async function refreshQuote() {
     order._params = key;
     state.quote = order;
     const idle = idleQuoteStatus();
-    state.status = order.errorMessage ? order.errorMessage : (idle || "Live · Jupiter");
+    setQuoteStatus(order.errorMessage || idle || "Live · Jupiter", true);
     return order;
   } catch (err) {
-    if (seq === quoteSeq) { state.quote = null; state.status = err.message; }
+    if (seq === quoteSeq) { state.quote = null; setQuoteStatus(err.message, true); }
     throw err;
   } finally {
     if (seq === quoteSeq) { state.quoting = false; paintLive(); }
