@@ -3756,6 +3756,8 @@ const ALPHA_BUILTIN = {
 const alphaSaved = (() => { try { return JSON.parse(localStorage.getItem(ALPHA_KEY)) || {}; } catch (_) { return {}; } })();
 const alphaSrcOk = (s) => ALPHA_SOURCES.some(([k]) => k === s);
 state.alpha = {
+  market: alphaSaved.market === "regular" ? "regular" : "alpha",
+  regular: { kind: alphaSaved.regularKind === "top" ? "top" : "trending", cols: { trending: [], top: [] }, loading: false, err: "", at: 0 },
   src: alphaSrcOk(alphaSaved.src) ? alphaSaved.src : "recent", iv: ALPHA_IVS.includes(alphaSaved.iv) ? alphaSaved.iv : "24h",
   sort: alphaSaved.sort || "feed", dir: alphaSaved.dir || "desc",
   ageUnit: alphaSaved.ageUnit === "m" || alphaSaved.ageUnit === "d" ? alphaSaved.ageUnit : "h",
@@ -3765,7 +3767,41 @@ state.alpha = {
 };
 function saveAlpha() {
   const a = state.alpha;
-  localStorage.setItem(ALPHA_KEY, JSON.stringify({ src: a.src, iv: a.iv, sort: a.sort, dir: a.dir, f: a.f, ageUnit: a.ageUnit, sec: a.sec }));
+  localStorage.setItem(ALPHA_KEY, JSON.stringify({ market: a.market, regularKind: a.regular.kind, src: a.src, iv: a.iv, sort: a.sort, dir: a.dir, f: a.f, ageUnit: a.ageUnit, sec: a.sec }));
+}
+// The Regular section shares Alpha's cells/filters, but never duplicates its current columns.
+function regularCandidates(rows, cols) {
+  const alphaIds = new Set(ALPHA_COL_KEYS.flatMap((key) => (cols[key] || []).map((t) => t.id)));
+  return [...new Map(rows.filter((t) => t?.id && !alphaIds.has(t.id) && !alphaOnCurvePad(t)).map((t) => [t.id, t])).values()];
+}
+function syncMarketRows() {
+  const a = state.alpha;
+  a.rows = a.market === "regular" ? regularCandidates(a.regular.cols[a.regular.kind], a.cols) : (a.cols[a.src] || []);
+}
+function marketGate(t) { return state.alpha.market === "regular" ? spotGate(t) : alphaLiqState(t); }
+function marketGateOk(g) { return g === "allow" || alphaLiqOk(g); }
+let regularSeq = 0;
+async function loadRegular() {
+  const r = state.alpha.regular, kind = r.kind;
+  const seq = ++regularSeq;
+  r.loading = true; r.err = "";
+  paintAlphaList();
+  try {
+    const path = kind === "top" ? "toptraded" : "toptrending";
+    const rows = await jup("https://api.jup.ag/tokens/v2/" + path + "/1h");
+    if (seq !== regularSeq) return;
+    if (!Array.isArray(rows)) throw new Error("Invalid Jupiter token list");
+    r.cols[kind] = rows;
+    r.at = Date.now();
+    syncMarketRows(); streamSync();
+  } catch (err) {
+    if (seq === regularSeq) r.err = err.message || String(err);
+  } finally {
+    if (seq === regularSeq) { r.loading = false; paintAlphaList(); }
+  }
+}
+function loadMarketFeeds() {
+  return Promise.all([loadAlpha(), ...(state.alpha.market === "regular" ? [loadRegular()] : [])]);
 }
 function alphaPresets() { try { return JSON.parse(localStorage.getItem(ALPHA_PRESETS_KEY)) || {}; } catch (_) { return {}; } }
 
@@ -3976,17 +4012,18 @@ function alphaList() {
   const key = { mcap: "mcap", liq: "liq", vol: "vol", chg: "chg", age: "ageH", holders: "holders", top10: "top10", score: "score", lp: "lp", rc: "rc" }[a.sort] || "vol";
   const dir = a.dir === "asc" ? 1 : -1;
   // Hard gate, before user filters: curve with mint+freeze off, or graduated with LP locked >= 99.9 and mint+freeze off.
-  const gated = a.rows.map((t) => ({ t, lp: alphaLiqState(t) }));
-  const hidden = gated.filter((r) => !alphaLiqOk(r.lp)).length;
+  const gated = a.rows.map((t) => ({ t, lp: marketGate(t) }));
+  const hidden = gated.filter((r) => !marketGateOk(r.lp)).length;
   const checking = gated.filter((r) => r.lp === "checking").length;
   const front = [];
+  gated.filter((r) => r.lp === "checking").forEach((r) => front.push(r.t.id));
   for (const src of [a.src, ...ALPHA_COL_KEYS.filter((k) => k !== a.src)]) {
     for (const t of (src === a.src ? a.rows : (a.cols[src] || []))) {
       if (alphaLiqState(t) === "checking") front.push(t.id);
     }
   }
   rcWantFront(front);
-  const base = gated.filter((r) => alphaLiqOk(r.lp)).map((r) => ({ t: r.t, x: alphaFields(r.t, iv) })).filter((r) => alphaPass(r.x, a.f));
+  const base = gated.filter((r) => marketGateOk(r.lp)).map((r) => ({ t: r.t, x: alphaFields(r.t, iv) })).filter((r) => alphaPass(r.x, a.f));
   if (!feed) base.sort((p, q) => {
     const u = p.x[key], v = q.x[key];
     if (u == null && v == null) return 0;
@@ -3997,6 +4034,7 @@ function alphaList() {
   // RugCheck for the LP gate is already queued above, newest column first. User RugCheck filters only see rows that passed it.
   const rcOn = alphaRcActive(a.f) || a.sort === "lp" || a.sort === "rc";
   if (!rcOn) return { list: base, pending: 0, hidden, checking };
+  rcWantFront(base.filter((r) => !rcGet(r.t.id)).map((r) => r.t.id));
   const pending = base.filter((r) => !rcGet(r.t.id)).length;
   return { list: alphaRcActive(a.f) ? base.filter((r) => rcGet(r.t.id) && alphaRcPass(r.x, a.f)) : base, pending, hidden, checking };
 }
@@ -4011,7 +4049,7 @@ function alphaSortCols() {
   c.aboutToGraduate.splice(30);
   c.graduated.sort((a, b) => new Date(b.graduatedAt || 0) - new Date(a.graduatedAt || 0));
   c.graduated.splice(30);
-  state.alpha.rows = c[state.alpha.src] || [];
+  syncMarketRows();
 }
 function alphaMergeSnap(key, fresh) {
   const old = state.alpha.cols[key] || [];
@@ -4135,10 +4173,11 @@ function pctText(v) {
 
 function alphaRowsHtml() {
   const a = state.alpha;
+  const feed = a.market === "regular" ? a.regular : a;
   const { list, pending, hidden = 0, checking = 0 } = alphaList();
-  const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)</div>`;
-  const head = note + `<div class="al-count">${a.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${a.loading && a.rows.length ? " · refreshing" : ""}${a.at ? ` · ${new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
-  if (a.err && !a.rows.length) return head + `<div class="k" style="padding:16px 0">Couldn't load: ${esc(a.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
+  const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)${a.market === "regular" ? "<br>Major, Jupiter-verified & wallet-held tokens excepted · excludes current Alpha tokens" : ""}</div>`;
+  const head = note + `<div class="al-count">${feed.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${feed.loading && a.rows.length ? " · refreshing" : ""}${feed.at ? ` · ${new Date(feed.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
+  if (feed.err) return head + `<div class="k" style="padding:16px 0">Couldn't refresh: ${esc(feed.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
   if (!list.length) {
     if (checking || !a.rows.length || hidden === a.rows.length) return head;
     return head + `<div class="k" style="padding:16px 0">No tokens match these filters.</div>`;
@@ -4149,7 +4188,7 @@ function alphaRowsHtml() {
       `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
-    return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${alphaLiqState(t)}">
+    return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${marketGate(t)}">
       <span class="al-tok"><span class="tok-av">${tokenIcon(t.icon, 'loading="lazy"')}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
@@ -4195,7 +4234,7 @@ function paintAlphaList() {
     loadToken(b.dataset.alphaOpen).catch((err) => { state.status = err.message; render(); });
   });
   const r = box.querySelector("[data-alpha-retry]");
-  if (r) r.onclick = () => loadAlpha().catch(() => {});
+  if (r) r.onclick = () => loadMarketFeeds().catch(() => {});
   paintFilterChrome();
 }
 
@@ -4335,12 +4374,14 @@ function alphaView() {
   const a = state.alpha;
   const n = alphaActiveCount();
   const ivLabel = ALPHA_IVS.includes(a.iv) ? a.iv : "24h";
-  const feedNote = a.pumpFallback ? `<div class="k al-feed">Jupiter feed failed — New is on PumpPortal until it recovers.</div>` : "";
+  const feedNote = a.pumpFallback && a.market !== "regular" ? `<div class="k al-feed">Jupiter feed failed — New is on PumpPortal until it recovers.</div>` : "";
   return `<div class="alpha">
-    <div class="al-top"><h2>Alpha</h2><button type="button" class="al-refresh" data-alpha-refresh aria-label="Refresh">↻</button></div>
-    <div class="chips">${ALPHA_SOURCES.map(([k, l]) => `<button type="button" data-alpha-src="${k}" class="${a.src === k ? "on" : ""}">${l}</button>`).join("")}</div>
+    <div class="al-top"><h2>Markets</h2><button type="button" class="al-refresh" data-alpha-refresh aria-label="Refresh">↻</button></div>
+    <div class="market-tabs" role="tablist" aria-label="Token market">${[["alpha", "Alpha"], ["regular", "Regular coins"]].map(([k, l]) => `<button type="button" role="tab" aria-selected="${a.market === k}" data-market="${k}" class="${a.market === k ? "on" : ""}">${l}</button>`).join("")}</div>
+    <div class="chips">${a.market === "regular" ? SPOT_LISTS.map(([k, l]) => `<button type="button" data-regular-src="${k}" class="${a.regular.kind === k ? "on" : ""}">${l}</button>`).join("") : ALPHA_SOURCES.map(([k, l]) => `<button type="button" data-alpha-src="${k}" class="${a.src === k ? "on" : ""}">${l}</button>`).join("")}</div>
     <div class="al-tools">
       <button type="button" class="al-filter-btn ${a.open ? "on" : ""}" data-alpha-filters>Filters <span id="alpha-fcount" class="af-badge" ${n ? "" : "hidden"}>${n || ""}</span></button>
+      <button type="button" class="al-filter-btn market-search" data-market-search>⌕ Search all tokens</button>
     </div>
     ${feedNote}
     <div class="al-head">${[["age", "Token · age"], ["mcap", "MCap / Liq"], ["vol", `Vol ${ivLabel}`], ["chg", `Chg ${ivLabel}`]].map(([k, l]) => `<button type="button" data-alpha-sort="${k}" class="${a.sort === k ? "on" : ""}">${l}${a.sort === k ? (a.dir === "asc" ? " ↑" : " ↓") : ""}</button>`).join("")}</div>
@@ -4351,11 +4392,25 @@ function alphaView() {
 function bindAlpha() {
   const a = state.alpha;
   const rerender = () => { saveAlpha(); render(); };
+  document.querySelectorAll("[data-market]").forEach((b) => b.onclick = () => {
+    if (a.market === b.dataset.market) return;
+    a.market = b.dataset.market;
+    syncMarketRows(); rerender(); streamSync();
+    loadMarketFeeds().catch(() => {});
+  });
+  document.querySelectorAll("[data-regular-src]").forEach((b) => b.onclick = () => {
+    if (a.regular.kind === b.dataset.regularSrc) return;
+    a.regular.kind = b.dataset.regularSrc;
+    syncMarketRows(); rerender(); streamSync();
+    loadRegular().catch(() => {});
+  });
+  const searchMarket = $("[data-market-search]");
+  if (searchMarket) searchMarket.onclick = () => openSearch();
   document.querySelectorAll("[data-alpha-src]").forEach((b) => b.onclick = () => {
     if (a.src === b.dataset.alphaSrc) return;
     a.src = b.dataset.alphaSrc;
-    a.rows = a.cols[a.src] || [];
-    rerender();
+    syncMarketRows();
+    rerender(); streamSync();
   });
   document.querySelectorAll("[data-alpha-sort]").forEach((b) => b.onclick = () => {
     const k = b.dataset.alphaSort;
@@ -4366,7 +4421,7 @@ function bindAlpha() {
   const fb = $("[data-alpha-filters]");
   if (fb) fb.onclick = () => { a.open = !a.open; render(); };
   const rf = $("[data-alpha-refresh]");
-  if (rf) rf.onclick = () => { loadAlpha().catch(() => {}); };
+  if (rf) rf.onclick = () => { loadMarketFeeds().catch(() => {}); };
   const sortSel = document.querySelector("[data-alpha-sort-sel]");
   if (sortSel) sortSel.onchange = () => {
     const k = sortSel.value;
@@ -5200,7 +5255,7 @@ function bind() {
     streamSync();
     $(".scroll") && ($(".scroll").scrollTop = 0);
     if (v === "portfolio" && state.wallet && !state.holdingsLoading) loadHoldings().catch(() => {});
-    if (v === "alpha") loadAlpha().catch(() => {});
+    if (v === "alpha") loadMarketFeeds().catch(() => {});
   });
   document.querySelectorAll("[data-connect]").forEach((b) => b.onclick = () => connect());
   document.querySelectorAll("[data-reload-holdings]").forEach((b) => b.onclick = () => loadHoldings().catch(() => {}));
@@ -5881,7 +5936,16 @@ function onStreamAssets(list) {
       stream.dirty.live = true;
     }
     if (!alphaOn) continue;
-    alphaIngest(u);
+    const regular = state.alpha.regular;
+    let regularKnown = false;
+    for (const rows of Object.values(regular.cols)) {
+      const row = rows.find((r) => r.id === t.id);
+      if (row) { Object.assign(row, t); regularKnown = true; }
+    }
+    // Explicit subscriptions to established coins must not prepend them to Alpha Graduated.
+    const inAlpha = ALPHA_COL_KEYS.some((key) => state.alpha.cols[key].some((r) => r.id === t.id));
+    if (!regularKnown || u.type !== "update" || inAlpha) alphaIngest(u);
+    syncMarketRows();
     stream.dirty.alpha = true;
     feedMark(u.type === "new" ? "alphaNewStream" : "alphaRowStream");
   }
@@ -5950,7 +6014,7 @@ async function boot() {
     every(PRICE_EVERY_MS, () => pollPrices());
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
-    every(30000, () => (state.view === "alpha" ? loadAlpha() : null));
+    every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
     every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
     every(20000, () => refreshStopLive());
   } catch (err) {
