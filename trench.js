@@ -646,14 +646,27 @@ async function loadSpotScan() {
   }
 }
 
+let pricePollPromise = null;
+let pricePollMints = new Set();
 async function pollPrices(force = false) {
   if (!force && streamPricesLive()) return; // prices arrive over the stream
-  const t0 = performance.now();
   const ids = new Set([SOL]);
   if (state.active) ids.add(state.active.id);
   state.holdings.forEach((h) => ids.add(h.mint));
-  const all = [...ids];
-  // price/v3 takes up to 50 ids per call; one call covers everything on screen.
+  // Large wallets need multiple queued batches; timer ticks must not pile up duplicates.
+  if (pricePollPromise) {
+    if ([...ids].every((id) => pricePollMints.has(id))) return pricePollPromise;
+    // A token/wallet switch must not lose its forced refresh behind an older snapshot.
+    await pricePollPromise.catch(() => {});
+    return pollPrices(force);
+  }
+  pricePollMints = ids;
+  pricePollPromise = pollPriceBatches([...ids]).finally(() => { pricePollPromise = null; });
+  return pricePollPromise;
+}
+async function pollPriceBatches(all) {
+  const t0 = performance.now();
+  // price/v3 takes up to 50 ids per call; every batch still uses jup()'s rate queue.
   for (let i = 0; i < all.length; i += 50) {
     const data = await jup(PRICE + "?ids=" + all.slice(i, i + 50).join(","));
     for (const [mint, row] of Object.entries(data || {})) {
@@ -685,7 +698,6 @@ async function rpc(method, params) {
 }
 
 const HOLDINGS = "https://api.jup.ag/ultra/v1/holdings/";
-const MAX_TRACKED = 40; // keep the price poll to one call
 
 async function balancesFromJupiter(owner) {
   // Ultra holdings has its own rate bucket, so it doesn't eat the price/search budget.
@@ -717,6 +729,20 @@ async function balancesFromRpc(owner) {
   return { sol: (sol?.value || 0) / 1e9, rows: [...byMint.values()] };
 }
 
+async function loadHoldingMetadata(mints, owner) {
+  // Bound URL/request size without dropping any balances from a large wallet.
+  for (let i = 0; i < mints.length; i += 50) {
+    if (state.wallet !== owner) return;
+    try {
+      const meta = await datapi("https://datapi.jup.ag/v1/assets?ids=" + mints.slice(i, i + 50).join(","));
+      if (state.wallet !== owner) return;
+      (Array.isArray(meta) ? meta : meta?.assets || []).forEach((m) => {
+        const h = state.holdings.find((x) => x.mint === m.id);
+        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon });
+      });
+    } catch (_) {} // A missing label must not hide the balance or stop later batches.
+  }
+}
 async function loadHoldings() {
   if (!state.wallet) return;
   const owner = state.wallet;
@@ -734,35 +760,16 @@ async function loadHoldings() {
   if (state.wallet !== owner) return;
   state.holdingsLoading = false;
   state.sol = bal.sol;
-  let rows = bal.rows.filter((h) => h.ui > 0 && h.mint !== SOL);
-  if (rows.length > MAX_TRACKED) {
-    // Big wallets: price everything once (50 ids per call, capped), keep the most valuable.
-    const ids = rows.slice(0, 200).map((h) => h.mint);
-    for (let i = 0; i < ids.length; i += 50) {
-      try {
-        const data = await jup(PRICE + "?ids=" + ids.slice(i, i + 50).join(","));
-        for (const [m, r] of Object.entries(data || {})) if (r?.usdPrice) notePrice(m, r.usdPrice, r.blockId, "holdings");
-      } catch (_) {}
-    }
-    rows = rows.map((h) => ({ h, v: h.ui * (state.prices[h.mint] || 0) })).sort((x, y) => y.v - x.v).slice(0, MAX_TRACKED).map((x) => x.h);
-  }
+  const rows = bal.rows.filter((h) => h.ui > 0 && h.mint !== SOL);
   const old = new Map(state.holdings.map((h) => [h.mint, h]));
   state.holdings = rows.map((h) => {
     const o = old.get(h.mint);
     return o ? { ...h, symbol: o.symbol, name: o.name, icon: o.icon } : h;
   });
   const missing = state.holdings.filter((h) => !h.symbol).map((h) => h.mint);
-  if (missing.length) {
-    // One datapi call for all metadata instead of one keyed search per token.
-    try {
-      const meta = await datapi("https://datapi.jup.ag/v1/assets?ids=" + missing.join(","));
-      (Array.isArray(meta) ? meta : meta?.assets || []).forEach((m) => {
-        const h = state.holdings.find((x) => x.mint === m.id);
-        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon });
-      });
-    } catch (_) {}
-  }
   streamSync();
+  await loadHoldingMetadata(missing, owner);
+  if (state.wallet !== owner) return;
   await pollPrices(true).catch(() => {});
   render();
 }
@@ -5514,8 +5521,8 @@ function syncSet(kind, want, field = "assets") {
   const sent = stream.sent[kind];
   const add = [...want].filter((x) => !sent.has(x));
   const del = [...sent].filter((x) => !want.has(x));
-  if (del.length) streamSend("unsubscribe:" + kind, { [field]: del });
-  if (add.length) streamSend("subscribe:" + kind, { [field]: add });
+  for (let i = 0; i < del.length; i += 50) streamSend("unsubscribe:" + kind, { [field]: del.slice(i, i + 50) });
+  for (let i = 0; i < add.length; i += 50) streamSend("subscribe:" + kind, { [field]: add.slice(i, i + 50) });
   stream.sent[kind] = new Set(want);
 }
 // Subscribe to exactly what is on screen.
@@ -5524,7 +5531,7 @@ function streamSync() {
   const a = state.active?.id;
   const prices = new Set([SOL]);
   if (a) prices.add(a);
-  state.holdings.slice(0, 40).forEach((h) => prices.add(h.mint));
+  state.holdings.forEach((h) => prices.add(h.mint));
   const assets = new Set(a ? [a] : []);
   if (state.view === "alpha") state.alpha.rows.slice(0, 100).forEach((t) => assets.add(t.id));
   syncSet("prices", prices);
@@ -5566,16 +5573,13 @@ function onStreamPnl(data) {
     changed = true;
   }
   if (missing.length) {
-    datapi("https://datapi.jup.ag/v1/assets?ids=" + missing.join(",")).then((meta) => {
-      (Array.isArray(meta) ? meta : meta?.assets || []).forEach((m) => {
-        const h = state.holdings.find((x) => x.mint === m.id);
-        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon });
-      });
-      streamSync();
+    loadHoldingMetadata(missing, w).then(() => {
+      if (state.wallet !== w) return;
       render();
     }).catch(() => {});
   }
   if (!changed) return;
+  streamSync(); // Subscribe immediately, even if metadata is unavailable.
   // Balance screens re-render at most twice a second; elsewhere just repaint live numbers.
   if (state.view === "portfolio" || state.tab === "holdings") {
     clearTimeout(pnlRenderTimer);
