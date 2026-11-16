@@ -2099,6 +2099,8 @@ function paintLive() {
   paintHolderCounts();
   const pf = $("#pf-total");
   if (pf) pf.textContent = usd(portfolioValue());
+  const tradeBalance = $("#trade-bal");
+  if (tradeBalance) tradeBalance.textContent = tradeBal();
   const solRow = $("[data-pf-sol]");
   if (solRow) {
     $(".meta span", solRow).textContent = usd(holdingPrice(SOL));
@@ -2169,8 +2171,10 @@ function paintLive() {
     const entry = entryOf(h.mint);
     const value = holdingValue(h.mint, h.ui);
     const hn = $(".hold-n", row);
+    const hq = $(".hold-q", row);
     const pn = $(".pnl", row);
     if (hn) hn.textContent = usd(value);
+    if (hq) hq.textContent = qty(h.ui);
     if (pn) {
       if (!(entry > 0) || !(price > 0)) paintHoldingPnl(pn, null, null);
       else paintHoldingPnl(pn, value - h.ui * entry, ((price - entry) / entry) * 100);
@@ -6081,6 +6085,18 @@ function streamSync() {
 // Wallet push: balances + average cost for every token the wallet holds.
 const NATIVE_SOL = "So11111111111111111111111111111111111111111";
 let pnlRenderTimer = 0;
+let pnlNeedsRender = false;
+function queuePnlPaint(full = false) {
+  pnlNeedsRender = pnlNeedsRender || full;
+  if (pnlRenderTimer) return; // Throttle, not debounce: a busy wallet must still paint.
+  pnlRenderTimer = setTimeout(() => {
+    pnlRenderTimer = 0;
+    const rebuild = pnlNeedsRender;
+    pnlNeedsRender = false;
+    if (rebuild && (state.view === "portfolio" || state.tab === "holdings")) render();
+    else paintLive(); // Preserve existing rows, PnL nodes and the focused amount input.
+  }, 100);
+}
 function streamBalanceRow(mint, bal) {
   // A partial stream payload is not proof of a sale. Check both UI and raw
   // units before mutating a balance or its in-flight snapshot overlay.
@@ -6101,11 +6117,16 @@ function onStreamPnl(data) {
   if (!mine || typeof mine !== "object" || Array.isArray(mine)) return;
   feedMark("walletPnlStream");
   let changed = false;
+  let needsRender = false;
   let invalid = false;
   const missing = [];
   for (const [mint, row] of Object.entries(mine)) {
     const bal = row?.balance;
-    if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint, w), String(row.pnl.averageCost));
+    const cost = row?.pnl?.averageCost;
+    if (typeof cost === "number" && Number.isFinite(cost) && cost > 0 && mint !== NATIVE_SOL && mint !== SOL && entryOf(mint) !== cost) {
+      localStorage.setItem(entryKey(mint, w), String(cost));
+      changed = true; // Cost-only frames must repaint even if no price/balance tick follows.
+    }
     if (bal == null || mint === SOL) continue;
     let next;
     try { next = streamBalanceRow(mint, bal); }
@@ -6120,41 +6141,30 @@ function onStreamPnl(data) {
     const i = state.holdings.findIndex((h) => h.mint === mint);
     if (next.ui === 0) {
       if (pending) pending.balances.set(mint, null);
-      if (i >= 0) { state.holdings.splice(i, 1); changed = true; }
+      if (i >= 0) { state.holdings.splice(i, 1); changed = true; needsRender = true; }
       continue;
     }
     if (pending) pending.balances.set(mint, next);
     if (i >= 0) Object.assign(state.holdings[i], next);
-    else { state.holdings.push(next); missing.push(mint); }
+    else { state.holdings.push(next); missing.push(mint); needsRender = true; }
     changed = true;
   }
   if (invalid) {
     // Only a complete successful snapshot may clear this warning; valid sibling
     // pushes still apply and the existing Retry reloads the whole wallet.
+    needsRender = needsRender || state.holdingsError !== "Incomplete live balance update";
     state.holdingsError = "Incomplete live balance update";
     changed = true;
   }
   if (missing.length) {
     loadHoldingMetadata(missing, w).then(() => {
       if (state.wallet !== w) return;
-      render();
+      queuePnlPaint(true);
     }).catch(() => {});
   }
   if (!changed) return;
   streamSync(); // Subscribe immediately, even if metadata is unavailable.
-  // Balance screens re-render at most twice a second; elsewhere just repaint live numbers.
-  if (state.view === "portfolio" || state.tab === "holdings") {
-    clearTimeout(pnlRenderTimer);
-    pnlRenderTimer = setTimeout(() => render(), 500);
-  } else {
-    const balEl = $("#trade-bal");
-    if (balEl) {
-      const bal = tradeBal();
-      if (balEl.textContent !== bal) balEl.textContent = bal;
-    }
-    stream.dirty.live = true;
-    streamFlush();
-  }
+  queuePnlPaint(needsRender);
 }
 function onStreamUserTrades(list) {
   feedMark("walletTradesStream");
