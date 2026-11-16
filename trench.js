@@ -514,22 +514,42 @@ async function loadTape(force = false) {
   else if (state.tab === "tx") render();
 }
 
+let holdersRequest = null;
 async function loadHolders() {
   const t = state.active;
   if (!t) return;
-  state.holdersLoading = true;
-  state.holdersError = "";
-  try {
-    const data = await datapi(`https://datapi.jup.ag/v1/holders/${t.id}?limit=40`);
-    if (state.active !== t) return;
-    state.holders = data.holders || [];
-  } catch (_) {
-    if (state.active !== t) return;
-    state.holdersError = "Couldn't load holders.";
-  } finally {
-    if (state.active === t) state.holdersLoading = false;
+  if (holdersRequest) {
+    if (holdersRequest.token === t) return;
+    clearTimeout(holdersRequest.timeout);
+    holdersRequest.controller.abort();
   }
+  const controller = new AbortController();
+  const request = { token: t, controller, timeout: setTimeout(() => controller.abort(), 12000) };
+  holdersRequest = request;
+  state.holdersLoading = true;
+  // Retain the last-known warning through a retry until a valid snapshot arrives.
   paintHolders();
+  try {
+    const data = await datapi(`https://datapi.jup.ag/v1/holders/${t.id}?limit=40`, { signal: controller.signal });
+    if (holdersRequest !== request || state.active !== t) return;
+    if (controller.signal.aborted) throw new Error("Holder request timed out.");
+    if (!Array.isArray(data?.holders) || data.holders.some((h) => !h || typeof h.address !== "string" || !h.address
+        || typeof h.amount !== "number" || !Number.isFinite(h.amount) || h.amount < 0
+        || (h.tags != null && !Array.isArray(h.tags)) || (h.holderTags != null && !Array.isArray(h.holderTags)))) {
+      throw new Error("Invalid Jupiter holder data");
+    }
+    state.holders = data.holders;
+    state.holdersError = "";
+  } catch (err) {
+    if (holdersRequest !== request || state.active !== t) return;
+    state.holdersError = controller.signal.aborted ? "Holder request timed out." : err.message || "Holder data unavailable";
+  } finally {
+    clearTimeout(request.timeout);
+    if (holdersRequest === request) {
+      holdersRequest = null;
+      if (state.active === t) { state.holdersLoading = false; paintHolders(); }
+    }
+  }
 }
 
 let searchTimer = 0;
@@ -3551,13 +3571,12 @@ function holderMarks(h, token) {
 }
 function holderRows() {
   const t = state.active || {};
+  const warning = state.holdersError ? `<div class="holder-warning k" role="status">${state.holders.length ? "Last known holders · " : ""}Couldn't refresh holders: ${esc(state.holdersError)}<button type="button" class="copy holder-retry" data-holders-retry ${state.holdersLoading ? "disabled" : ""}>${state.holdersLoading ? "Refreshing…" : "Retry"}</button></div>` : "";
   if (!state.holders.length) {
-    const n = Number(t.holderCount);
-    const msg = state.holdersError
-      || (state.holdersLoading ? "Loading holders…" : (n > 0 ? "Addresses not in yet." : "No holders yet."));
-    return `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
+    const msg = state.holdersLoading ? "Loading holders…" : (t.holderCount === 0 ? "No holders yet." : "Addresses not in yet.");
+    return warning || `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
   }
-  return state.holders.slice(0, 40).map((h, i) => {
+  return warning + state.holders.slice(0, 40).map((h, i) => {
     const addr = h.address || "";
     const tags = holderMarks(h, t).map((tag) => `<span class="htag ${tag === "Dev" ? "dev" : "lp"}">${tag}</span>`).join("");
     const who = addr
@@ -3573,6 +3592,11 @@ function paintHolders() {
   box.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
+  bindHoldersRetry();
+}
+function bindHoldersRetry() {
+  const retry = $("[data-holders-retry]");
+  if (retry) retry.onclick = () => loadHolders().catch(() => {});
 }
 
 function stat(win) {
@@ -4687,7 +4711,7 @@ function holdersPanel() {
     ? `<a class="bubblemaps" href="https://app.bubblemaps.io/sol/token/${esc(mint)}" target="_blank" rel="noopener noreferrer">Bubblemaps</a>`
     : "";
   return `<div class="holder-stats holder-head">
-      <div>Holders: ${(t.holderCount || 0).toLocaleString()} &nbsp; Top 10: <span class="down">${top != null ? top.toFixed(2) + "%" : "—"}</span></div>
+      <div>Holders: ${Number.isFinite(t.holderCount) && t.holderCount >= 0 ? t.holderCount.toLocaleString() : "—"} &nbsp; Top 10: <span class="down">${Number.isFinite(top) ? top.toFixed(2) + "%" : "—"}</span></div>
       ${bubble}
     </div>
     <div class="hcols"><span>#</span><span>Address</span><span>Supply</span><span>Amount</span></div>
@@ -5338,6 +5362,7 @@ function bind() {
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
   bindSearchRetry();
   bindScan();
+  bindHoldersRetry();
   bindChartResize();
   $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
   document.querySelectorAll(".chart-full-btn").forEach((cf) => cf.onclick = () => { state.chartFull = !state.chartFull; render(); });
