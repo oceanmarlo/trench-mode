@@ -3868,7 +3868,7 @@ async function loadRegular() {
     const path = kind === "top" ? "toptraded" : "toptrending";
     const rows = await jup("https://api.jup.ag/tokens/v2/" + path + "/1h");
     if (seq !== regularSeq) return;
-    if (!Array.isArray(rows)) throw new Error("Invalid Jupiter token list");
+    if (!Array.isArray(rows) || rows.some((t) => !t || typeof t.id !== "string" || !t.id)) throw new Error("Invalid Jupiter token list");
     r.cols[kind] = rows;
     r.at = Date.now();
     syncMarketRows(); streamSync();
@@ -4205,10 +4205,16 @@ async function loadAlpha() {
   try {
     const d = await gemsFetch();
     if (seq !== alphaSeq) return;
+    // Validate every column before mutating any of them. Missing assets are a
+    // failed snapshot, not proof that the live market has become empty.
+    if (ALPHA_COL_KEYS.some((k) => !Array.isArray(d?.[k]?.assets)
+        || d[k].assets.some((t) => !t || typeof t.id !== "string" || !t.id))) {
+      throw new Error("Invalid Jupiter Alpha snapshot");
+    }
     a.jupOk = true;
     a.pumpFallback = false;
     pumpStop();
-    for (const k of ALPHA_COL_KEYS) alphaMergeSnap(k, d?.[k]?.assets || []);
+    for (const k of ALPHA_COL_KEYS) alphaMergeSnap(k, d[k].assets);
     alphaSortCols();
     a.at = Date.now();
     feedMark("alphaList");
@@ -4217,7 +4223,8 @@ async function loadAlpha() {
     if (seq !== alphaSeq) return;
     a.jupOk = false;
     a.err = err.message || String(err);
-    // Jupiter feed down: PumpPortal covers New only. Graduating/Graduated stay empty until it recovers.
+    // Snapshot failed: retain the last known lists and any live stream updates.
+    // PumpPortal can supplement New only, still subject to the liquidity gate.
     if (!stream.open || a.src === "recent") { a.pumpFallback = true; pumpConnect(); }
   } finally {
     if (seq === alphaSeq) { a.loading = false; paintAlphaList(); }
@@ -4262,8 +4269,8 @@ function alphaRowsHtml() {
   const feed = a.market === "regular" ? a.regular : a;
   const { list, pending, hidden = 0, checking = 0 } = alphaList();
   const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)${a.market === "regular" ? "<br>Major, Jupiter-verified & wallet-held tokens excepted · excludes current Alpha tokens" : ""}</div>`;
-  const head = note + `<div class="al-count">${feed.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${feed.loading && a.rows.length ? " · refreshing" : ""}${feed.at ? ` · ${new Date(feed.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>`;
-  if (feed.err) return head + `<div class="k" style="padding:16px 0">Couldn't refresh: ${esc(feed.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>`;
+  const warning = feed.err ? `<div class="k" role="status" style="padding:12px 0">${a.rows.length ? "Last known list · " : ""}Couldn't refresh: ${esc(feed.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>` : "";
+  const head = note + `<div class="al-count">${feed.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${feed.loading && a.rows.length ? " · refreshing" : ""}${feed.at ? ` · ${new Date(feed.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>` + warning;
   if (!list.length) {
     if (checking || !a.rows.length || hidden === a.rows.length) return head;
     return head + `<div class="k" style="padding:16px 0">No tokens match these filters.</div>`;
@@ -4313,6 +4320,12 @@ function paintAlphaList() {
   const box = $("#alpha-list");
   if (!box) return;
   box.innerHTML = alphaRowsHtml();
+  bindAlphaRows();
+  paintFilterChrome();
+}
+function bindAlphaRows() {
+  const box = $("#alpha-list");
+  if (!box) return;
   box.querySelectorAll("[data-alpha-open]").forEach((b) => b.onclick = () => {
     state.view = "spot";
     state.tab = "holders";
@@ -4321,7 +4334,6 @@ function paintAlphaList() {
   });
   const r = box.querySelector("[data-alpha-retry]");
   if (r) r.onclick = () => loadMarketFeeds().catch(() => {});
-  paintFilterChrome();
 }
 
 function alphaActiveCount() {
@@ -4477,6 +4489,7 @@ function alphaView() {
 
 function bindAlpha() {
   const a = state.alpha;
+  bindAlphaRows();
   const rerender = () => { saveAlpha(); render(); };
   document.querySelectorAll("[data-market]").forEach((b) => b.onclick = () => {
     if (a.market === b.dataset.market) return;
