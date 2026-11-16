@@ -104,6 +104,12 @@ const state = {
   holdings: [],
   txs: [],
   candles: [],
+  candlesKey: "",
+  candlesTf: "",
+  chartLoading: false,
+  chartError: "",
+  chartRetryAt: 0,
+  chartRateUntil: 0,
   candleTimer: 0,
   tape: [],
   holders: [],
@@ -404,6 +410,11 @@ async function loadToken(query, restored = null) {
     } else applyDefaultTf(hit);
     state.prices[hit.id] = hit.usdPrice;
     state.candles = [];
+    state.candlesKey = "";
+    state.candlesTf = "";
+    state.chartLoading = true;
+    state.chartError = "";
+    state.chartRetryAt = 0;
     state.tape = [];
     state.holders = [];
     state.holdersLoading = true;
@@ -476,34 +487,46 @@ function resolvedTf() {
   if (age < 14 * 86400) return "15m";
   return "1h";
 }
-async function loadCandles() {
+function candleKey() {
+  return (state.active?.id || "") + "|" + (TF_API[resolvedTf()] || "1_MINUTE");
+}
+async function loadCandles(force = false) {
   const t = state.active;
   if (!t) return;
+  if (Date.now() < state.chartRateUntil || (!force && Date.now() < state.chartRetryAt)) return;
   const tf = state.tf;
   const interval = TF_API[resolvedTf()] || "1_MINUTE";
+  const key = candleKey();
   const candles = state.candles;
   // Coalesce only the same chart. An old/hung request must not block a new
   // token, timeframe or history reset, nor clear that newer request on exit.
   if (candleRequest) {
     if (candleRequest.token === t && candleRequest.tf === tf && candleRequest.interval === interval
-        && candleRequest.candles === candles) return;
+        && candleRequest.candles === candles && !force) return;
     candleRequest.controller.abort();
   }
   // While the stream is live the current bar is built from ticks; re-sync with datapi every 5 s.
-  if (state.candles.length && streamLive() && Date.now() - (loadCandles.at || 0) < 5000) return;
+  const full = !candles.length || state.candlesKey !== key;
+  if (!force && !full && streamLive() && Date.now() - (loadCandles.at || 0) < 5000) return;
   loadCandles.at = Date.now();
   const to = new Date().toISOString();
   // First load: 300 candles. After that: just the last 3 (tiny payload) every second.
-  const full = !candles.length;
   const controller = new AbortController();
   const request = { token: t, tf, interval, candles, controller };
   candleRequest = request;
+  state.chartLoading = full || force || !!state.chartError;
+  paintChartStatus();
   const timeout = setTimeout(() => controller.abort(), 12000);
   try {
     const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=${full ? 300 : 3}`, { signal: controller.signal });
     if (candleRequest !== request || state.active !== t || state.tf !== tf || state.candles !== candles
         || (TF_API[resolvedTf()] || "1_MINUTE") !== interval) return;
-    const got = data.candles || [];
+    if (controller.signal.aborted) throw new Error("Chart request timed out.");
+    const got = data?.candles;
+    if (!Array.isArray(got) || got.some((c) => !c || !Number.isFinite(Number(c.time)) || !(Number(c.time) > 0)
+        || [c.open, c.high, c.low, c.close].some((v) => typeof v !== "number" || !Number.isFinite(v) || v < 0))) {
+      throw new Error("Invalid Jupiter candle data");
+    }
     if (full) state.candles = got;
     else {
       for (const c of got) {
@@ -513,12 +536,61 @@ async function loadCandles() {
       }
       if (state.candles.length > 600) state.candles.splice(0, state.candles.length - 600);
     }
+    state.candlesKey = key;
+    state.candlesTf = resolvedTf();
+    state.chartError = "";
+    state.chartRetryAt = 0;
     feedMark("candles");
     setChartData();
+  } catch (err) {
+    if (candleRequest !== request || state.active !== t || state.tf !== tf) return;
+    state.chartError = controller.signal.aborted ? "Chart request timed out." : err.message || "Chart unavailable";
+    state.chartRetryAt = Date.now() + Math.max(5000, err.retryAfterMs || 0);
+    if (err.status === 429) state.chartRateUntil = state.chartRetryAt;
+    throw err;
   } finally {
     clearTimeout(timeout);
-    if (candleRequest === request) candleRequest = null;
+    if (candleRequest === request) {
+      candleRequest = null;
+      state.chartLoading = false;
+      paintChartStatus();
+    }
   }
+}
+function chartLoadHtml() {
+  const previous = state.candles.length && state.candlesKey !== candleKey() ? ` · showing ${esc(state.candlesTf || "previous chart")}` : "";
+  if (state.chartError) return `${esc(state.chartError)}${previous} <button type="button" data-chart-retry ${state.chartLoading || Date.now() < state.chartRateUntil ? "disabled" : ""}>${state.chartLoading ? "Retrying…" : "Retry"}</button>`;
+  if (state.chartLoading) return `Loading ${esc(state.tf)}…${previous}`;
+  return state.active && !state.candles.length ? "No candles yet for this interval." : "";
+}
+function paintChartStatus() {
+  const box = $("#chart-load-status");
+  if (box) {
+    const html = chartLoadHtml();
+    if (box.innerHTML !== html) box.innerHTML = html;
+    const retry = box.querySelector("[data-chart-retry]");
+    if (retry) retry.onclick = () => loadCandles(true).catch(() => {});
+  }
+  $("#chart-wrap")?.setAttribute("aria-busy", String(state.chartLoading));
+  const label = $("#chart-legend .lg-sym");
+  if (label && state.active) label.textContent = `${state.active.symbol}/${state.chartMode === "mc" ? "MC" : "USD"} · ${state.candlesTf || resolvedTf()} · jup.ag`;
+}
+function selectTimeframe(tf) {
+  if (!TFS.includes(tf)) return;
+  if (state.active) state.tfMint = state.active.id;
+  state.tf = tf;
+  state.tfPicked = true;
+  if (Date.now() >= state.chartRateUntil) state.chartError = "";
+  state.chartRetryAt = 0;
+  try { localStorage.setItem("trench-tf", tf); } catch (_) {}
+  // Keep toolbar/chart nodes and horizontal scroll, even on rapid touch taps.
+  document.querySelectorAll("[data-tf]").forEach((button) => {
+    button.classList.toggle("on", button.dataset.tf === tf);
+    button.setAttribute("aria-pressed", String(button.dataset.tf === tf));
+  });
+  queueNavigationSave();
+  paintChartStatus();
+  loadCandles(true).catch(() => {});
 }
 
 function ageLabel(iso) {
@@ -2863,6 +2935,7 @@ function toBars(list) {
 // Full data load (token, interval, or mode change) vs incremental update (polling).
 function setChartData() {
   if (!ensureChart()) return;
+  if (state.candles.length && state.candlesKey !== candleKey()) return;
   const t = state.active;
   const key = (t?.id || "") + "|" + state.tf + "|" + resolvedTf() + "|" + state.chartMode;
   const { bars, vols } = toBars(state.candles);
@@ -2938,6 +3011,7 @@ function paintEntryLine() {
 
 function tickChart(addVolume = 0) {
   const t = state.active;
+  if (state.candlesKey !== candleKey()) return;
   if (!chartUi.candles || !t || !chartUi.lastTime || !state.candles.length) return;
   const price = state.prices[t.id];
   if (!price) return;
@@ -3521,7 +3595,7 @@ function chartToolsHtml() {
   return `<div class="tools" id="draw-tools">${tools.map(([id, label, d]) => `<button type="button" data-tool="${id}" class="${state.tool === id ? "on" : ""}" aria-label="${label}" title="${label}"><svg viewBox="0 0 16 16"><path d="${d}"/></svg></button>`).join("")}</div>`;
 }
 function tfButtons() {
-  return TFS.map((x) => `<button type="button" data-tf="${x}" class="${state.tf === x ? "on" : ""}">${x}</button>`).join("");
+  return TFS.map((x) => `<button type="button" data-tf="${x}" class="${state.tf === x ? "on" : ""}" aria-pressed="${state.tf === x}">${x}</button>`).join("");
 }
 function scaleButtons() {
   return `<span class="scale-btns">${[["pct", "%"], ["log", "log"], ["auto", "auto"]].map(([id, label]) => `<button type="button" data-scale="${id}" class="${state.scaleMode === id ? "on" : ""}">${label}</button>`).join("")}</span>`;
@@ -3877,6 +3951,7 @@ function tokenHead(t, price, chg) {
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
     <div class="tf"><div class="tf-scroll">${tfButtons()}</div><span class="tf-tools"><button type="button" id="chart-style" class="${state.chartStyle === "line" ? "on" : ""}" aria-label="${state.chartStyle === "line" ? "Show candles" : "Show line"}">${styleIcon()}</button><button type="button" id="fx" class="${state.inds.length ? "on" : ""}" aria-label="Indicators">fx</button><button type="button" class="chart-full-btn" id="chart-full" aria-label="Full screen">⤢</button></span></div>
+    <div class="chart-load-status" id="chart-load-status" role="status" aria-live="polite">${chartLoadHtml()}</div>
     <div class="chart-wrap ${state.chartFull ? "full" : ""}" id="chart-wrap" style="height:${state.chartFull ? "auto" : chartHeight() + "px"}">
       ${chartToolsHtml()}
       <div id="chart-slot" class="chart-slot"></div>
@@ -5301,16 +5376,8 @@ function bind() {
     state.scrollToTab = true;
     render();
   });
-  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => {
-    if (state.active) state.tfMint = state.active.id;
-    if (state.tf === b.dataset.tf) return;
-    state.tf = b.dataset.tf;
-    state.tfPicked = true;
-    try { localStorage.setItem("trench-tf", state.tf); } catch (_) {}
-    state.candles = [];
-    render();
-    loadCandles().catch(() => {});
-  });
+  document.querySelectorAll("[data-tf]").forEach((b) => b.onclick = () => selectTimeframe(b.dataset.tf));
+  paintChartStatus();
   document.querySelectorAll("[data-side]").forEach((b) => b.onclick = () => {
     state.side = b.dataset.side;
     state.quote = null;

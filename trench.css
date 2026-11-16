@@ -138,6 +138,8 @@ button { font: inherit; }
   background: none; border: 0; color: var(--muted); font: inherit; padding: 4px 0;
 }
 .tf button.on { color: var(--text); font-weight: 700; }
+.chart-load-status { margin: 0 12px; min-height: 16px; line-height: 16px; font-size: 10px; color: var(--muted); }
+.chart-load-status button { color: var(--text); background: none; border: 0; text-decoration: underline; font-size: inherit; }
 .chart-wrap { position: relative; height: 260px; margin: 0 4px; padding-bottom: 14px; box-sizing: border-box; }
 .tools {
   position: absolute; left: 0; top: 24px; z-index: 6;
