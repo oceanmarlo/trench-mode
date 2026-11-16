@@ -407,13 +407,13 @@ async function loadToken(query) {
 
 // datapi.jup.ag is Jupiter's public data host (charts, trades, holders). It does not
 // take the API key and does not count against the key's budget.
-async function datapi(url) {
-  const res = await fetch(url, { cache: "no-store" });
+async function datapi(url, opts = {}) {
+  const res = await fetch(url, { cache: "no-store", ...opts });
   if (!res.ok) throw new Error("datapi " + res.status);
   return res.json();
 }
 
-let candleBusy = false;
+let candleRequest = null;
 // A seconds-old coin on 1m or a saved 1D is one candle and hides the launch.
 // Auto (15s under 30 min) until the user picks a timeframe on that mint.
 // An older coin keeps the saved timeframe.
@@ -449,19 +449,31 @@ function resolvedTf() {
 }
 async function loadCandles() {
   const t = state.active;
-  if (!t || candleBusy) return;
+  if (!t) return;
+  const tf = state.tf;
+  const interval = TF_API[resolvedTf()] || "1_MINUTE";
+  const candles = state.candles;
+  // Coalesce only the same chart. An old/hung request must not block a new
+  // token, timeframe or history reset, nor clear that newer request on exit.
+  if (candleRequest) {
+    if (candleRequest.token === t && candleRequest.tf === tf && candleRequest.interval === interval
+        && candleRequest.candles === candles) return;
+    candleRequest.controller.abort();
+  }
   // While the stream is live the current bar is built from ticks; re-sync with datapi every 5 s.
   if (state.candles.length && streamLive() && Date.now() - (loadCandles.at || 0) < 5000) return;
   loadCandles.at = Date.now();
-  const tf = state.tf;
-  const interval = TF_API[resolvedTf()] || "1_MINUTE";
   const to = new Date().toISOString();
   // First load: 300 candles. After that: just the last 3 (tiny payload) every second.
-  const full = !state.candles.length;
-  candleBusy = true;
+  const full = !candles.length;
+  const controller = new AbortController();
+  const request = { token: t, tf, interval, candles, controller };
+  candleRequest = request;
+  const timeout = setTimeout(() => controller.abort(), 12000);
   try {
-    const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=${full ? 300 : 3}`);
-    if (state.active !== t || state.tf !== tf) return;
+    const data = await datapi(`https://datapi.jup.ag/v2/charts/${t.id}?interval=${interval}&to=${encodeURIComponent(to)}&candles=${full ? 300 : 3}`, { signal: controller.signal });
+    if (candleRequest !== request || state.active !== t || state.tf !== tf || state.candles !== candles
+        || (TF_API[resolvedTf()] || "1_MINUTE") !== interval) return;
     const got = data.candles || [];
     if (full) state.candles = got;
     else {
@@ -474,7 +486,10 @@ async function loadCandles() {
     }
     feedMark("candles");
     setChartData();
-  } finally { candleBusy = false; }
+  } finally {
+    clearTimeout(timeout);
+    if (candleRequest === request) candleRequest = null;
+  }
 }
 
 function ageLabel(iso) {
