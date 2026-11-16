@@ -84,7 +84,7 @@ const state = {
   trailMark: {},
   stopLive: {},
   results: [],
-  spotScan: { kind: "trending", rows: [], loading: false, err: "" },
+  spotScan: { kind: "trending", rowsKind: "trending", rows: [], loading: false, err: "" },
   toast: null,
   status: "Connecting to Jupiter…",
   wallet: null,
@@ -628,8 +628,10 @@ function spotScanHtml() {
   const { list, hidden, checking } = spotScanParts();
   const note = `<div class="al-lpnote">Only coins whose liquidity can't be pulled · ${hidden} hidden (${checking} checking)</div>`;
   const chips = `<div class="chips scan-chips">${SPOT_LISTS.map(([k, l]) => `<button type="button" data-scan="${k}" class="${s.kind === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
-  const body = s.loading && !s.rows.length ? `<div class="k">Loading…</div>` : s.err && !s.rows.length ? `<div class="k">${esc(s.err)}</div>` : list.map(({ t, g }) => `<button class="row" data-pick="${t.id}" data-liq="${g}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> <span>${usd(t.mcap)}</span></button>`).join("");
-  return chips + note + body;
+  const warning = s.err ? `<div class="k" role="status" style="padding:12px 0">${s.rows.length ? "Last known list · " : ""}Couldn't refresh: ${esc(s.err)} <button type="button" class="copy" data-scan-retry>Retry</button></div>` : "";
+  const rows = list.map(({ t, g }) => `<button class="row" data-pick="${t.id}" data-liq="${g}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> <span>${usd(t.mcap)}</span></button>`).join("");
+  const body = s.loading && !s.rows.length ? `<div class="k" role="status">Loading…</div>` : rows || (!s.err ? `<div class="k">No eligible tokens in this list.</div>` : "");
+  return chips + note + warning + body;
 }
 function paintScan() {
   const box = $("#results");
@@ -638,24 +640,34 @@ function paintScan() {
   if ((state.searchQ || "").trim().length >= 2) { paintResults(); return; }
   box.innerHTML = spotScanHtml();
   box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
-  box.querySelectorAll("[data-scan]").forEach((b) => b.onclick = () => {
+  bindScan();
+}
+function bindScan() {
+  document.querySelectorAll("[data-scan]").forEach((b) => b.onclick = () => {
     if (state.spotScan.kind === b.dataset.scan) return;
     state.spotScan.kind = b.dataset.scan;
     loadSpotScan().catch(() => {});
   });
+  const retry = $("[data-scan-retry]");
+  if (retry) retry.onclick = () => loadSpotScan().catch(() => {});
 }
 let spotScanSeq = 0;
 async function loadSpotScan() {
   const s = state.spotScan;
   const seq = ++spotScanSeq;
+  const kind = s.kind;
+  // Never present Trending's snapshot under Top (or vice versa), even if the
+  // new request fails. Same-list refreshes may retain explicitly stale rows.
+  if (s.rowsKind !== kind) { s.rows = []; s.rowsKind = kind; }
   s.loading = true;
   s.err = "";
   paintScan();
   try {
-    const path = s.kind === "top" ? "toptraded" : "toptrending";
+    const path = kind === "top" ? "toptraded" : "toptrending";
     const list = await jup("https://api.jup.ag/tokens/v2/" + path + "/1h");
     if (seq !== spotScanSeq) return;
-    s.rows = Array.isArray(list) ? list : [];
+    if (!Array.isArray(list) || list.some((t) => !t || typeof t.id !== "string" || !t.id)) throw new Error("Invalid Jupiter token list");
+    s.rows = list;
   } catch (err) {
     if (seq !== spotScanSeq) return;
     s.err = err.message || String(err);
@@ -5298,6 +5310,7 @@ function bind() {
   const sc = $("#search-close");
   if (sc) sc.onclick = () => { closeSearch(); render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
+  bindScan();
   bindChartResize();
   $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
   document.querySelectorAll(".chart-full-btn").forEach((cf) => cf.onclick = () => { state.chartFull = !state.chartFull; render(); });
