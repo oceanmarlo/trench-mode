@@ -385,6 +385,10 @@ async function loadToken(query) {
     || (list || [])[0];
   if (!hit) throw new Error("No token found for " + q);
   state.active = hit;
+  noteHolderCount(hit, hit.holderCount);
+  holdersRefresh.at = 0;
+  holdersRefresh.next = 0;
+  holdersRefresh.failures = 0;
   applyDefaultTf(hit);
   state.prices[hit.id] = hit.usdPrice;
   state.candles = [];
@@ -410,7 +414,13 @@ async function loadToken(query) {
 // take the API key and does not count against the key's budget.
 async function datapi(url, opts = {}) {
   const res = await fetch(url, { cache: "no-store", ...opts });
-  if (!res.ok) throw new Error("datapi " + res.status);
+  if (!res.ok) {
+    const err = new Error("datapi " + res.status);
+    err.status = res.status;
+    const retry = res.headers.get("retry-after");
+    err.retryAfterMs = retry == null ? 0 : Math.max(0, Number.isFinite(Number(retry)) ? Number(retry) * 1000 : Date.parse(retry) - Date.now()) || 0;
+    throw err;
+  }
   return res.json();
 }
 
@@ -515,16 +525,46 @@ async function loadTape(force = false) {
 }
 
 let holdersRequest = null;
+const holderCounts = new Map();
+const holdersRefresh = { at: 0, next: 0, failures: 0, rateUntil: 0 };
+function validHolderCount(n) {
+  return Number.isSafeInteger(n) && n >= 0;
+}
+function holderCountOf(t) {
+  return holderCounts.get(t?.id)?.count ?? (validHolderCount(t?.holderCount) ? t.holderCount : null);
+}
+function noteHolderCount(t, count) {
+  if (!t?.id || !validHolderCount(count)) return;
+  t.holderCount = count;
+  holderCounts.delete(t.id);
+  holderCounts.set(t.id, { count, at: Date.now() });
+  if (holderCounts.size > 1000) holderCounts.delete(holderCounts.keys().next().value);
+}
+// This keyless data host has its own backoff, independent of the keyed swap queue.
+async function refreshVisibleHolders() {
+  if (document.hidden || state.view !== "spot" || !state.active) return;
+  paintHolderCounts();
+  if (Date.now() < holdersRefresh.next || Date.now() < holdersRefresh.rateUntil) return;
+  await loadHolders();
+}
+function startHolderRefresh() {
+  const tick = async () => {
+    try { await refreshVisibleHolders(); } catch (_) {}
+    setTimeout(tick, 250);
+  };
+  setTimeout(tick, 250);
+}
 async function loadHolders() {
   const t = state.active;
   if (!t) return;
+  if (Date.now() < holdersRefresh.rateUntil) return;
   if (holdersRequest) {
     if (holdersRequest.token === t) return;
     clearTimeout(holdersRequest.timeout);
     holdersRequest.controller.abort();
   }
   const controller = new AbortController();
-  const request = { token: t, controller, timeout: setTimeout(() => controller.abort(), 12000) };
+  const request = { token: t, controller, countRecord: holderCounts.get(t.id), started: Date.now(), timeout: setTimeout(() => controller.abort(), 12000) };
   holdersRequest = request;
   state.holdersLoading = true;
   // Retain the last-known warning through a retry until a valid snapshot arrives.
@@ -539,10 +579,19 @@ async function loadHolders() {
       throw new Error("Invalid Jupiter holder data");
     }
     state.holders = data.holders;
+    // A count pushed while this snapshot was in flight wins over the older request.
+    if (holderCounts.get(t.id) === request.countRecord) noteHolderCount(t, data.count);
+    holdersRefresh.at = Date.now();
+    holdersRefresh.failures = 0;
+    holdersRefresh.next = request.started + 2000;
+    feedMark("holdersPoll");
     state.holdersError = "";
   } catch (err) {
     if (holdersRequest !== request || state.active !== t) return;
     state.holdersError = controller.signal.aborted ? "Holder request timed out." : err.message || "Holder data unavailable";
+    const delay = Math.max(err.retryAfterMs || 0, Math.min(30000, 2000 * 2 ** Math.min(++holdersRefresh.failures, 4)));
+    holdersRefresh.next = Date.now() + delay;
+    if (err.status === 429) holdersRefresh.rateUntil = holdersRefresh.next;
   } finally {
     clearTimeout(request.timeout);
     if (holdersRequest === request) {
@@ -1920,6 +1969,7 @@ function holdPnlHtml(d, pct) {
 }
 function paintLive() {
   const t = state.active;
+  paintHolderCounts();
   const pf = $("#pf-total");
   if (pf) pf.textContent = usd(portfolioValue());
   const solRow = $("[data-pf-sol]");
@@ -3571,9 +3621,10 @@ function holderMarks(h, token) {
 }
 function holderRows() {
   const t = state.active || {};
-  const warning = state.holdersError ? `<div class="holder-warning k" role="status">${state.holders.length ? "Last known holders · " : ""}Couldn't refresh holders: ${esc(state.holdersError)}<button type="button" class="copy holder-retry" data-holders-retry ${state.holdersLoading ? "disabled" : ""}>${state.holdersLoading ? "Refreshing…" : "Retry"}</button></div>` : "";
+  const limited = Date.now() < holdersRefresh.rateUntil;
+  const warning = state.holdersError ? `<div class="holder-warning k" role="status">${state.holders.length ? "Last known holders · " : ""}Couldn't refresh holders: ${esc(state.holdersError)}<button type="button" class="copy holder-retry" data-holders-retry ${state.holdersLoading || limited ? "disabled" : ""}>${state.holdersLoading ? "Refreshing…" : limited ? "Rate limited…" : "Retry"}</button></div>` : "";
   if (!state.holders.length) {
-    const msg = state.holdersLoading ? "Loading holders…" : (t.holderCount === 0 ? "No holders yet." : "Addresses not in yet.");
+    const msg = state.holdersLoading ? "Loading holders…" : (holderCountOf(t) === 0 ? "No holders yet." : "Addresses not in yet.");
     return warning || `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
   }
   return warning + state.holders.slice(0, 40).map((h, i) => {
@@ -3582,13 +3633,56 @@ function holderRows() {
     const who = addr
       ? `<a class="haddr" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" data-copy="${esc(addr)}">${esc(shortAddr(addr))}</a>${tags}`
       : `<span class="haddr">—</span>`;
-    return `<div class="hrow"><span class="hrank">${i + 1}</span><span class="hwho">${who}</span><span class="hpct">${holderPctText(holderPct(h, t))}</span><span class="hamt">${holderAmt(h.amount)}</span></div>`;
+    return `<div class="hrow" data-holder-address="${esc(addr)}"><span class="hrank">${i + 1}</span><span class="hwho">${who}</span><span class="hpct">${holderPctText(holderPct(h, t))}</span><span class="hamt">${holderAmt(h.amount)}</span></div>`;
   }).join("");
 }
+function patchHolderRows(box, html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const old = new Map([...box.children].map((el) => [el.dataset.holderAddress || el.className, el]));
+  const keep = new Set();
+  [...template.content.children].forEach((next, i) => {
+    const el = old.get(next.dataset.holderAddress || next.className) || next;
+    if (el !== next && el.innerHTML !== next.innerHTML) {
+      if (el.dataset.holderAddress) {
+        [...next.children].forEach((cell, j) => {
+          if (el.children[j].innerHTML !== cell.innerHTML) el.children[j].innerHTML = cell.innerHTML;
+        });
+      } else el.innerHTML = next.innerHTML;
+    }
+    keep.add(el);
+    if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+  });
+  [...box.children].forEach((el) => { if (!keep.has(el)) el.remove(); });
+}
+function paintHolderCounts() {
+  const t = state.active;
+  if (!t) return;
+  const count = holderCountOf(t);
+  const text = count == null ? "—" : count.toLocaleString();
+  document.querySelectorAll("[data-holder-count], [data-sf='holders']").forEach((el) => {
+    if (el.textContent !== text) el.textContent = text;
+  });
+  const compact = count == null ? "—" : compactCount(count);
+  document.querySelectorAll("[data-holder-compact]").forEach((el) => {
+    if (el.textContent !== compact) el.textContent = compact;
+  });
+  const top = t.audit?.topHoldersPercentage;
+  const topEl = $("[data-holder-top]");
+  if (topEl) topEl.textContent = Number.isFinite(top) ? top.toFixed(2) + "%" : "—";
+  const status = $("[data-holders-status]");
+  if (status) {
+    const stale = !holdersRefresh.at || Date.now() - holdersRefresh.at > 5000;
+    const label = state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
+    if (status.textContent !== label) status.textContent = label;
+    status.classList.toggle("updating", state.holdersLoading || stale || !!state.holdersError);
+  }
+}
 function paintHolders() {
+  paintHolderCounts();
   const box = $("#holder-list");
   if (!box || state.view !== "spot" || state.tab !== "holders") return;
-  box.innerHTML = holderRows();
+  patchHolderRows(box, holderRows());
   box.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
@@ -3641,7 +3735,7 @@ function render() {
       ${t ? tokenHead(t, price, chg) : `<div class="panel">${esc(state.status || "Search a token to trade.")}</div>`}
       ${t ? `<div class="panel trade-dock" id="trade-dock">${tradePanel()}</div>` : ""}
       <div class="tabs" role="tablist" aria-label="Token details">
-        ${[["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" && t?.holderCount ? ` <span class="tab-n">${compactCount(t.holderCount)}</span>` : ""}</button>`).join("")}
+        ${[["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" ? ` <span class="tab-n" data-holder-compact>${holderCountOf(t) == null ? "—" : compactCount(holderCountOf(t))}</span>` : ""}</button>`).join("")}
       </div>
       <div class="panel">${panel()}</div>`}
     </div>
@@ -4024,7 +4118,7 @@ function alphaFields(t, iv) {
       : (Number(volSt.buyVolume) || 0) + (Number(volSt.sellVolume) || 0),
     chg: st.priceChange ?? null,
     ageH: born ? (Date.now() - new Date(born).getTime()) / 3.6e6 : null,
-    holders: t.holderCount ?? null,
+    holders: holderCountOf(t),
     top10: a.topHoldersPercentage ?? null,
     dev: a.devBalancePercentage ?? null,
     score: t.organicScore ?? null,
@@ -4725,7 +4819,7 @@ function holdersPanel() {
     ? `<a class="bubblemaps" href="https://app.bubblemaps.io/sol/token/${esc(mint)}" target="_blank" rel="noopener noreferrer">Bubblemaps</a>`
     : "";
   return `<div class="holder-stats holder-head">
-      <div>Holders: ${Number.isFinite(t.holderCount) && t.holderCount >= 0 ? t.holderCount.toLocaleString() : "—"} &nbsp; Top 10: <span class="down">${Number.isFinite(top) ? top.toFixed(2) + "%" : "—"}</span></div>
+      <div>Holders: <span data-holder-count>${holderCountOf(t) == null ? "—" : holderCountOf(t).toLocaleString()}</span> &nbsp; Top 10: <span class="down" data-holder-top>${Number.isFinite(top) ? top.toFixed(2) + "%" : "—"}</span><small class="holder-live" data-holders-status>Updating…</small></div>
       ${bubble}
     </div>
     <div class="hcols"><span>#</span><span>Address</span><span>Supply</span><span>Amount</span></div>
@@ -4951,7 +5045,7 @@ function sheetVals() {
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
     price: (() => { const px = livePrice(t); return px == null ? "—" : priceLabel(px); })(), fdv: t.fdv > 0 ? usd(t.fdv) : (t.mcap > 0 ? usd(t.mcap) : "—"), liq: usd(t.liquidity),
-    holders: t.holderCount != null ? Number(t.holderCount).toLocaleString() : "—",
+    holders: holderCountOf(t) == null ? "—" : holderCountOf(t).toLocaleString(),
     fees: solAmt(t.fees),
     curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
     curveOn,
@@ -6020,6 +6114,9 @@ function onStreamAssets(list) {
   for (const u of list) {
     const t = u?.asset;
     if (!t?.id) continue;
+    noteHolderCount(t, t.holderCount);
+    // Null/omitted counts in partial frames are not a drop to zero/unknown.
+    if (holderCountOf(t) != null) t.holderCount = holderCountOf(t);
     if (a && t.id === a.id) {
       const fees = a.fees;
       const curve = a.bondingCurve, gradAt = a.graduatedAt, gradPool = a.graduatedPool;
@@ -6120,7 +6217,8 @@ async function boot() {
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
-    every(30000, () => Promise.all([loadHolders().catch(() => {}), state.wallet ? loadHoldings() : null]));
+    startHolderRefresh();
+    every(30000, () => state.wallet ? loadHoldings() : null);
     every(20000, () => refreshStopLive());
   } catch (err) {
     state.status = err.message || String(err);
