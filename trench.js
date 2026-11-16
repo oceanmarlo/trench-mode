@@ -50,7 +50,7 @@ const SWAP = "https://api.jup.ag/swap/v2";
 const PRICE = "https://api.jup.ag/price/v3";
 const RPC = (window.HELIUS_API_KEY && !/[?&]nohelius=1/.test(location.search)) ? "https://mainnet.helius-rpc.com/?api-key=" + encodeURIComponent(window.HELIUS_API_KEY) : "https://solana-rpc.publicnode.com";
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VeKKdPT7yHdmnMvEGB4ryFHSZH9Ee"];
-const PRICE_EVERY_MS = 2500;   // keyed price poll, ONLY used while the stream is down (keeps <= 1 req / 2 s)
+const PRICE_EVERY_MS = 2500;   // per-mint fallback only when its live feed is stale; others batch every 15 s
 const QUOTE_EVERY_MS = 12000;  // background order refresh
 const FEED_EVERY_MS = 1000;    // datapi chart refresh (separate host, no key budget); trades poll only if stream is down
 const TFS = ["Auto", "1s", "15s", "1m", "3m", "5m", "15m", "30m", "1h", "4h", "1D"];
@@ -336,23 +336,32 @@ function jupHeaders(url, h = {}) {
 // the free plan (1 RPS, 60 s sliding window). /swap/v2/execute has its own bucket.
 const MAIN_GAP_MS = 2150; // hard floor: <= 1 keyed request per 2 s (with jitter margin)
 let coolUntil = 0;
+let mainRateFailures = 0;
 let lastMain = 0;
 let mainChain = Promise.resolve();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isMain = (url) => String(url).startsWith("https://api.jup.ag/") && !String(url).startsWith(SWAP + "/execute");
 
 function rateNote(res) {
-  const rem = Number(res.headers.get("x-ratelimit-remaining"));
+  const remaining = res.headers.get("x-ratelimit-remaining");
   const reset = Number(res.headers.get("x-ratelimit-reset"));
-  if (res.status === 429 || (Number.isFinite(rem) && rem <= 0)) {
-    const until = Number.isFinite(reset) && reset > 1e9 ? reset * 1000 : Date.now() + 10000;
-    coolUntil = Math.max(coolUntil, Math.min(until, Date.now() + 60000), Date.now() + 2000);
+  const retry = res.headers.get("retry-after");
+  // An absent header is not zero remaining. Only this REST queue backs off;
+  // stream prices and Holding paints must never wait for its cooldown.
+  if (res.status === 429 || (remaining != null && remaining !== "" && Number(remaining) <= 0)) {
+    const now = Date.now();
+    const retryAt = retry == null ? 0 : Number.isFinite(Number(retry)) ? now + Number(retry) * 1000 : Date.parse(retry) || 0;
+    const resetAt = Number.isFinite(reset) && reset > 1e9 ? reset * 1000 : 0;
+    const delay = Math.min(30000, 2500 * 2 ** Math.min(mainRateFailures++, 4));
+    coolUntil = Math.max(coolUntil, retryAt, resetAt, now + delay);
+  } else if (res.ok) {
+    mainRateFailures = 0;
   }
 }
 
 async function rawFetch(url, opts) {
   const res = await fetch(url, { cache: "no-store", ...opts, headers: jupHeaders(url, opts.headers || {}) });
-  rateNote(res);
+  if (isMain(url)) rateNote(res);
   return res;
 }
 
@@ -864,11 +873,19 @@ async function loadSpotScan() {
 
 let pricePollPromise = null;
 let pricePollMints = new Set();
+const priceReceivedAt = {};
+const priceRevision = {};
+const pricePolledAt = {};
 async function pollPrices(force = false) {
-  if (!force && streamPricesLive()) return; // prices arrive over the stream
-  const ids = new Set([SOL]);
-  if (state.active) ids.add(state.active.id);
-  state.holdings.forEach((h) => ids.add(h.mint));
+  const now = Date.now();
+  const wanted = new Set([state.active?.id, SOL, ...state.holdings.map((h) => h.mint)].filter(Boolean));
+  const ids = new Set([...wanted].filter((mint) => {
+    if (force) return true;
+    // SOL ticks must not suppress fallback for a silent open token or wallet row.
+    const interval = mint === state.active?.id ? PRICE_EVERY_MS : 15000;
+    return now - (priceReceivedAt[mint] || 0) >= interval && now - (pricePolledAt[mint] || 0) >= interval;
+  }));
+  if (!ids.size) return;
   // Large wallets need multiple queued batches; timer ticks must not pile up duplicates.
   if (pricePollPromise) {
     if ([...ids].every((id) => pricePollMints.has(id))) return pricePollPromise;
@@ -884,10 +901,16 @@ async function pollPriceBatches(all) {
   const t0 = performance.now();
   // price/v3 takes up to 50 ids per call; every batch still uses jup()'s rate queue.
   for (let i = 0; i < all.length; i += 50) {
-    const data = await jup(PRICE + "?ids=" + all.slice(i, i + 50).join(","));
+    const batch = all.slice(i, i + 50);
+    const versions = new Map(batch.map((mint) => [mint, priceRevision[mint] || 0]));
+    batch.forEach((mint) => { pricePolledAt[mint] = Date.now(); });
+    const data = await jup(PRICE + "?ids=" + batch.join(","));
     for (const [mint, row] of Object.entries(data || {})) {
+      if (!versions.has(mint)) continue;
+      if ((priceRevision[mint] || 0) !== versions.get(mint) && !(row?.blockId > (priceSlot[mint] || 0))) continue;
       if (row?.usdPrice) notePrice(mint, row.usdPrice, row.blockId, "poll");
     }
+    paintLive(); // Do not wait on every other wallet batch before repricing the open coin.
   }
   if (state.active && state.prices[state.active.id]) {
     state.active.usdPrice = state.prices[state.active.id];
@@ -2044,8 +2067,8 @@ function pnlText(d, pct) {
   const pctBit = Number.isFinite(pct) ? sheetPct(pct) : "—";
   return "uPnL " + (d < 0 ? "-" : d > 0 ? "+" : "") + mag + " (" + pctBit + ")";
 }
-function holdPnlHtml(d, pct) {
-  if (!Number.isFinite(d) || !Number.isFinite(pct)) return "<b>—</b><span>—</span>";
+function holdPnlParts(d, pct) {
+  if (!Number.isFinite(d) || !Number.isFinite(pct)) return { money: "—", percent: "—", dollarClass: "", percentClass: "" };
   const text = usd(d);
   const money = d > 0 ? "+" + text : text;
   let pctHtml = "—";
@@ -2056,7 +2079,20 @@ function holdPnlHtml(d, pct) {
     while (dig < 6 && Number(av.toFixed(dig)) === 0) dig++;
     if (Number(av.toFixed(dig)) !== 0) pctHtml = (pct >= 0 ? "▲ " : "▼ ") + av.toFixed(dig) + "%";
   }
-  return `<b class="${cls(d)}">${money}</b><span class="${cls(pct)}">${pctHtml}</span>`;
+  return { money, percent: pctHtml, dollarClass: cls(d), percentClass: cls(pct) };
+}
+function holdPnlHtml(d, pct) {
+  const p = holdPnlParts(d, pct);
+  return `<b${p.dollarClass ? ` class="${p.dollarClass}"` : ""}>${p.money}</b><span${p.percentClass ? ` class="${p.percentClass}"` : ""}>${p.percent}</span>`;
+}
+function paintHoldingPnl(node, d, pct) {
+  const p = holdPnlParts(d, pct);
+  if (node.children.length !== 2) node.innerHTML = holdPnlHtml(d, pct);
+  for (const [child, text, className] of [[node.children[0], p.money, p.dollarClass], [node.children[1], p.percent, p.percentClass]]) {
+    if (child.textContent !== text) child.textContent = text;
+    if (className) { if (child.className !== className) child.className = className; }
+    else child.removeAttribute("class");
+  }
 }
 function paintLive() {
   const t = state.active;
@@ -2136,8 +2172,8 @@ function paintLive() {
     const pn = $(".pnl", row);
     if (hn) hn.textContent = usd(value);
     if (pn) {
-      if (!(entry > 0) || !(price > 0)) pn.innerHTML = "<b>—</b><span>—</span>";
-      else pn.innerHTML = holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
+      if (!(entry > 0) || !(price > 0)) paintHoldingPnl(pn, null, null);
+      else paintHoldingPnl(pn, value - h.ui * entry, ((price - entry) / entry) * 100);
     }
   });
   tickChart();
@@ -5857,17 +5893,19 @@ function actionSlot(x) {
   return Number(id.slice(0, id.length - 9)) || 0;
 }
 function notePrice(mint, price, slot, source) {
-  if (!mint || !(price > 0)) return false;
+  if (!mint || typeof price !== "number" || !Number.isFinite(price) || !(price > 0)) return false;
   const s = Number(slot) || 0;
   const prev = priceSlot[mint] || 0;
   if (s && prev && s < prev) return false;
   if (!s && prev) {
     const fallback = source === "poll" || source === "holdings";
     const helLive = !!(HKEY && hel.lastAt && Date.now() - hel.lastAt < 8000 && hel.tracks.some((t) => t.mint === mint));
-    if (!fallback || helLive || streamPricesLive()) return false;
+    if (!fallback || helLive || (state.prices[mint] > 0 && Date.now() - (priceReceivedAt[mint] || 0) < 4000)) return false;
   }
   if (s) priceSlot[mint] = s;
   state.prices[mint] = price;
+  priceReceivedAt[mint] = Date.now();
+  priceRevision[mint] = (priceRevision[mint] || 0) + 1;
   if (state.active && state.active.id === mint) hel.shown = { slot: s || prev, source: source || "", at: Date.now() };
   return true;
 }
