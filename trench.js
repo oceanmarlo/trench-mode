@@ -375,39 +375,57 @@ async function jup(url, opts = {}) {
 }
 
 let loadSeq = 0;
-async function loadToken(query) {
+async function loadToken(query, restored = null) {
   const seq = ++loadSeq;
+  if (!restored && navigation.restoring) {
+    ++navigation.seq;
+    navigation.restoring = false;
+    navigation.scrollTarget = null;
+  }
+  navigation.tokenPending = seq;
   const q = String(query).trim();
-  const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(q));
-  if (seq !== loadSeq) return;
-  const hit = (list || []).find((t) => t.id === q)
-    || (list || []).find((t) => t.symbol?.toLowerCase() === q.toLowerCase())
-    || (list || [])[0];
-  if (!hit) throw new Error("No token found for " + q);
-  state.active = hit;
-  noteHolderCount(hit, hit.holderCount);
-  holdersRefresh.at = 0;
-  holdersRefresh.next = 0;
-  holdersRefresh.failures = 0;
-  applyDefaultTf(hit);
-  state.prices[hit.id] = hit.usdPrice;
-  state.candles = [];
-  state.tape = [];
-  state.holders = [];
-  state.holdersLoading = true;
-  state.holdersError = "";
-  state.quote = null;
-  state.samples = [hit.usdPrice];
-  state.status = "Live · Jupiter";
-  state.scrollTop = 0;
-  render();
-  heliusTrack(hit);
-  state.tapeIds = new Set();
-  streamSync();
-  loadCandles().catch(() => {});
-  loadTape(true).catch(() => {});
-  loadHolders().catch(() => {});
-  scheduleQuote(0);
+  try {
+    const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(q));
+    if (seq !== loadSeq) return;
+    const hit = (list || []).find((t) => t.id === q)
+      || (list || []).find((t) => t.symbol?.toLowerCase() === q.toLowerCase())
+      || (list || [])[0];
+    if (!hit) throw new Error("No token found for " + q);
+    state.active = hit;
+    navigation.failed = false;
+    noteHolderCount(hit, hit.holderCount);
+    holdersRefresh.at = 0;
+    holdersRefresh.next = 0;
+    holdersRefresh.failures = 0;
+    if (restored?.tf) {
+      state.tf = restored.tf;
+      state.tfMint = hit.id;
+      state.tfPicked = true;
+    } else applyDefaultTf(hit);
+    state.prices[hit.id] = hit.usdPrice;
+    state.candles = [];
+    state.tape = [];
+    state.holders = [];
+    state.holdersLoading = true;
+    state.holdersError = "";
+    state.quote = null;
+    state.samples = [hit.usdPrice];
+    state.status = "Live · Jupiter";
+    state.scrollTop = restored?.scroll || 0;
+    render();
+    heliusTrack(hit);
+    state.tapeIds = new Set();
+    streamSync();
+    loadCandles().catch(() => {});
+    loadTape(true).catch(() => {});
+    loadHolders().catch(() => {});
+    scheduleQuote(0);
+  } finally {
+    if (navigation.tokenPending === seq) {
+      navigation.tokenPending = 0;
+      queueNavigationSave();
+    }
+  }
 }
 
 // datapi.jup.ag is Jupiter's public data host (charts, trades, holders). It does not
@@ -741,6 +759,7 @@ function bindScan() {
   document.querySelectorAll("[data-scan]").forEach((b) => b.onclick = () => {
     if (state.spotScan.kind === b.dataset.scan) return;
     state.spotScan.kind = b.dataset.scan;
+    queueNavigationSave();
     loadSpotScan().catch(() => {});
   });
   const retry = $("[data-scan-retry]");
@@ -3687,6 +3706,7 @@ function paintHolders() {
     navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
   });
   bindHoldersRetry();
+  restoreNavigationScroll();
 }
 function bindHoldersRetry() {
   const retry = $("[data-holders-retry]");
@@ -3765,6 +3785,12 @@ function render() {
   state.revealQuote = false;
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
   if (state.marketOpen) placeOrderMenu();
+  restoreNavigationScroll();
+  if (sc) sc.addEventListener("scroll", () => {
+    clearTimeout(navigation.scrollTimer);
+    navigation.scrollTimer = setTimeout(() => saveNavigation("replace"), 150);
+  }, { passive: true });
+  queueNavigationSave();
 }
 
 function tokenAge(iso) {
@@ -4417,6 +4443,7 @@ function paintAlphaList() {
   box.innerHTML = alphaRowsHtml();
   bindAlphaRows();
   paintFilterChrome();
+  restoreNavigationScroll();
 }
 function bindAlphaRows() {
   const box = $("#alpha-list");
@@ -5459,7 +5486,7 @@ function bind() {
   if (so) so.onclick = () => openSearch();
   const q = $("#q");
   if (q) {
-    q.oninput = () => search(q.value.trim());
+    q.oninput = () => { search(q.value.trim()); saveNavigation("replace"); };
     q.onkeydown = (e) => {
       if (e.key === "Enter" && q.value.trim()) pick((state.results[0] && state.results[0].id) || q.value.trim());
     };
@@ -6196,6 +6223,129 @@ function paintHeadStats() {
     : "—";
 }
 
+// Shareable GitHub Pages routes. Never persist wallet, quote or order credentials.
+const NAV_KEY = "trench-navigation-v1";
+const navigation = { ready: false, restoring: false, failed: false, tokenPending: 0, timer: 0, scrollTimer: 0, seq: 0, scrollTarget: null, location: "" };
+function cleanNavigation(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.token !== "string" || !/^[a-zA-Z0-9]{1,64}$/.test(raw.token)) return null;
+  const one = (value, allowed, fallback) => allowed.includes(value) ? value : fallback;
+  return {
+    token: raw.token, view: one(raw.view, ["spot", "alpha", "portfolio"], "spot"),
+    tab: one(raw.tab, ["holders", "tx", "holdings"], "holders"), tf: one(raw.tf, TFS, ""),
+    market: one(raw.market, ["alpha", "regular"], "alpha"), src: one(raw.src, ALPHA_COL_KEYS, "recent"),
+    list: one(raw.list, ["trending", "top"], "trending"), sort: one(raw.sort, ["feed", ...ALPHA_SORTS.map(([id]) => id)], "feed"),
+    dir: one(raw.dir, ["asc", "desc"], "desc"), iv: one(raw.iv, ALPHA_IVS, "24h"),
+    scan: one(raw.scan, ["trending", "top"], "trending"), search: raw.search === "1" ? "1" : "0",
+    q: typeof raw.q === "string" ? raw.q.slice(0, 100) : "",
+    scroll: Number.isFinite(raw.scroll) ? Math.max(0, Math.min(1000000, raw.scroll)) : 0
+  };
+}
+function navigationHash(route) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(route)) if (key !== "scroll") params.set(key, String(value));
+  return "#" + params.toString();
+}
+function currentNavigation() {
+  return cleanNavigation({token: state.active?.id, view: state.view, tab: state.tab, tf: state.tf,
+    market: state.alpha.market, src: state.alpha.src, list: state.alpha.regular.kind,
+    sort: state.alpha.sort, dir: state.alpha.dir, iv: state.alpha.iv, scan: state.spotScan.kind,
+    search: state.searchOpen ? "1" : "0", q: state.searchQ, scroll: $(".scroll")?.scrollTop || 0});
+}
+function readNavigation() {
+  let saved = null;
+  try { saved = cleanNavigation(JSON.parse(localStorage.getItem(NAV_KEY))); } catch (_) {}
+  const hash = cleanNavigation(Object.fromEntries(new URLSearchParams(location.hash.slice(1))));
+  const query = cleanNavigation(Object.fromEntries(new URLSearchParams(location.search)));
+  const route = hash || query;
+  if (!route) return saved || cleanNavigation({ token: "BONK" });
+  const previous = cleanNavigation(history.state?.trenchRoute) || saved;
+  if (previous && navigationHash(previous) === navigationHash(route)) route.scroll = previous.scroll;
+  return route;
+}
+function saveNavigation(mode = "push") {
+  if (!navigation.ready || navigation.restoring || navigation.failed || navigation.tokenPending || navigation.scrollTarget != null) return;
+  const route = currentNavigation();
+  if (!route) return;
+  const hash = navigationHash(route);
+  const url = new URL(location.href);
+  url.searchParams.delete("token");
+  url.hash = hash;
+  try { localStorage.setItem(NAV_KEY, JSON.stringify(route)); } catch (_) {}
+  try {
+    const method = mode === "replace" || location.hash === hash ? "replaceState" : "pushState";
+    history[method]({ ...history.state, trenchRoute: route }, "", url);
+    navigation.location = location.href;
+  } catch (_) {}
+}
+function queueNavigationSave() {
+  clearTimeout(navigation.timer);
+  navigation.timer = setTimeout(() => saveNavigation(), 0);
+}
+function restoreNavigationScroll() {
+  const target = navigation.scrollTarget;
+  const sc = $(".scroll");
+  if (target == null || !sc) return;
+  sc.scrollTop = target;
+  if (Math.abs(sc.scrollTop - target) <= 2) navigation.scrollTarget = null;
+}
+async function restoreNavigation(route) {
+  const seq = ++navigation.seq;
+  navigation.restoring = true;
+  navigation.location = location.href;
+  navigation.scrollTarget = route.scroll;
+  setTimeout(() => {
+    if (seq === navigation.seq && navigation.scrollTarget != null) {
+      navigation.scrollTarget = null; // live lists can shrink; do not block future navigation saves
+      saveNavigation("replace");
+    }
+  }, 15000);
+  closeSearch();
+  state.infoOpen = false;
+  state.marketOpen = false;
+  state.alpha.open = false;
+  state.view = route.view;
+  state.tab = route.tab;
+  state.alpha.market = route.market;
+  state.alpha.src = route.src;
+  state.alpha.regular.kind = route.list;
+  state.alpha.sort = route.sort;
+  state.alpha.dir = route.dir;
+  state.alpha.iv = route.iv;
+  state.spotScan.kind = route.scan;
+  try {
+    await loadToken(route.token, route);
+    if (seq !== navigation.seq) return;
+    if (state.view === "alpha") await loadMarketFeeds();
+    if (seq !== navigation.seq) return;
+    if (route.search === "1") {
+      state.searchOpen = true;
+      state.searchQ = route.q;
+      render();
+      if (route.q.length >= 2) search(route.q);
+      else loadSpotScan().catch(() => {});
+    }
+    streamSync();
+    restoreNavigationScroll();
+  } catch (err) {
+    if (seq === navigation.seq) navigation.failed = true;
+    throw err;
+  } finally {
+    if (seq === navigation.seq) {
+      navigation.restoring = false;
+      navigation.ready = true;
+      saveNavigation("replace");
+    }
+  }
+}
+function onNavigationHistory() {
+  if (navigation.location === location.href) return;
+  restoreNavigation(readNavigation()).catch((err) => { state.status = err.message; render(); });
+}
+window.addEventListener("popstate", onNavigationHistory);
+window.addEventListener("hashchange", onNavigationHistory);
+window.addEventListener("pagehide", () => saveNavigation("replace"));
+document.addEventListener("pointerdown", () => { navigation.scrollTarget = null; }, { passive: true });
+
 let started = false;
 function every(ms, fn) {
   const tick = async () => {
@@ -6207,8 +6357,7 @@ function every(ms, fn) {
 
 async function boot() {
   try {
-    const start = new URLSearchParams(location.search).get("token") || "BONK";
-    await loadToken(start);
+    await restoreNavigation(readNavigation());
     if (started) return;
     started = true;
     connect(true);
