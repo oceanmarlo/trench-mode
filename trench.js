@@ -74,6 +74,7 @@ const state = {
   searchOpen: false,
   searchQ: "",
   searching: false,
+  searchError: "",
   marketOpen: false,
   orderType: "market",
   slMode: "pct",
@@ -538,6 +539,7 @@ function searchRows() {
 }
 function searchResultHtml() {
   if (state.searching && !(state.results || []).length) return `<div class="k">Searching…</div>`;
+  if (state.searchError) return `<div class="k" role="status" style="padding:12px 0">Couldn't search: ${esc(state.searchError)} <button type="button" class="copy" data-search-retry>Retry</button></div>`;
   if (!(state.results || []).length) return `<div class="k">No tokens found.</div>`;
   return searchRows();
 }
@@ -547,6 +549,11 @@ function paintResults() {
   if ((state.searchQ || "").trim().length < 2) return;
   box.innerHTML = searchResultHtml();
   box.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
+  bindSearchRetry();
+}
+function bindSearchRetry() {
+  const retry = $("[data-search-retry]");
+  if (retry) retry.onclick = () => search(state.searchQ);
 }
 function closeSearch() {
   // Dismissing the sheet must cancel both the debounce and in-flight responses.
@@ -556,6 +563,7 @@ function closeSearch() {
   state.searchQ = "";
   state.results = [];
   state.searching = false;
+  state.searchError = "";
 }
 function pick(mint) {
   closeSearch();
@@ -567,6 +575,7 @@ function search(q) {
   clearTimeout(searchTimer);
   const seq = ++searchSeq;
   state.searchQ = q || "";
+  state.searchError = "";
   if (state.searchQ.length < 2) {
     state.results = [];
     state.searching = false;
@@ -581,15 +590,16 @@ function search(q) {
     try {
       const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(query));
       if (seq !== searchSeq) return;
-      state.results = Array.isArray(list) ? list : [];
+      if (!Array.isArray(list) || list.some((t) => !t || typeof t.id !== "string" || !t.id)) throw new Error("Invalid Jupiter search results");
+      state.results = list;
       state.searching = false;
       rcWantFront((state.results || []).filter((t) => spotGate(t) === "checking").map((t) => t.id));
       paintResults();
     } catch (err) {
       if (seq !== searchSeq) return;
       state.searching = false;
-      const box = $("#results");
-      if (box) box.innerHTML = `<div class="k" style="padding:12px 0">${esc(err.message)}</div>`;
+      state.searchError = err.message || "Search unavailable";
+      paintResults();
     }
   }, 450);
 }
@@ -5310,6 +5320,7 @@ function bind() {
   const sc = $("#search-close");
   if (sc) sc.onclick = () => { closeSearch(); render(); };
   document.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => pick(b.dataset.pick));
+  bindSearchRetry();
   bindScan();
   bindChartResize();
   $(".scroll")?.addEventListener("scroll", parkLogo, { passive: true });
