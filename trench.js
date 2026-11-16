@@ -6081,36 +6081,57 @@ function streamSync() {
 // Wallet push: balances + average cost for every token the wallet holds.
 const NATIVE_SOL = "So11111111111111111111111111111111111111111";
 let pnlRenderTimer = 0;
+function streamBalanceRow(mint, bal) {
+  // A partial stream payload is not proof of a sale. Check both UI and raw
+  // units before mutating a balance or its in-flight snapshot overlay.
+  if (!bal || typeof bal.balance !== "number" || !Number.isFinite(bal.balance) || bal.balance < 0) {
+    throw new Error("Incomplete live balance update");
+  }
+  if (mint === NATIVE_SOL) return { ui: bal.balance };
+  const row = tokenBalanceRow(mint, bal.amount, bal.decimals);
+  const tolerance = Math.max(row.ui, bal.balance) * Number.EPSILON * 8;
+  if (!Number.isFinite(row.ui) || (row.ui === 0) !== (bal.balance === 0) || Math.abs(row.ui - bal.balance) > tolerance) {
+    throw new Error("Inconsistent live balance update");
+  }
+  return row;
+}
 function onStreamPnl(data) {
   const w = state.wallet;
-  const mine = w && data[w];
-  if (!mine) return;
+  const mine = w && data?.[w];
+  if (!mine || typeof mine !== "object" || Array.isArray(mine)) return;
   feedMark("walletPnlStream");
   let changed = false;
+  let invalid = false;
   const missing = [];
   for (const [mint, row] of Object.entries(mine)) {
     const bal = row?.balance;
     if (row?.pnl?.averageCost > 0 && mint !== NATIVE_SOL && mint !== SOL) localStorage.setItem(entryKey(mint, w), String(row.pnl.averageCost));
-    if (!bal) continue;
+    if (bal == null || mint === SOL) continue;
+    let next;
+    try { next = streamBalanceRow(mint, bal); }
+    catch (_) { invalid = true; continue; }
     const pending = holdingsRequest?.owner === w ? holdingsRequest : null;
     if (mint === NATIVE_SOL) {
-      state.sol = Number(bal.balance) || 0;
+      state.sol = next.ui;
       if (pending) pending.sol = state.sol;
       changed = true;
       continue;
     }
-    if (mint === SOL) continue;
-    const ui = Number(bal.balance) || 0;
     const i = state.holdings.findIndex((h) => h.mint === mint);
-    if (ui <= 0) {
+    if (next.ui === 0) {
       if (pending) pending.balances.set(mint, null);
       if (i >= 0) { state.holdings.splice(i, 1); changed = true; }
       continue;
     }
-    const next = { mint, amount: Number(bal.amount) || 0, decimals: bal.decimals ?? 0, ui };
     if (pending) pending.balances.set(mint, next);
     if (i >= 0) Object.assign(state.holdings[i], next);
     else { state.holdings.push(next); missing.push(mint); }
+    changed = true;
+  }
+  if (invalid) {
+    // Only a complete successful snapshot may clear this warning; valid sibling
+    // pushes still apply and the existing Retry reloads the whole wallet.
+    state.holdingsError = "Incomplete live balance update";
     changed = true;
   }
   if (missing.length) {
