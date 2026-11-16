@@ -602,8 +602,15 @@ function selectTimeframe(tf) {
   loadCandles(true).catch(() => {});
 }
 
+function tradeTime(value) {
+  if ((typeof value !== "string" || !value.trim()) && typeof value !== "number") return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
 function ageLabel(iso) {
-  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  const time = tradeTime(iso);
+  if (time == null) return "—";
+  const s = Math.max(0, (Date.now() - time) / 1000);
   if (s < 60) return Math.max(1, Math.floor(s)) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
   return Math.floor(s / 3600) + "h";
@@ -4927,9 +4934,15 @@ function tapeRows() {
     rows = rows.filter((x) => (x.walletCategories || []).some((c) => String(c).toLowerCase().includes(key)));
   }
   const dir = state.txDir === "asc" ? 1 : -1;
+  // Jupiter sends ISO timestamps. Subtracting the strings returned NaN and
+  // changed only the arrow, never the rows (including incoming stream trades).
+  const value = (x) => state.txSort === "mc"
+    ? (Number.isFinite(x.usdPrice) && x.usdPrice > 0 ? x.usdPrice : null)
+    : tradeTime(x.timestamp);
   rows.sort((a, b) => {
-    const va = state.txSort === "mc" ? (a.usdPrice || 0) : (a.timestamp || 0);
-    const vb = state.txSort === "mc" ? (b.usdPrice || 0) : (b.timestamp || 0);
+    const va = value(a), vb = value(b);
+    // Missing values belong at the end in either direction, not at a fake zero.
+    if (va == null || vb == null) return va == null ? (vb == null ? 0 : 1) : -1;
     return (va - vb) * dir;
   });
   if (!rows.length) return `<div class="k" style="padding:12px 0">No ${state.txFilter.toLowerCase()} trades in the latest tape.</div>`;
