@@ -534,6 +534,13 @@ async function loadHolders() {
 
 let searchTimer = 0;
 let searchSeq = 0;
+let searchRequest = null;
+function cancelSearchRequest() {
+  if (!searchRequest) return;
+  clearTimeout(searchRequest.timeout);
+  searchRequest.controller.abort();
+  searchRequest = null;
+}
 function searchRows() {
   return (state.results || []).slice(0, 12).map((t) => `<button class="row" data-pick="${t.id}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> ${lpPullBadge(t)} <span>${usd(t.mcap)}</span></button>`).join("");
 }
@@ -559,6 +566,7 @@ function closeSearch() {
   // Dismissing the sheet must cancel both the debounce and in-flight responses.
   clearTimeout(searchTimer);
   ++searchSeq;
+  cancelSearchRequest();
   state.searchOpen = false;
   state.searchQ = "";
   state.results = [];
@@ -574,6 +582,7 @@ function pick(mint) {
 function search(q) {
   clearTimeout(searchTimer);
   const seq = ++searchSeq;
+  cancelSearchRequest();
   state.searchQ = q || "";
   state.searchError = "";
   if (state.searchQ.length < 2) {
@@ -587,9 +596,13 @@ function search(q) {
   paintResults();
   const query = state.searchQ;
   searchTimer = setTimeout(async () => {
+    const controller = new AbortController();
+    const request = { controller, timeout: setTimeout(() => controller.abort(), 12000) };
+    searchRequest = request;
     try {
-      const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(query));
+      const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(query), { signal: controller.signal });
       if (seq !== searchSeq) return;
+      if (controller.signal.aborted) throw new Error("Search timed out. Try again.");
       if (!Array.isArray(list) || list.some((t) => !t || typeof t.id !== "string" || !t.id)) throw new Error("Invalid Jupiter search results");
       state.results = list;
       state.searching = false;
@@ -598,8 +611,11 @@ function search(q) {
     } catch (err) {
       if (seq !== searchSeq) return;
       state.searching = false;
-      state.searchError = err.message || "Search unavailable";
+      state.searchError = controller.signal.aborted ? "Search timed out. Try again." : err.message || "Search unavailable";
       paintResults();
+    } finally {
+      clearTimeout(request.timeout);
+      if (searchRequest === request) searchRequest = null;
     }
   }, 450);
 }
