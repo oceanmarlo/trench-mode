@@ -4281,12 +4281,13 @@ function alphaRowsHtml() {
       `<i class="b ${x.freezeOff ? "ok" : "bad"}" title="Freeze authority ${x.freezeOff ? "disabled" : "enabled"}">F</i>`
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
+    const change = pctText(x.chg);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${marketGate(t)}">
       <span class="al-tok"><span class="tok-av">${tokenIcon(t.icon, 'loading="lazy"')}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
       <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
-      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}">${esc(pctText(x.chg))}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
+      <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}${change.length >= 7 ? " al-change-long" : ""}" title="${esc(change)}">${esc(change)}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
     </button>`;
   }).join("");
 }

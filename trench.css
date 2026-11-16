@@ -474,7 +474,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .al-actions .save { color: #111; background: #c7f284; border-color: #c7f284; }
 .al-sort { display: flex; gap: 6px; overflow-x: auto; padding: 6px 0; }
 .al-sort button { padding: 4px 10px; font-size: 12px; }
-.al-head, .al-row { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(0, .88fr) minmax(0, .8fr) minmax(0, .68fr); gap: 4px; align-items: center; }
+.al-head, .al-row { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(0, .88fr) minmax(0, .8fr) minmax(58px, .68fr); gap: 4px; align-items: center; }
 .al-head { font-size: 10px; color: var(--muted); padding: 6px 0; border-bottom: 1px solid var(--line); }
 .al-head span:not(:first-child), .al-num { text-align: right; }
 .al-count { font-size: 11px; color: var(--muted); padding: 6px 0 2px; }
@@ -488,6 +488,7 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .al-meta span, .al-num span { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .al-num { display: grid; min-width: 0; }
 .al-num b { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-num b.al-change-long { font-size: 11px; }
 .al-meta .b { font-style: normal; font-size: 9px; font-weight: 700; padding: 0 3px; border-radius: 3px; margin-left: 2px; }
 .al-meta .b.ok { color: #2ebd85; background: rgba(46,189,133,.12); }
 .al-meta .b.bad { color: #f6465d; background: rgba(246,70,93,.12); }
