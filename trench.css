@@ -75,6 +75,10 @@ button { font: inherit; }
 .sub .age { color: var(--muted); font-weight: 650; }
 .sub .mint { color: var(--muted); }
 .copy { background: none; border: 0; color: var(--muted); font: inherit; padding: 0; display: inline-grid; place-items: center; }
+/* Keep the glyphs compact, but make adjacent mobile actions tappable. */
+.token-head .copy, .token-head .soc { width: 32px; height: 32px; flex: none; touch-action: manipulation; }
+.token-head .sub { gap: 4px; flex-wrap: wrap; margin-top: 0; }
+#toast-lite { top: auto; bottom: calc(110px + env(safe-area-inset-bottom)); pointer-events: none; }
 .copy svg, .soc svg, .round svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; }
 .soc svg { fill: currentColor; stroke: none; }
 .soc svg.stroke { fill: none; stroke: currentColor; stroke-width: 1.8; }

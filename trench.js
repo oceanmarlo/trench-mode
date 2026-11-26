@@ -3579,12 +3579,60 @@ function watchDraw() {
   }
   requestAnimationFrame(watchDraw);
 }
+async function copyText(value, label = "Address") {
+  const text = String(value || "");
+  if (!text) { flash("Nothing to copy"); return false; }
+  let copied = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    }
+  } catch (_) { /* Wallet browsers may deny the async clipboard API. */ }
+  if (!copied) {
+    const active = document.activeElement;
+    const selection = window.getSelection();
+    const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange()) : [];
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.readOnly = true;
+    input.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px";
+    document.body.appendChild(input);
+    try {
+      input.focus({ preventScroll: true });
+      input.select();
+      input.setSelectionRange(0, text.length);
+      copied = document.execCommand("copy");
+    } catch (_) { /* If both APIs are blocked, offer explicit manual copying. */ }
+    finally {
+      input.remove();
+      try {
+        active?.focus({ preventScroll: true });
+        if (selection) { selection.removeAllRanges(); ranges.forEach((r) => selection.addRange(r)); }
+      } catch (_) {}
+    }
+  }
+  if (copied) flash(label + " copied");
+  else {
+    flash("Automatic copy unavailable — copy the selected text");
+    window.prompt("Copy " + label.toLowerCase(), text);
+  }
+  return copied;
+}
+function bindCopyButtons(root = document) {
+  root.querySelectorAll("[data-copy]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    copyText(b.dataset.copy, b.getAttribute("aria-label") === "Copy mint" ? "Mint" : "Address");
+  });
+}
 function flash(msg) {
   let t = $("#toast-lite");
   if (!t) {
     t = document.createElement("div");
     t.id = "toast-lite";
     t.className = "toast";
+    t.setAttribute("role", "status");
+    t.setAttribute("aria-live", "polite");
     app.appendChild(t);
   }
   t.textContent = msg;
@@ -3823,9 +3871,7 @@ function paintHolders() {
   const box = $("#holder-list");
   if (!box || state.view !== "spot" || state.tab !== "holders") return;
   patchHolderRows(box, holderRows());
-  box.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
-    navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
-  });
+  bindCopyButtons(box);
   bindHoldersRetry();
   restoreNavigationScroll();
 }
@@ -5555,9 +5601,10 @@ function bind() {
     const t = state.active;
     if (!t) return;
     const url = location.origin + location.pathname + "?token=" + encodeURIComponent(t.id);
-    const done = () => { state.toast = "Link copied"; render(); };
-    if (navigator.share) navigator.share({ title: t.symbol || "Token", url }).catch(() => {});
-    else navigator.clipboard.writeText(url).then(done).catch(() => {});
+    if (navigator.share) navigator.share({ title: t.symbol || "Token", url }).catch((err) => {
+      if (err?.name !== "AbortError") copyText(url, "Link");
+    });
+    else copyText(url, "Link");
   };
   const star = $("#star");
   if (star) star.onclick = () => {
@@ -5566,9 +5613,7 @@ function bind() {
     toggleStar(t.id);
     render();
   };
-  document.querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => {
-    navigator.clipboard.writeText(b.dataset.copy).then(() => { state.toast = "Copied"; render(); }).catch(() => {});
-  });
+  bindCopyButtons();
   const info = $("#info");
   if (info) info.onclick = (e) => { e.stopPropagation(); closeSearch(); document.getElementById("search-sheet")?.remove(); state.infoOpen = true; openSheet(); };
   const rcBadge = $("#rc-badge");
