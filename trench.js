@@ -434,6 +434,7 @@ async function loadToken(query, restored = null) {
     state.scrollTop = restored?.scroll || 0;
     render();
     heliusTrack(hit);
+    gmgnWatch(hit.id);
     state.tapeIds = new Set();
     streamSync();
     loadCandles().catch(() => {});
@@ -4015,6 +4016,130 @@ function rcLineInner(t) {
   const top = pctShown(a.topHoldersPercentage);
   return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
 }
+// GMGN has no public bundle websocket. Poll token info (weight 1) and honor the bucket.
+const GMGN_HOST = "https://openapi.gmgn.ai";
+const GMGN_PUBLISHED_READ_KEY = "gmgn_solbscbaseethmonadtron";
+const gmgn = { mint: "", gen: 0, timer: 0, coolUntil: 0, snap: null, error: "" };
+function gmgnKey() {
+  try {
+    const k = window.GMGN_API_KEY;
+    if (k && String(k).trim()) return String(k).trim();
+  } catch (_) {}
+  return GMGN_PUBLISHED_READ_KEY;
+}
+function gmgnFraction(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return null;
+  // Documented ratios are 0–1. A value already above 1 is percent points.
+  return n <= 1 ? n * 100 : n;
+}
+function gmgnParse(body) {
+  if (!body || (body.code !== 0 && body.code !== "0")) return null;
+  const data = body.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const stat = data.stat || {};
+  const tags = data.wallet_tags_stat || {};
+  const vol = gmgnFraction(stat.top_bundler_trader_percentage);
+  const rawN = tags.bundler_wallets;
+  const wallets = rawN == null || rawN === "" ? null : Number(rawN);
+  return {
+    vol,
+    wallets: Number.isFinite(wallets) && wallets >= 0 ? wallets : null
+  };
+}
+function gmgnVolText(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const v = Number(n);
+  if (v === 0) return "0%";
+  if (v < 0.01) return "<0.01%";
+  if (v < 10) return v.toFixed(2).replace(/0$/, "").replace(/\.0?$/, "") + "%";
+  return v.toFixed(1).replace(/\.0$/, "") + "%";
+}
+function gmgnLineInner() {
+  if (!gmgn.snap) return gmgn.error ? `Bundlers <span class="bad">unavailable</span>` : "Bundlers …";
+  const n = gmgn.snap.wallets == null ? "—" : Number(gmgn.snap.wallets).toLocaleString();
+  const vol = gmgnVolText(gmgn.snap.vol);
+  return `Bundlers <strong>${n}</strong> · <strong>${vol} vol</strong>`;
+}
+function paintGmgn() {
+  const line = document.getElementById("gmgn-line");
+  if (line) line.innerHTML = gmgnLineInner();
+  const tile = document.querySelector('[data-sf="bundler"]');
+  if (tile) {
+    const text = !gmgn.snap || gmgn.snap.vol == null ? "—" : gmgnVolText(gmgn.snap.vol);
+    if (tile.textContent !== text) tile.textContent = text;
+    tile.className = !gmgn.snap || gmgn.snap.vol == null ? "flat" : (gmgn.snap.vol >= 20 ? "down" : "");
+  }
+}
+function gmgnArm(ms) {
+  clearTimeout(gmgn.timer);
+  gmgn.timer = setTimeout(gmgnTick, Math.max(0, ms));
+}
+function gmgnDelay(res) {
+  const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+  const reset = Number(res.headers.get("x-ratelimit-reset") || res.headers.get("x-ratelimit-reset-at") || 0);
+  const resetMs = reset > 1e12 ? reset : (reset > 1e9 ? reset * 1000 : 0);
+  const until = resetMs ? Math.max(0, resetMs - Date.now()) : 0;
+  if (res.status === 429 || res.status === 403) return Math.max(5000, until || 8000);
+  if (Number.isFinite(remaining) && remaining <= 0) return Math.max(1200, until || 2000);
+  if (Number.isFinite(remaining) && remaining <= 1) return Math.max(1200, until ? Math.min(until, 3000) : 1500);
+  if (Number.isFinite(remaining) && remaining >= 3) return 400;
+  return 1000;
+}
+function gmgnWatch(mint) {
+  if (!mint) return;
+  if (gmgn.mint !== mint) {
+    gmgn.mint = mint;
+    gmgn.snap = null;
+    gmgn.error = "";
+    gmgn.gen += 1;
+  }
+  gmgnArm(0);
+}
+async function gmgnTick() {
+  const mint = state.active && state.active.id;
+  if (!mint || document.hidden || state.view !== "spot") { gmgnArm(1000); return; }
+  if (Date.now() < gmgn.coolUntil) { gmgnArm(gmgn.coolUntil - Date.now()); return; }
+  const gen = gmgn.gen;
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 8000);
+  const client = (crypto.randomUUID && crypto.randomUUID()) || (Date.now().toString(16) + Math.random().toString(16).slice(2));
+  const url = GMGN_HOST + "/v1/token/info?chain=sol&address=" + encodeURIComponent(mint)
+    + "&timestamp=" + Math.floor(Date.now() / 1000) + "&client_id=" + encodeURIComponent(client);
+  try {
+    const res = await fetch(url, {
+      cache: "no-store",
+      credentials: "omit",
+      signal: ctrl.signal,
+      headers: { "X-APIKEY": gmgnKey(), Accept: "application/json" }
+    });
+    if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
+    if (res.status === 429 || res.status === 403) {
+      gmgn.coolUntil = Date.now() + gmgnDelay(res);
+      if (!gmgn.snap) gmgn.error = "unavailable";
+      paintGmgn();
+      gmgnArm(gmgn.coolUntil - Date.now());
+      return;
+    }
+    const body = await res.json().catch(() => null);
+    if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
+    const parsed = res.ok ? gmgnParse(body) : null;
+    if (parsed && (parsed.vol != null || parsed.wallets != null)) {
+      gmgn.snap = parsed;
+      gmgn.error = "";
+    } else if (!gmgn.snap) gmgn.error = "unavailable";
+    paintGmgn();
+    gmgnArm(gmgnDelay(res));
+  } catch (err) {
+    if (err && err.name === "AbortError") { gmgnArm(1000); return; }
+    if (!gmgn.snap) gmgn.error = "unavailable";
+    paintGmgn();
+    gmgnArm(4000);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function tokenHead(t, price, chg) {
   const mint = t.id || "";
   const short = mint ? `${mint.slice(0, 4)}…${mint.slice(-4)}` : "";
@@ -4031,6 +4156,7 @@ function tokenHead(t, price, chg) {
       </div>
     </div>
     <div class="rc-line" id="rc-line">${rcLineInner(t)}</div>
+    <div class="gmgn-line" id="gmgn-line">${gmgnLineInner()}</div>
     <div class="mc-line">
       <span class="px" id="mc">${mcapText(t)}</span>
       <span class="chg ${t.stats24h?.priceChange == null ? "" : cls(t.stats24h.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
@@ -5265,6 +5391,7 @@ function sheetVals() {
     devCls: shareShown(audit.devBalancePercentage) == null ? "flat" : (shareShown(audit.devBalancePercentage) > 0 ? "down" : "up"),
     snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
+    bundler: gmgn.snap && gmgn.snap.vol != null ? gmgnVolText(gmgn.snap.vol) : "—",
     freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
     freezeCls: audit.freezeAuthorityDisabled == null ? "flat" : (audit.freezeAuthorityDisabled ? "up" : "down"),
     mint: audit.mintAuthorityDisabled == null ? "—" : (audit.mintAuthorityDisabled ? "No" : "Yes"),
@@ -5305,6 +5432,7 @@ function sheetHtml() {
         <div class="tile"><b data-sf="top10"></b>Top 10 H.</div>
         <div class="tile"><b data-sf="dev"></b>Dev H.</div>
         <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers H.</div>
+        <div class="tile"><b data-sf="bundler"></b>Bundler vol</div>
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
       </div>
@@ -5336,6 +5464,8 @@ function paintSheet() {
   }
   const snip = root.querySelector('[data-sf="snip"]');
   if (snip) snip.className = v.snipCls || "";
+  const bundler = root.querySelector('[data-sf="bundler"]');
+  if (bundler) bundler.className = !gmgn.snap || gmgn.snap.vol == null ? "flat" : (gmgn.snap.vol >= 20 ? "down" : "");
   const curve = root.querySelector("[data-sf-curve]");
   if (curve) curve.hidden = !v.curveOn;
   const snipTile = root.querySelector("[data-sf-snip]");
@@ -6561,6 +6691,10 @@ async function boot() {
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
     startHolderRefresh();
+    if (state.active && state.active.id) gmgnWatch(state.active.id);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && state.active && state.active.id) gmgnArm(0);
+    });
     every(30000, () => state.wallet ? loadHoldings() : null);
     every(20000, () => refreshStopLive());
   } catch (err) {
