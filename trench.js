@@ -1588,6 +1588,39 @@ function orderMenu() {
   const opt = (id, label) => `<button type="button" data-otype="${id}" class="${state.orderType === id ? "on" : ""}">${label}</button>`;
   return `<div class="market-menu">${opt("market", "Market")}${opt("msl", "Market + SL")}${opt("trail", "Trailing Stop")}</div>`;
 }
+function timeAxisTop(host) {
+  if (!host) return 0;
+  // Same canvas the axis painter uses: the short wide time scale, not a price scale.
+  const canvas = [...host.querySelectorAll("canvas")].find((c) => c.clientHeight > 8 && c.clientHeight < 48 && c.clientWidth > 80);
+  if (canvas) {
+    const top = canvas.getBoundingClientRect().top;
+    if (top > 40) return top;
+  }
+  const box = host.getBoundingClientRect();
+  if (box.bottom <= 40) return 0;
+  let scaleH = 0;
+  try { scaleH = chartUi.chart && chartUi.chart.timeScale().height() || 0; } catch (_) { scaleH = 0; }
+  if (!(scaleH > 8)) scaleH = 28;
+  return box.bottom - scaleH;
+}
+function orderMenuHitsQuote(top, o) {
+  if (!(o.floorBottom > 2) || !(o.floorRight - o.floorLeft > 2)) return false;
+  const quoteTop = o.quoteTop != null ? o.quoteTop : o.floorTop;
+  return top < o.floorBottom - 2 && top + o.menuH > quoteTop + 2
+    && o.menuLeft + o.menuW > o.floorLeft + 4 && o.menuLeft < o.floorRight - 4;
+}
+function orderMenuTop(o) {
+  const gap = 6;
+  let top = o.btnTop - o.menuH - 8;
+  // Host bottom minus 18 left the menu 8px into the 26px time scale, so
+  // Trailing Stop covered the clock (06:20). Clear the scale itself.
+  if (o.axisTop > 40 && o.btnTop > o.axisTop && top + o.menuH > o.axisTop - gap) top = o.axisTop - gap - o.menuH;
+  if (top < 8 || orderMenuHitsQuote(top, o)) {
+    const under = o.floorBottom > 8 ? o.floorBottom + 6 : o.btnBottom + 6;
+    top = under + o.menuH <= o.viewH - 4 ? under : Math.max(8, o.viewH - o.menuH - 8);
+  }
+  return top;
+}
 function placeOrderMenu() {
   const menu = document.querySelector(".market-menu");
   const btn = document.getElementById("market");
@@ -1598,23 +1631,18 @@ function placeOrderMenu() {
   const w = menu.offsetWidth || 148;
   const h = menu.offsetHeight || 112;
   const host = document.querySelector(".lwc-host");
-  const axisBottom = host ? host.getBoundingClientRect().bottom : 0;
   const est = document.getElementById("est");
   const ultra = document.querySelector(".trade .ultra, .ultra");
   const quote = est ? est.getBoundingClientRect() : null;
   const floorEl = ultra && ultra.getBoundingClientRect().height > 2 ? ultra : est;
   const floor = floorEl ? floorEl.getBoundingClientRect() : null;
-  let left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8));
-  const hitsQuote = (top) => floor && floor.width > 2
-    && top < floor.bottom - 2 && top + h > (quote ? quote.top : floor.top) + 2
-    && left + w > floor.left + 4 && left < floor.right - 4;
-  // Prefer above the button, and above the time axis, so Est. Received stays readable.
-  let top = r.top - h - 8;
-  if (host && axisBottom > 40 && r.top > axisBottom && top + h > axisBottom - 18) top = axisBottom - h - 18;
-  if (top < 8 || hitsQuote(top)) {
-    const under = floor && floor.bottom > 8 ? floor.bottom + 6 : r.bottom + 6;
-    top = under + h <= window.innerHeight - 4 ? under : Math.max(8, window.innerHeight - h - 8);
-  }
+  const left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8));
+  const top = orderMenuTop({
+    btnTop: r.top, btnBottom: r.bottom, menuH: h, axisTop: timeAxisTop(host),
+    floorTop: floor ? floor.top : 0, floorBottom: floor ? floor.bottom : 0,
+    floorLeft: floor ? floor.left : 0, floorRight: floor ? floor.right : 0,
+    quoteTop: quote ? quote.top : null, menuLeft: left, menuW: w, viewH: window.innerHeight,
+  });
   menu.style.left = left + "px";
   menu.style.top = top + "px";
 }
