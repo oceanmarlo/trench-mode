@@ -5284,10 +5284,9 @@ function quoteSummary() {
     : "";
   const usdBit = outUsd > 0 ? usd(outUsd) : "—";
   const delta = signedPctLabel(pct);
-  const pctBit = delta == null
-    ? `<span class="est-usd">—</span>`
-    : `<span class="${cls(delta.tone)}">(${delta.text})</span>`;
-  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usdBit}</span> ${pctBit}${more}`;
+  // A missing dollar already says unknown. A second dash for the impact read as "374.26M — —".
+  const pctBit = delta == null ? "" : ` <span class="${cls(delta.tone)}">(${delta.text})</span>`;
+  return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usdBit}</span>${pctBit}${more}`;
 }
 function tradePanel() {
   const t = state.active;
