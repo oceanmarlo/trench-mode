@@ -4676,7 +4676,18 @@ function curvePctText(n) {
   // Keep 99.92 from rounding up to a fake 100% graduation.
   if (v >= 99.95) return "99.9%";
   if (v >= 9.95) return v.toFixed(1).replace(/\.0$/, "") + "%";
+  // 1e-11 rounds to 0% and reads as a zero market cap. It is float dust, not zero.
+  if (v > 0 && v < 0.005) return "<0.01%";
   return v.toFixed(2).replace(/0+$/, "").replace(/\.$/, "") + "%";
+}
+// List volume is a narrow column. A price subscript ($0.0₁₀) there is Jupiter's
+// uninitialized dust (the same 6.8e-11 on every fresh row), not a trade.
+function listVol(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const a = Math.abs(Number(n));
+  if (!(a > 0)) return "$0.00";
+  if (a < 0.01) return "<$0.01";
+  return usd(n);
 }
 function alphaFields(t, iv) {
   const win = ALPHA_IVS.includes(iv) ? iv : "24h";
@@ -4691,9 +4702,11 @@ function alphaFields(t, iv) {
   const px = Number(t.usdPrice);
   const hasPx = mcapOk || (Number.isFinite(px) && px > 0);
   // Graduating gems often omit mcap/price while still sending bondingCurve (0–100).
-  const curveRaw = Number(t.bondingCurve);
-  const curve = !alphaGraduated(t) && Number.isFinite(curveRaw) && curveRaw >= 0 && curveRaw <= 100
-    ? curveRaw
+  // Number(null/false/"") is 0 — that is not curve progress. Same rule as the liquidity gate.
+  const curveRaw = t.bondingCurve;
+  const curveNum = Number(curveRaw);
+  const curve = !alphaGraduated(t) && typeof curveRaw === "number" && Number.isFinite(curveNum) && curveNum >= 0 && curveNum <= 100
+    ? curveNum
     : null;
   return {
     mcap: mcapOk ? Number(mcap) : null,
@@ -4986,8 +4999,8 @@ function alphaRowsHtml() {
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${marketGate(t)}">
       <span class="al-tok"><span class="tok-av">${tokenIcon(t.icon, 'loading="lazy"')}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
-      <span class="al-num"><b>${mc.main}</b><span>${esc(mc.sub)}</span></span>
-      <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
+      <span class="al-num"><b>${esc(mc.main)}</b><span>${esc(mc.sub)}</span></span>
+      <span class="al-num"><b>${esc(listVol(x.vol))}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
       <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}${change.length >= 7 ? " al-change-long" : ""}" title="${esc(change)}">${esc(change)}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
     </button>`;
   }).join("");
