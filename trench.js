@@ -5466,11 +5466,43 @@ function armNetTrend() {
 function stopNetTrend() {
   if (netTrendTimer) { clearInterval(netTrendTimer); netTrendTimer = 0; }
 }
+// Identical usd() labels are one value. A $0.60 gap inside $5.69K was stretched
+// across the plot, so two -$5.69K stamps looked like a steep trend.
+function netTrendBounds(vals) {
+  const finite = (vals || []).filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (!finite.length) return { rawLo: 0, rawHi: 0, lo: -1, hi: 1, flat: true, mid: 0 };
+  const rawLo = Math.min(...finite);
+  const rawHi = Math.max(...finite);
+  const mid = (rawLo + rawHi) / 2;
+  const flat = finite.length < 2 || usd(rawLo) === usd(rawHi);
+  let lo = rawLo, hi = rawHi;
+  if (flat) {
+    // A $1 floor turned a -$0.00256 net into a two-dollar scale.
+    const pad = Math.max(Math.abs(mid), 1e-9) * 0.08;
+    lo = mid - pad;
+    hi = mid + pad;
+  }
+  return { rawLo, rawHi, lo, hi, flat, mid };
+}
+function netTrendY(bounds, v, top, bot) {
+  let lo = bounds.lo, hi = bounds.hi;
+  if (!bounds.flat && bounds.rawLo < 0 && bounds.rawHi > 0) {
+    lo = Math.min(lo, 0);
+    hi = Math.max(hi, 0);
+  }
+  if (!(hi > lo)) return (top + bot) / 2;
+  const plotted = bounds.flat ? bounds.mid : v;
+  return top + (hi - plotted) / (hi - lo) * (bot - top);
+}
 function drawNetTrend() {
   const box = document.getElementById("net-trend");
   if (!box) return;
   const arr = netTrend.samples[state.infoWin] || [];
-  if (arr.length < 2) {
+  paintNetSeries(box, arr.map((p) => p.v));
+}
+function paintNetSeries(box, vals) {
+  const finite = (vals || []).filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (finite.length < 2) {
     if (!box.querySelector(".collecting")) box.innerHTML = '<div class="collecting">collecting…</div>';
     return;
   }
@@ -5490,20 +5522,12 @@ function drawNetTrend() {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const vals = arr.map((p) => p.v);
-  const rawLo = Math.min(...vals), rawHi = Math.max(...vals);
-  let lo = rawLo, hi = rawHi;
-  if (lo === hi) {
-    // A $1 floor turned a -$0.00256 net into a two-dollar scale.
-    const pad = Math.max(Math.abs(lo), 1e-9) * 0.08;
-    lo -= pad;
-    hi += pad;
-  }
-  const crosses = rawLo < 0 && rawHi > 0;
-  if (crosses) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  const b = netTrendBounds(finite);
+  const { rawLo, rawHi } = b;
+  const crosses = !b.flat && rawLo < 0 && rawHi > 0;
   const top = 16, bot = h - 16;
-  const yOf = (v) => top + (hi - v) / (hi - lo) * (bot - top);
-  const xOf = (i) => (i / (arr.length - 1)) * (w - 8) + 4;
+  const yOf = (v) => netTrendY(b, v, top, bot);
+  const xOf = (i) => (i / (finite.length - 1)) * (w - 8) + 4;
   const zeroY = crosses ? yOf(0) : bot;
   ctx.save();
   ctx.setLineDash([3, 3]);
@@ -5515,8 +5539,8 @@ function drawNetTrend() {
   ctx.stroke();
   ctx.restore();
   ctx.beginPath();
-  arr.forEach((p, i) => { const x = xOf(i), y = yOf(p.v); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
-  ctx.lineTo(xOf(arr.length - 1), zeroY);
+  finite.forEach((v, i) => { const x = xOf(i), y = yOf(v); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+  ctx.lineTo(xOf(finite.length - 1), zeroY);
   ctx.lineTo(xOf(0), zeroY);
   ctx.closePath();
   if (!crosses) {
@@ -5540,21 +5564,28 @@ function drawNetTrend() {
   ctx.lineWidth = 1.6;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  for (let i = 1; i < arr.length; i++) {
-    ctx.strokeStyle = (vals[i - 1] + vals[i]) / 2 >= 0 ? "#3DDC84" : "#ff4d8d";
+  for (let i = 1; i < finite.length; i++) {
+    ctx.strokeStyle = (finite[i - 1] + finite[i]) / 2 >= 0 ? "#3DDC84" : "#ff4d8d";
     ctx.beginPath();
-    ctx.moveTo(xOf(i - 1), yOf(vals[i - 1]));
-    ctx.lineTo(xOf(i), yOf(vals[i]));
+    ctx.moveTo(xOf(i - 1), yOf(finite[i - 1]));
+    ctx.lineTo(xOf(i), yOf(finite[i]));
     ctx.stroke();
   }
   ctx.font = "11px -apple-system, BlinkMacSystemFont, sans-serif";
   ctx.fillStyle = "rgba(243,245,247,.8)";
-  ctx.textBaseline = "top";
-  // The top of the plot is the high. The latest sample sits at the right edge,
-  // so stamping it here made a declining series read the same number twice.
-  ctx.fillText(usd(rawHi), 2, 1);
-  ctx.textBaseline = "bottom";
-  ctx.fillText(usd(rawLo), 2, h - 1);
+  if (b.flat) {
+    // One stamp. Top and bottom copies of the same label invented a range.
+    const y = yOf(b.mid);
+    ctx.textBaseline = y < 28 ? "top" : "bottom";
+    ctx.fillText(usd(rawHi), 2, y < 28 ? y + 2 : y - 2);
+  } else {
+    ctx.textBaseline = "top";
+    // The top of the plot is the high. The latest sample sits at the right edge,
+    // so stamping it here made a declining series read the same number twice.
+    ctx.fillText(usd(rawHi), 2, 1);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(usd(rawLo), 2, h - 1);
+  }
 }
 function sheetVals() {
   const t = state.active || {};
