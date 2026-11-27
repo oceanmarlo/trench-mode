@@ -3930,8 +3930,10 @@ function revealQuote() {
   const sc = document.querySelector(".scroll");
   const dock = document.getElementById("trade-dock");
   if (!sc || !dock || state.view !== "spot") return;
+  // Keep the whole trade dock (route detail + Live status) above the fixed Holding bar.
   const gap = 8;
-  const overflow = dock.getBoundingClientRect().bottom - (sc.getBoundingClientRect().bottom - gap);
+  const floor = sc.getBoundingClientRect().bottom - gap;
+  const overflow = dock.getBoundingClientRect().bottom - floor;
   if (overflow > 1) sc.scrollTop += overflow;
 }
 function render() {
@@ -5681,6 +5683,9 @@ document.addEventListener("click", (e) => {
   const est = $("#est");
   if (est) est.innerHTML = quoteSummary();
   paintQuoteExtras();
+  // Expanding the route line grows the dock; scroll it clear of the Holding bar
+  // so "Jupiter Swap · Live" and the detail stay readable.
+  if (state.quoteOpen) revealQuote();
 });
 document.addEventListener("click", (e) => {
   if (!state.marketOpen || e.target.closest(".market-wrap")) return;
