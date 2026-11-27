@@ -3043,15 +3043,17 @@ function setChartData() {
   paintDrawings();
 }
 
-// Last 300 one-second buckets can cover hours when many seconds have no trade.
+// Last 300 second buckets (1s or 15s) can cover hours when many slots have no trade.
 // fitContent then leads the axis with 00:00:00 and stretches nothing the user can read.
 // The scale is bar-index, not linear time, so a clock window of two buckets becomes two slabs.
-// Show the last 40 buckets at a normal width. A dense few minutes still fits. Scroll reaches the rest.
+// Show the last 40 buckets at a normal width. A dense stretch still fits. Scroll reaches the rest.
 function recentSecondLogical(first, last, count, tf) {
-  if (tf !== "1s" || typeof first !== "number" || typeof last !== "number" || typeof count !== "number") return null;
+  if ((tf !== "1s" && tf !== "15s") || typeof first !== "number" || typeof last !== "number" || typeof count !== "number") return null;
   if (!Number.isFinite(first) || !Number.isFinite(last) || !Number.isFinite(count) || !(last > first) || !(count > 40)) return null;
-  // 300 consecutive seconds is about five minutes. Only pull in when the buckets cover more than that.
-  if (!(last - first > 8 * 60)) return null;
+  // Dense 300 consecutive 1s buckets ≈ 5 min; dense 300 consecutive 15s ≈ 75 min.
+  // Only pull in when the buckets cover more than that (Bonk 15s often spans 3–4 h).
+  const dense = tf === "1s" ? 8 * 60 : 90 * 60;
+  if (!(last - first > dense)) return null;
   return { from: count - 40, to: count - 1 + 8 };
 }
 // fitContent stretches a handful of bars across the whole plot, so a new coin's
