@@ -281,7 +281,21 @@ function livePrice(t) {
   const live = Number(state.prices[t.id]);
   if (Number.isFinite(live) && live > 0) return live;
   const p = Number(t.usdPrice);
-  return Number.isFinite(p) && p > 0 ? p : null;
+  if (Number.isFinite(p) && p > 0) return p;
+  // The chart already drew this print. A missing usdPrice must not leave the
+  // header on an em dash while the pill shows a market cap.
+  if (!t.id || state.active?.id !== t.id) return null;
+  const key = state.candlesKey || "";
+  if (key && !key.startsWith(t.id + "|")) return null;
+  const cs = state.candles;
+  if (!cs || !cs.length) return null;
+  const c = Number(cs[cs.length - 1].close);
+  return Number.isFinite(c) && c > 0 ? c : null;
+}
+// Jupiter sends priceChange -100 when it has no price. A positive print is
+// not a wipeout, so 0.00x / -100% must not sit beside it.
+function unmeasuredWipe(n, t) {
+  return Number(n) <= -100 && livePrice(t) > 0;
 }
 function mcapText(t) {
   if (!t) return "—";
@@ -298,6 +312,9 @@ function mcapText(t) {
 // move reads as a glitch ("— —"). Keep a dash beside a real cap.
 function headerChange(t) {
   const c = t && t.stats24h ? t.stats24h.priceChange : null;
+  // A positive candle or stream price makes -100 a sentinel, not a total loss.
+  // Keep the unknown-move dash beside a real cap; hide it when the cap is already a dash.
+  if (unmeasuredWipe(c, t)) return mcapText(t) === "—" ? "" : "—";
   const label = moveLabel(c);
   if (label === "—" && mcapText(t) === "—") return "";
   return label;
@@ -592,6 +609,10 @@ async function loadCandles(force = false) {
     state.chartRetryAt = 0;
     feedMark("candles");
     setChartData();
+    try {
+      paintLive();
+      if (typeof document !== "undefined" && document.getElementById("sheet-root")) paintSheet();
+    } catch (_) {}
   } catch (err) {
     if (candleRequest !== request || state.active !== t || state.tf !== tf) return;
     state.chartError = controller.signal.aborted ? "Chart request timed out." : err.message || "Chart unavailable";
@@ -2218,7 +2239,7 @@ function paintLive() {
     const label = headerChange(t);
     chg.textContent = label;
     chg.hidden = !label;
-    const tone = label ? moveTone(t.stats24h?.priceChange) : "";
+    const tone = label && label !== "—" ? moveTone(t.stats24h?.priceChange) : "";
     chg.className = tone ? "chg " + tone : "chg";
   }
   if (live && t) {
@@ -2535,13 +2556,13 @@ function fmtMcTick(v) {
   // 800.00 under 1.60K reads as the bigger number. A tick on that scale
   // shares the K/M/B unit. The 5% rule left a crash under that line in raw
   // dollars: 187.40 beside 1.00K looks larger than the tick above it.
-  // Share whenever the scaled label is still readable (>= 0.01). A value
-  // under half the visible low already returned blank, so a far-below pane
-  // does not borrow K. 800.00K under 2.00M is the same mix-up.
+  // Share the scale unit even under 0.01 of it. The old cutoff left a crash
+  // pill at 4.42 beside 10.00K. Extra decimals below keep that from printing
+  // 0.00K; a value under half the visible low already returned blank.
   const hi = mcScaleHigh();
   const scaleUnit = hi >= 1e9 ? 1e9 : hi >= 1e6 ? 1e6 : hi >= 1e3 ? 1e3 : 1;
   const scaleSuf = scaleUnit >= 1e9 ? "B" : scaleUnit >= 1e6 ? "M" : scaleUnit >= 1e3 ? "K" : "";
-  if (a < scaleUnit && scaleUnit > 1 && a / scaleUnit >= 0.01) { unit = scaleUnit; suf = scaleSuf; }
+  if (a < scaleUnit && scaleUnit > 1 && a > 0) { unit = scaleUnit; suf = scaleSuf; }
   const step = (mcSpan() || a * 0.01) / 6 / unit;
   let dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
   let text = (a / unit).toFixed(dec);
@@ -4542,7 +4563,7 @@ function tokenHead(t, price, chg) {
     <div class="gmgn-line" id="gmgn-line">${gmgnLineInner()}</div>
     <div class="mc-line">
       <span class="px" id="mc">${mcapText(t)}</span>
-      <span class="chg ${headerChange(t) ? moveTone(t.stats24h?.priceChange) : ""}" id="chg"${headerChange(t) ? "" : " hidden"}>${headerChange(t)}</span>
+      <span class="chg ${headerChange(t) && headerChange(t) !== "—" ? moveTone(t.stats24h?.priceChange) : ""}" id="chg"${headerChange(t) ? "" : " hidden"}>${headerChange(t)}</span>
     </div>
     <div class="stats">
       <div><div class="k">Price</div><div class="v" id="stat-px">${livePrice(t) == null ? "—" : priceLabel(livePrice(t))}</div></div>
@@ -5999,7 +6020,9 @@ function sheetVals() {
     mintCls: audit.mintAuthorityDisabled == null ? "flat" : (audit.mintAuthorityDisabled ? "up" : "down"),
     wins: Object.fromEntries(["5m", "1h", "6h", "24h"].map((w) => {
       const n = stat(w).priceChange;
-      return [w, n == null || !Number.isFinite(Number(n)) ? null : Number(n)];
+      // Same sentinel as the header: -100 beside a positive print is not a wipe.
+      if (n == null || !Number.isFinite(Number(n)) || unmeasuredWipe(n, t)) return [w, null];
+      return [w, Number(n)];
     }))
   };
 }
