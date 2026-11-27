@@ -5556,6 +5556,13 @@ function tapePrice(x, spot) {
   }
   return p;
 }
+function tapeEmptyLabel(filter) {
+  // "All" must not read as "No all trades". You/Dev name the wallet, not the chip.
+  if (filter === "You") return "No trades from this wallet in the latest tape.";
+  if (filter === "Dev") return "No dev trades in the latest tape.";
+  if (!filter || filter === "All") return "No trades in the latest tape.";
+  return "No " + String(filter).toLowerCase() + " trades in the latest tape.";
+}
 function tapeRows() {
   const t = state.active || {};
   const supply = t.circSupply || 0;
@@ -5577,7 +5584,7 @@ function tapeRows() {
     if (va == null || vb == null) return va == null ? (vb == null ? 0 : 1) : -1;
     return (va - vb) * dir;
   });
-  if (!rows.length) return `<div class="k" style="padding:12px 0">No ${state.txFilter.toLowerCase()} trades in the latest tape.</div>`;
+  if (!rows.length) return `<div class="k" style="padding:12px 0">${tapeEmptyLabel(state.txFilter)}</div>`;
   return rows.slice(0, 40).map((x) => {
     const buy = x.type === "buy";
     const px = tapePrice(x, spot);
