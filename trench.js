@@ -5591,8 +5591,14 @@ function sheetVals() {
   const t = state.active || {};
   const audit = t.audit || {};
   const s = stat(state.infoWin);
-  const buy = Number(s.buyVolume) || 0, sell = Number(s.sellVolume) || 0;
-  const volSum = buy + sell;
+  // Number(null) is 0. Missing buy and sell volume must stay unknown, matching the list and header.
+  // A real 0 still prints $0.00. Blanks and booleans are not zeros.
+  const metric = (n) => (n == null || n === "" || typeof n === "boolean" || !Number.isFinite(Number(n)) ? null : Number(n));
+  const buy = metric(s.buyVolume);
+  const sell = metric(s.sellVolume);
+  const volUnknown = buy == null && sell == null;
+  const volSum = volUnknown ? null : (buy || 0) + (sell || 0);
+  const netSum = volUnknown ? null : (buy || 0) - (sell || 0);
   // The first pill is volume; the second belongs to the Traders row.
   const pair = splitPct(s.buyVolume, s.sellVolume) || splitPct(s.numBuys, s.numSells);
   const buyPct = pair ? pair[0] : null;
@@ -5610,7 +5616,7 @@ function sheetVals() {
     fees: solAmt(t.fees),
     curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
     curveOn,
-    vol: usd(volSum), net: usd(buy - sell), netCls: cls(buy - sell),
+    vol: volSum == null ? "—" : usd(volSum), net: netSum == null ? "—" : usd(netSum), netCls: netSum == null ? "flat" : cls(netSum),
     buyPct, sellPct,
     buyTxt: buyPct == null ? "—" : buyPct + "% Buy",
     sellTxt: sellPct == null ? "—" : sellPct + "% Sell",
