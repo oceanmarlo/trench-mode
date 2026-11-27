@@ -3653,12 +3653,29 @@ function paintIndList() {
   box.querySelectorAll("[data-ind]").forEach((b) => b.onclick = () => { toggleInd(b.dataset.ind); paintIndList(); });
 }
 function openIndSheet() {
+  // Keep one topmost overlay: indicators must not stack under search / Token Info / filters / orders.
   closeIndSheet();
+  if (state.infoOpen) closeSheet();
+  if (state.searchOpen) {
+    closeSearch();
+    document.getElementById("search-sheet")?.remove();
+  }
+  if (state.alpha?.open) state.alpha.open = false;
+  if (state.marketOpen) {
+    state.marketOpen = false;
+    document.querySelector(".market-menu")?.remove();
+    const btn = $("#market");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+  }
+  // Mount on body (like Token Info), not #app: a full render rebuilds #app and would
+  // silently destroy the sheet while Escape still could not dismiss a leftover copy.
   const root = document.createElement("div");
   root.className = "sheet";
   root.id = "ind-sheet";
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-label", "Indicators");
   root.innerHTML = `<div class="grab"></div><h2>Indicators <button type="button" id="ind-close" aria-label="Close">✕</button></h2><input id="ind-q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Search indicators" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#12171e;color:#fff;font-size:16px"><div id="ind-list"></div>`;
-  app.appendChild(root);
+  document.body.appendChild(root);
   $("#ind-close").onclick = closeIndSheet;
   $("#ind-q").oninput = paintIndList;
   paintIndList();
@@ -4983,7 +5000,7 @@ function bindAlpha() {
     rerender();
   });
   const fb = $("[data-alpha-filters]");
-  if (fb) fb.onclick = () => { a.open = !a.open; render(); };
+  if (fb) fb.onclick = () => { closeIndSheet(); a.open = !a.open; render(); };
   const rf = $("[data-alpha-refresh]");
   if (rf) rf.onclick = () => { loadMarketFeeds().catch(() => {}); };
   const sortSel = document.querySelector("[data-alpha-sort-sel]");
@@ -5547,6 +5564,7 @@ function paintSheet() {
 }
 let sheetPrevOverflow = null;
 function openSheet() {
+  closeIndSheet();
   if (document.getElementById("sheet-root")) {
     const sc = $(".scroll"); // render() may have rebuilt the page behind the sheet: keep it locked
     if (sc) sc.style.overflow = "hidden";
@@ -5614,6 +5632,9 @@ function bindSheetSwipe(root) {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // Match search / Token Info / wallet: dismiss the topmost overlay first.
+  // Indicators was missing from this list, so Escape left #ind-sheet up and it
+  // ate every tap (nav, timeframe, trade dock) until the user found the X.
+  if ($("#ind-sheet")) { closeIndSheet(); return; }
   if (state.infoOpen) { closeSheet(); return; }
   if (state.searchOpen) {
     closeSearch();
@@ -5645,6 +5666,7 @@ document.addEventListener("click", (e) => {
 });
 
 function openSearch() {
+  closeIndSheet();
   state.infoOpen = false;
   state.marketOpen = false;
   if (state.alpha) state.alpha.open = false;
@@ -5694,6 +5716,7 @@ function bind() {
   if (market) market.onclick = (e) => {
     e.stopPropagation();
     if (state.searchOpen) return;
+    closeIndSheet();
     state.marketOpen = !state.marketOpen;
     render();
   };
