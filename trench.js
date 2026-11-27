@@ -3019,6 +3019,39 @@ function toBars(list) {
   }
   return { bars, vols };
 }
+// A one-print coin has no candle body. The volume stick then sits on the lower
+// price labels and reads as the price. Hide it until a bar has a range.
+function barsAreFlat(bars) {
+  if (!bars || !bars.length) return false;
+  for (const b of bars) {
+    const h = Number(b.high), l = Number(b.low);
+    if (Number.isFinite(h) && Number.isFinite(l) && h !== l) return false;
+  }
+  return true;
+}
+function volumeSeries(bars, vols) {
+  return barsAreFlat(bars) ? [] : (vols || []);
+}
+function paintVolume(bars, vols, full) {
+  if (!chartUi.volume) return;
+  const shown = volumeSeries(bars, vols);
+  const hide = shown.length === 0 && barsAreFlat(bars);
+  if (hide) {
+    if (chartUi.volHidden) return;
+    try { chartUi.volume.setData([]); } catch (_) {}
+    chartUi.volHidden = true;
+    return;
+  }
+  if (full || chartUi.volHidden) {
+    try { chartUi.volume.setData(shown); } catch (_) {}
+    chartUi.volHidden = false;
+    return;
+  }
+  const last = shown.length ? shown[shown.length - 1] : null;
+  if (!last) return;
+  try { chartUi.volume.update(last); }
+  catch (_) { try { chartUi.volume.setData(shown); } catch (__) {} }
+}
 
 // Full data load (token, interval, or mode change) vs incremental update (polling).
 function setChartData() {
@@ -3032,7 +3065,7 @@ function setChartData() {
   if (full) {
     chartUi.candles.setData(bars);
     chartUi.line.setData(linePts);
-    chartUi.volume.setData(vols);
+    paintVolume(bars, vols, true);
     chartUi.key = key;
     frameCandles(bars.length);
   } else {
@@ -3040,9 +3073,9 @@ function setChartData() {
       if (b.time >= chartUi.lastTime) {
         chartUi.candles.update(b);
         chartUi.line.update(linePts[i]);
-        chartUi.volume.update(vols[i]);
       }
     });
+    paintVolume(bars, vols, false);
   }
   chartUi.lastTime = bars.length ? bars[bars.length - 1].time : 0;
   // Candles can arrive after the header already has a newer price. Fold that
@@ -3150,7 +3183,8 @@ function tickChart(addVolume = 0) {
   const bar = { time: chartUi.lastTime, open: last.open * k, high: last.high * k, low: last.low * k, close: price * k };
   chartUi.candles.update(bar);
   if (chartUi.line) chartUi.line.update({ time: chartUi.lastTime, value: price * k });
-  chartUi.volume.update({ time: chartUi.lastTime, value: Number(last.volume) || 0, color: last.close >= last.open ? "rgba(46,189,133,.45)" : "rgba(246,70,93,.45)" });
+  const painted = toBars(state.candles);
+  paintVolume(painted.bars, painted.vols, false);
   const now = Date.now();
   if (now - (tickChart.indAt || 0) > 250) {
     tickChart.indAt = now;
