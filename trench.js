@@ -251,16 +251,30 @@ const moveLabel = (pct) => {
   let digits = mult >= 10 ? 0 : mult >= 0.1 ? 2 : mult >= 0.01 ? 3 : 4;
   let text = mult.toFixed(digits);
   // Keep enough digits that a real move is not 1.00x or 0.0000x.
+  // Five fraction digits is the last readable step off 1 (0.99999x / 1.00001x).
+  // Closer than that is flat 1.00x, not a string of nines like 0.9999999x.
   if (n !== 0) {
     while (digits < 8) {
       const asNum = Number(text);
-      if (asNum !== 0 && Math.abs(asNum - 1) > 1e-12) break;
+      const flat = Math.abs(asNum - 1) <= 1e-12;
+      if (asNum !== 0 && !flat) break;
+      if (flat && digits >= 5) {
+        text = "1.00";
+        break;
+      }
       digits += 1;
       text = mult.toFixed(digits);
     }
   }
-  return (n >= 0 ? "▲ " : "▼ ") + text + "x (24h)";
+  // A collapsed flat multiplier is not a down move, even if the raw percent is tiny and negative.
+  const up = n >= 0 || Number(text) === 1;
+  return (up ? "▲ " : "▼ ") + text + "x (24h)";
 };
+function moveTone(pct) {
+  const label = moveLabel(pct);
+  if (label === "—") return "";
+  return label.startsWith("▲") ? "up" : "down";
+}
 const SUB = "₀₁₂₃₄₅₆₇₈₉";
 function livePrice(t) {
   if (!t) return null;
@@ -2163,7 +2177,8 @@ function paintLive() {
   if (chg && t) {
     const c = t.stats24h?.priceChange;
     chg.textContent = moveLabel(c);
-    chg.className = c == null || !Number.isFinite(Number(c)) ? "chg" : "chg " + cls(c);
+    const tone = moveTone(c);
+    chg.className = tone ? "chg " + tone : "chg";
   }
   if (live && t) {
     const supply = t.circSupply || 0;
@@ -4391,7 +4406,7 @@ function tokenHead(t, price, chg) {
     <div class="gmgn-line" id="gmgn-line">${gmgnLineInner()}</div>
     <div class="mc-line">
       <span class="px" id="mc">${mcapText(t)}</span>
-      <span class="chg ${t.stats24h?.priceChange == null ? "" : cls(t.stats24h.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
+      <span class="chg ${moveTone(t.stats24h?.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
     </div>
     <div class="stats">
       <div><div class="k">Price</div><div class="v" id="stat-px">${livePrice(t) == null ? "—" : priceLabel(livePrice(t))}</div></div>
