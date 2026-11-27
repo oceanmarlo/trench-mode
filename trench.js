@@ -5544,11 +5544,17 @@ function portfolioView() {
 // on screen. That is not the fill: the summary then paints a fake green profit.
 // Within 2x, keep Jupiter. Past that, the on-screen price wins. A missing
 // dollar stays missing so a zero cannot become a -100% fill.
-function quoteShownUsd(qUsd, spotUsd) {
+// A dollar under 2x can still flip a spot loss into a green profit. K1LL's
+// quote was $11.15 (+55%) while the on-screen price valued that output at
+// $6.89 against $7.19 in. Reject that sign flip when Jupiter is 25% above spot.
+function quoteShownUsd(qUsd, spotUsd, inUsd) {
   const q = Number(qUsd);
   const s = Number(spotUsd);
+  const inn = Number(inUsd);
   const qOk = Number.isFinite(q) && q > 0;
   const sOk = Number.isFinite(s) && s > 0;
+  const inOk = Number.isFinite(inn) && inn > 0;
+  if (qOk && sOk && inOk && q > inn && s <= inn && q > s * 1.25) return s;
   if (qOk && sOk && (q > s * 2 || s > q * 2)) return s;
   if (qOk) return q;
   return sOk ? s : 0;
@@ -5568,7 +5574,7 @@ function quoteBits(q) {
   const tokPx = livePrice(state.active) || 0;
   const solPx = Number(state.prices && state.prices[SOL]) || 0;
   const spotUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
-  const shown = quoteShownUsd(q && q.outUsdValue, spotUsd);
+  const shown = quoteShownUsd(q && q.outUsdValue, spotUsd, q && q.inUsdValue);
   const qUsd = Number(q && q.outUsdValue);
   const rejected = shown > 0 && Number.isFinite(qUsd) && qUsd > 0 && shown !== qUsd;
   if (Number.isFinite(impact) && !rejected) {
@@ -5607,9 +5613,9 @@ function quoteSummary() {
   const tokPx = livePrice(t) || 0;
   // A missing token price makes Jupiter report $0 out. That is not a -100% fill.
   const spotUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
-  const outUsd = quoteShownUsd(qUsd, spotUsd);
   let inUsd = inQuote > 0 ? inQuote : 0;
   if (!(inUsd > 0)) inUsd = state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx;
+  const outUsd = quoteShownUsd(qUsd, spotUsd, inUsd);
   const pct = outUsd > 0 && inUsd > 0 ? ((outUsd - inUsd) / inUsd) * 100 : null;
   const icon = state.side === "buy" ? tokenIcon(t.icon) : `<img src="${SOL_ICON}" alt="">`;
   const more = quoteBits(state.quote).line
