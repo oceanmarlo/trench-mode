@@ -5514,6 +5514,19 @@ function portfolioView() {
   return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
 }
 
+// Jupiter's outUsdValue on a new mint can be several times the price already
+// on screen. That is not the fill: the summary then paints a fake green profit.
+// Within 2x, keep Jupiter. Past that, the on-screen price wins. A missing
+// dollar stays missing so a zero cannot become a -100% fill.
+function quoteShownUsd(qUsd, spotUsd) {
+  const q = Number(qUsd);
+  const s = Number(spotUsd);
+  const qOk = Number.isFinite(q) && q > 0;
+  const sOk = Number.isFinite(s) && s > 0;
+  if (qOk && sOk && (q > s * 2 || s > q * 2)) return s;
+  if (qOk) return q;
+  return sOk ? s : 0;
+}
 function quoteBits(q) {
   const plan = Array.isArray(q?.routePlan) ? q.routePlan : [];
   const labels = [];
@@ -5524,7 +5537,15 @@ function quoteBits(q) {
   const parts = [];
   if (labels.length) parts.push(labels.join(" · "));
   const impact = Number(q?.priceImpact);
-  if (Number.isFinite(impact)) {
+  const outDec = state.side === "buy" ? ((state.active && state.active.decimals) || 6) : 9;
+  const outUi = q && q.outAmount ? ui(q.outAmount, outDec) : 0;
+  const tokPx = livePrice(state.active) || 0;
+  const solPx = Number(state.prices && state.prices[SOL]) || 0;
+  const spotUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
+  const shown = quoteShownUsd(q && q.outUsdValue, spotUsd);
+  const qUsd = Number(q && q.outUsdValue);
+  const rejected = shown > 0 && Number.isFinite(qUsd) && qUsd > 0 && shown !== qUsd;
+  if (Number.isFinite(impact) && !rejected) {
     const label = signedPctLabel(impact);
     if (label) parts.push("Impact " + label.text);
   }
@@ -5559,8 +5580,8 @@ function quoteSummary() {
   const solPx = Number(state.prices[SOL]) || 0;
   const tokPx = livePrice(t) || 0;
   // A missing token price makes Jupiter report $0 out. That is not a -100% fill.
-  let outUsd = qUsd > 0 ? qUsd : 0;
-  if (!(outUsd > 0)) outUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
+  const spotUsd = state.side === "buy" ? outUi * tokPx : outUi * solPx;
+  const outUsd = quoteShownUsd(qUsd, spotUsd);
   let inUsd = inQuote > 0 ? inQuote : 0;
   if (!(inUsd > 0)) inUsd = state.side === "buy" ? Number(state.amount) * solPx : sellTokens() * tokPx;
   const pct = outUsd > 0 && inUsd > 0 ? ((outUsd - inUsd) / inUsd) * 100 : null;
