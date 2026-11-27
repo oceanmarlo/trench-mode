@@ -640,8 +640,15 @@ async function loadTape(force = false) {
   if (!force && state.tape.length && streamLive()) return; // trades arrive over the stream
   const data = await datapi(`https://datapi.jup.ag/v1/txs/${t.id}?limit=40`);
   if (state.active !== t) return;
-  state.tape = data.txs || [];
-  state.tapeIds = new Set(state.tape.map((x) => x.txHash || x.actionId));
+  const raw = Array.isArray(data.txs) ? data.txs : [];
+  // Both legs share a txHash. Remember every id so the hidden leg cannot reappear.
+  state.tape = collapseTape(raw);
+  state.tapeIds = new Set();
+  for (const x of raw) {
+    if (!x) continue;
+    if (x.txHash) state.tapeIds.add(x.txHash);
+    if (x.actionId) state.tapeIds.add(x.actionId);
+  }
   feedMark("tradesPoll");
   const box = $("#tape");
   if (box) box.innerHTML = tapeRows();
@@ -5316,10 +5323,60 @@ function tradePanel() {
     <div class="ultra">✦ ${engine} · <span id="status">${esc(state.status)}</span></div>`;
 }
 
+// A finite positive token amount. Null, "", true, and NaN are not a fill.
+function tapeAmount(x) {
+  const n = x && x.amount;
+  if (typeof n === "number") return Number.isFinite(n) && n > 0 ? n : null;
+  if (typeof n !== "string" || !n.trim()) return null;
+  const v = Number(n);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+// Jupiter records both pool legs of one swap: same tx, trader, and amount, opposite type.
+function sameTapeFill(a, b) {
+  if (!a || !b || a.type === b.type) return false;
+  const ta = a.traderAddress, tb = b.traderAddress;
+  if (typeof ta !== "string" || !ta || ta !== tb) return false;
+  const aa = tapeAmount(a), bb = tapeAmount(b);
+  if (aa == null || bb == null) return false;
+  return Math.abs(aa - bb) / Math.max(aa, bb) < 0.001;
+}
+function tapeLegRank(x) {
+  let rank = 0;
+  if (x && x.isValidPrice === true) rank += 4;
+  if (x && x.isValidPosition === true) rank += 2;
+  return rank;
+}
+function preferTapeLeg(prev, next) {
+  if (!sameTapeFill(prev, next)) return prev;
+  return tapeLegRank(next) > tapeLegRank(prev) ? next : prev;
+}
+// Showing both legs paints every trade twice, red then green. Split fills stay.
+function collapseTape(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const slot = new Map();
+  for (const x of list) {
+    if (!x || typeof x !== "object") continue;
+    const hash = typeof x.txHash === "string" ? x.txHash : "";
+    if (!hash || !slot.has(hash)) {
+      if (hash) slot.set(hash, out.length);
+      out.push(x);
+      continue;
+    }
+    const prev = out[slot.get(hash)];
+    if (prev && sameTapeFill(prev, x)) {
+      out[slot.get(hash)] = preferTapeLeg(prev, x);
+      continue;
+    }
+    slot.set(hash, out.length);
+    out.push(x);
+  }
+  return out;
+}
 function tapeRows() {
   const t = state.active || {};
   const supply = t.circSupply || 0;
-  let rows = state.tape.slice();
+  let rows = collapseTape(state.tape);
   if (state.txFilter === "You") rows = rows.filter((x) => state.wallet && x.traderAddress === state.wallet);
   else if (state.txFilter === "Dev") rows = rows.filter((x) => t.dev && x.traderAddress === t.dev);
   else if (state.txFilter !== "All") {
@@ -6772,9 +6829,21 @@ function onStreamActions(list) {
   if (!a) return;
   if (!state.tapeIds) state.tapeIds = new Set();
   let added = 0, vol = 0;
+  let replaced = 0;
   for (const x of list) {
     if (x.asset !== a.id) continue;
     const id = x.txHash || x.actionId;
+    // The other pool leg of a swap already on screen is not a second trade.
+    if (x.txHash && state.tapeIds.has(x.txHash)) {
+      const i = state.tape.findIndex((row) => row && row.txHash === x.txHash && sameTapeFill(row, x));
+      if (i >= 0 && preferTapeLeg(state.tape[i], x) !== state.tape[i]) {
+        state.tape[i] = x;
+        if (x.usdPrice > 0) notePrice(a.id, x.usdPrice, actionSlot(x), "trade");
+        replaced++;
+      }
+      if (x.actionId) state.tapeIds.add(x.actionId);
+      continue;
+    }
     if (state.tapeIds.has(id)) continue;
     state.tapeIds.add(id);
     state.tape.unshift(x);
@@ -6783,7 +6852,7 @@ function onStreamActions(list) {
     if (x.usdPrice > 0) notePrice(a.id, x.usdPrice, actionSlot(x), "trade");
     added++;
   }
-  if (!added) return;
+  if (!added && !replaced) return;
   feedMark("tradesStream");
   if (state.tape.length > 80) state.tape.length = 80;
   if (state.tapeIds.size > 2000) state.tapeIds = new Set(state.tape.map((x) => x.txHash || x.actionId));
