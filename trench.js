@@ -4506,6 +4506,16 @@ function rcSummary(d) {
     score: d.score_normalised, level, risks: risks.slice(0, 6) };
 }
 
+function curvePctText(n) {
+  // Number(null) is 0 — reject missing values before coercing.
+  if (n == null || n === "") return "—";
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  // Keep 99.92 from rounding up to a fake 100% graduation.
+  if (v >= 99.95) return "99.9%";
+  if (v >= 9.95) return v.toFixed(1).replace(/\.0$/, "") + "%";
+  return v.toFixed(2).replace(/0+$/, "").replace(/\.$/, "") + "%";
+}
 function alphaFields(t, iv) {
   const win = ALPHA_IVS.includes(iv) ? iv : "24h";
   // 24h keeps the old fallback. Other windows use only that window so a 5m filter cannot read 1h stats.
@@ -4514,14 +4524,25 @@ function alphaFields(t, iv) {
   const volSt = win === "24h" ? s24 : (t["stats" + win] || {});
   const born = t.firstPool?.createdAt || t.createdAt;
   const a = t.audit || {};
+  const mcap = t.mcap ?? (t.circSupply && t.usdPrice ? t.circSupply * t.usdPrice : null);
+  const mcapOk = mcap != null && Number.isFinite(Number(mcap));
+  const px = Number(t.usdPrice);
+  const hasPx = mcapOk || (Number.isFinite(px) && px > 0);
+  // Graduating gems often omit mcap/price while still sending bondingCurve (0–100).
+  const curveRaw = Number(t.bondingCurve);
+  const curve = !alphaGraduated(t) && Number.isFinite(curveRaw) && curveRaw >= 0 && curveRaw <= 100
+    ? curveRaw
+    : null;
   return {
-    mcap: t.mcap ?? (t.circSupply && t.usdPrice ? t.circSupply * t.usdPrice : null),
+    mcap: mcapOk ? Number(mcap) : null,
+    curve,
     liq: t.liquidity ?? null,
     // Missing buy and sell volume is unknown, not zero. A real 0 still prints $0.00.
     vol: volSt.buyVolume == null && volSt.sellVolume == null
       ? null
       : (Number(volSt.buyVolume) || 0) + (Number(volSt.sellVolume) || 0),
-    chg: st.priceChange ?? null,
+    // A lone -100% next to an empty mcap reads like a fake wipe when Jupiter sent no price.
+    chg: hasPx ? (st.priceChange ?? null) : null,
     ageH: born ? (Date.now() - new Date(born).getTime()) / 3.6e6 : null,
     holders: holderCountOf(t),
     top10: a.topHoldersPercentage ?? null,
@@ -4534,6 +4555,12 @@ function alphaFields(t, iv) {
     mintOff: a.mintAuthorityDisabled === true,
     verified: !!t.isVerified
   };
+}
+function alphaMcapCell(x) {
+  if (x.mcap != null) return { main: usd(x.mcap), sub: "L " + usd(x.liq) };
+  // Prefer real curve progress over a blank MCap cell on Graduating rows.
+  if (x.curve != null) return { main: curvePctText(x.curve), sub: "curve" };
+  return { main: "—", sub: "L " + usd(x.liq) };
 }
 
 function alphaPass(x, f) {
@@ -4781,10 +4808,11 @@ function alphaRowsHtml() {
     ].join("") + (t._migrated ? `<i class="b ok" title="Migrated from pump.fun">🎓</i>` : t._pump ? `<i class="b wait" title="New on pump.fun (PumpPortal)">pump</i>` : "");
     const lpb = lpBadge(t.id);
     const change = pctText(x.chg);
+    const mc = alphaMcapCell(x);
     return `<button type="button" class="al-row" data-alpha-open="${esc(t.id)}" data-liq="${marketGate(t)}">
       <span class="al-tok"><span class="tok-av">${tokenIcon(t.icon, 'loading="lazy"')}</span>
         <span class="al-meta"><b>${x.verified ? `<i class="vf" title="Verified">✓</i>` : ""}${esc(t.symbol || t.id.slice(0, 4))}</b><span>${ageText(x.ageH)} ${badges}</span>${lpb ? `<span class="al-rc">${lpb}</span>` : ""}</span></span>
-      <span class="al-num"><b>${usd(x.mcap)}</b><span>L ${usd(x.liq)}</span></span>
+      <span class="al-num"><b>${mc.main}</b><span>${esc(mc.sub)}</span></span>
       <span class="al-num"><b>${usd(x.vol)}</b><span>${x.holders == null ? "Hld —" : "Hld " + compactCount(x.holders)}</span></span>
       <span class="al-num"><b class="${x.chg == null ? "" : cls(x.chg)}${change.length >= 7 ? " al-change-long" : ""}" title="${esc(change)}">${esc(change)}</b><span>T10 ${x.top10 == null ? "—" : pctShown(x.top10)}</span></span>
     </button>`;
