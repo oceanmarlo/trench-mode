@@ -5203,7 +5203,7 @@ function pctShown(n) {
   if (abs < 100 && Math.abs(Math.round(v)) >= 100) return v.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%";
   return Math.round(v) + "%";
 }
-// Buy and sell pills share one basis so 100% Buy is never paired with a dash.
+// Split a single metric; volume and trader rows have independent denominators.
 function splitPct(a, b) {
   const aOk = a != null && Number.isFinite(Number(a));
   const bOk = b != null && Number.isFinite(Number(b));
@@ -5213,6 +5213,13 @@ function splitPct(a, b) {
   if (!(av + bv > 0)) return null;
   const left = Math.round(100 * av / (av + bv));
   return [left, 100 - left];
+}
+function traderSellPct(s) {
+  const total = s.numTraders, buyers = s.numNetBuyers;
+  // Jupiter's reference uses net buyers out of unique traders, not trade counts
+  // or volume. Unknown/invalid counts cannot establish the remaining share.
+  if (!Number.isSafeInteger(total) || total <= 0 || !Number.isSafeInteger(buyers) || buyers < 0 || buyers > total) return null;
+  return Math.round(100 * (total - buyers) / total);
 }
 function shareShown(n) {
   if (n == null || !Number.isFinite(Number(n))) return null;
@@ -5363,10 +5370,10 @@ function sheetVals() {
   const s = stat(state.infoWin);
   const buy = Number(s.buyVolume) || 0, sell = Number(s.sellVolume) || 0;
   const volSum = buy + sell;
-  // Volume share when we have it; otherwise buyer/seller counts. Never mix the two.
+  // The first pill is volume; the second belongs to the Traders row.
   const pair = splitPct(s.buyVolume, s.sellVolume) || splitPct(s.numBuys, s.numSells);
   const buyPct = pair ? pair[0] : null;
-  const sellPct = pair ? pair[1] : null;
+  const sellPct = traderSellPct(s);
   const curveOn = onCurve(t);
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
   return {
