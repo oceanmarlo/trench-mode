@@ -2180,7 +2180,13 @@ function paintLive() {
     barP.textContent = hb.pnl;
     barP.className = hb.clsName;
   }
-  if (est) est.innerHTML = quoteSummary();
+  if (est) {
+    const nextEst = quoteSummary();
+    if (est.innerHTML !== nextEst) {
+      est.innerHTML = nextEst;
+      scheduleFitTradeStatus(false);
+    }
+  }
   paintQuoteExtras();
   if (stat) stat.textContent = state.quoting ? "Quoting…" : state.status;
   const go = $("#go");
@@ -3776,9 +3782,10 @@ function bindChartResize() {
   grip.ondblclick = () => {
     state.chartH = 260;
     state.chartH = chartHeight();
-    localStorage.setItem(CHART_H_KEY, String(state.chartH));
+    try { localStorage.removeItem(CHART_H_KEY); } catch (_) {}
     wrap.style.height = state.chartH + "px";
     applyPaneHeights();
+    scheduleFitTradeStatus(false);
   };
 }
 // Re-clamp to the viewport on rotation, but keep the user's saved preference.
@@ -3791,6 +3798,7 @@ window.addEventListener("resize", () => {
   if (w && !state.chartFull) w.style.height = state.chartH + "px";
   if (chartUi.chart) applyPaneHeights();
   parkLogo();
+  scheduleFitTradeStatus(false);
 });
 
 
@@ -3926,6 +3934,63 @@ function revealTab() {
   if (!sc || !tabs) return;
   sc.scrollTop = Math.max(0, tabs.offsetTop - 2);
 }
+// Default 260px chart plus the bundlers line leaves the swap status half under
+// the Holding bar. Shrink the unset chart; never overwrite a dragged height.
+function tradeStatusFit(chartH, clip, explicit, panes) {
+  const h = Number(chartH);
+  const over = Number(clip);
+  const shrink = !explicit && !panes && over > 1 && Number.isFinite(h);
+  const next = shrink ? Math.round(Math.max(180, h - over)) : h;
+  const changed = shrink && next < h - 1;
+  return { chartH: changed ? next : h, scroll: over > 1 && !changed };
+}
+function chartSizeExplicit() {
+  try {
+    const raw = localStorage.getItem(CHART_H_KEY);
+    const n = Number(raw);
+    return raw != null && raw !== "" && Number.isFinite(n) && n > 0;
+  } catch (_) { return false; }
+}
+function statusClip() {
+  const sc = document.querySelector(".scroll");
+  const ultra = document.querySelector("#trade-dock .ultra");
+  if (!sc || !ultra || state.view !== "spot" || state.chartFull) return 0;
+  return ultra.getBoundingClientRect().bottom - (sc.getBoundingClientRect().bottom - 6);
+}
+function maybeRevealTradeStatus() {
+  const sc = document.querySelector(".scroll");
+  const tabs = sc && sc.querySelector(".tabs");
+  if (sc && tabs && tabs.getBoundingClientRect().top < sc.getBoundingClientRect().top + 8) return;
+  revealQuote();
+}
+function fitTradeStatus(force, pass) {
+  if (chartUi.dragging) return;
+  pass = pass || 0;
+  if (pass > 3) {
+    if (force && statusClip() > 1) maybeRevealTradeStatus();
+    return;
+  }
+  const clip = statusClip();
+  const fit = tradeStatusFit(state.chartH || 260, clip, chartSizeExplicit(), paneIds().length);
+  if (clip > 1 && fit.chartH !== state.chartH) {
+    state.chartH = fit.chartH;
+    const wrap = $("#chart-wrap");
+    if (wrap && !state.chartFull) wrap.style.height = state.chartH + "px";
+    requestAnimationFrame(() => fitTradeStatus(force, pass + 1));
+    return;
+  }
+  if (force && clip > 1) maybeRevealTradeStatus();
+}
+function scheduleFitTradeStatus(force) {
+  if (force) chartUi.fitReveal = true;
+  if (chartUi.fitFrame) return;
+  chartUi.fitFrame = requestAnimationFrame(() => {
+    chartUi.fitFrame = 0;
+    const reveal = chartUi.fitReveal;
+    chartUi.fitReveal = false;
+    fitTradeStatus(reveal, 0);
+  });
+}
 function revealQuote() {
   const sc = document.querySelector(".scroll");
   const dock = document.getElementById("trade-dock");
@@ -3984,8 +4049,8 @@ function render() {
   if (sc) {
     if (jumpTab) revealTab();
     else if (keep) sc.scrollTop = keep;
-    if (state.revealQuote) revealQuote();
   }
+  const revealDock = state.revealQuote;
   state.revealQuote = false;
   if (state.view === "spot" && state.active) rcWant([state.active.id]);
   if (state.marketOpen) placeOrderMenu();
@@ -3995,6 +4060,7 @@ function render() {
     navigation.scrollTimer = setTimeout(() => saveNavigation("replace"), 150);
   }, { passive: true });
   queueNavigationSave();
+  scheduleFitTradeStatus(revealDock);
 }
 
 function tokenAge(iso) {
