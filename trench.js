@@ -705,8 +705,25 @@ const holdersRefresh = { at: 0, next: 0, failures: 0, rateUntil: 0 };
 function validHolderCount(n) {
   return Number.isSafeInteger(n) && n >= 0;
 }
+// Net buyers still hold tokens. A count of 0 beside that is the holders
+// index saying it has not seen the mint, not a measured empty wallet set.
+function positiveNetBuyers(t) {
+  if (!t) return false;
+  for (const key of ["stats5m", "stats1h", "stats6h", "stats24h"]) {
+    const n = t[key] && Number(t[key].numNetBuyers);
+    if (Number.isFinite(n) && n > 0) return true;
+  }
+  return false;
+}
+function storedHolderCount(t) {
+  const cached = holderCounts.get(t?.id)?.count;
+  if (validHolderCount(cached)) return cached;
+  return validHolderCount(t?.holderCount) ? t.holderCount : null;
+}
 function holderCountOf(t) {
-  return holderCounts.get(t?.id)?.count ?? (validHolderCount(t?.holderCount) ? t.holderCount : null);
+  const n = storedHolderCount(t);
+  if (n === 0 && positiveNetBuyers(t)) return null;
+  return n;
 }
 function noteHolderCount(t, count) {
   if (!t?.id || !validHolderCount(count)) return;
@@ -754,9 +771,17 @@ async function loadHolders() {
         || (h.tags != null && !Array.isArray(h.tags)) || (h.holderTags != null && !Array.isArray(h.holderTags)))) {
       throw new Error("Invalid Jupiter holder data");
     }
-    state.holders = data.holders;
-    // A count pushed while this snapshot was in flight wins over the older request.
-    if (holderCounts.get(t.id) === request.countRecord) noteHolderCount(t, data.count);
+    // datapi holders returns {holders: [], count: 0} before it has indexed the
+    // mint. Applying that zero erased an asset count of 3 and painted Holders 0
+    // on a seconds-old coin that already had net buyers. A later asset frame
+    // can still record a real zero once the buyers are gone.
+    const unindexedZero = data.count === 0 && data.holders.length === 0
+      && (storedHolderCount(t) > 0 || positiveNetBuyers(t));
+    if (!unindexedZero) {
+      state.holders = data.holders;
+      // A count pushed while this snapshot was in flight wins over the older request.
+      if (holderCounts.get(t.id) === request.countRecord) noteHolderCount(t, data.count);
+    }
     holdersRefresh.at = Date.now();
     holdersRefresh.failures = 0;
     holdersRefresh.next = request.started + 2000;
