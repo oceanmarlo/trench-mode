@@ -2670,11 +2670,21 @@ function axisDay(d, tf) {
   if (tf === "1D") opt.timeZone = "UTC";
   return d.toLocaleDateString(undefined, opt);
 }
+// Date-only ticks on a few-day window share a local day ("Nov 24" then "Nov 24").
+// Clock-only repeats the same hour the next evening, so those ticks need both.
+// 4h and 1D stay date-only: a short 4h chart must not fall back to a repeated clock.
+function axisDayStamp(d, tf, spanSec) {
+  const day = axisDay(d, tf);
+  if (tf === "4h" || tf === "1D") return day;
+  const fewDays = Number.isFinite(spanSec) && spanSec > 0 && spanSec < 96 * 3600;
+  if (tf === "15m" || fewDays) return day + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  return day;
+}
 function axisClock(ts) {
   const d = new Date(Number(ts) * 1000);
   if (!Number.isFinite(d.getTime())) return "";
   const tf = resolvedTf();
-  if (axisWantsDay()) return axisDay(d, tf);
+  if (axisWantsDay()) return axisDayStamp(d, tf, visibleSpanSec());
   const sec = tf === "1s" || tf === "15s";
   return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + (sec ? ":" + pad2(d.getSeconds()) : "");
 }
@@ -2690,7 +2700,7 @@ function tickMarkText(time, type) {
   // A month tick is a UTC boundary. Locally that is often the previous evening,
   // so a month-only label sits after a later day ("Oct 12" then "Oct"). Always print the day.
   // On an overnight 5m chart a day tick beside a clock tick collides, so those stay clocks.
-  if (axisWantsDay()) return axisDay(d, tf);
+  if (axisWantsDay()) return axisDayStamp(d, tf, visibleSpanSec());
   if ((type === 1 || type === 2) && tf !== "1s" && tf !== "15s" && tf !== "1m" && tf !== "3m" && tf !== "5m" && tf !== "15m") return axisDay(d, tf);
   return clock;
 }
