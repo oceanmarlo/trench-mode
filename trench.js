@@ -5462,6 +5462,19 @@ function collapseTape(list) {
   }
   return out;
 }
+// A pool leg Jupiter marks isValidPrice false is often still the token price
+// (Bonk's tape is mostly that flag, within 0.3% of spot). A dust leg 18% off
+// is not a market cap — it painted $158.92M beside a $194M tape.
+function tapePrice(x, spot) {
+  if (!x) return null;
+  const p = Number(x.usdPrice);
+  if (!Number.isFinite(p) || !(p > 0)) return null;
+  if (x.isValidPrice === false) {
+    const ref = Number(spot);
+    if (!(ref > 0) || Math.abs(p - ref) / ref > 0.05) return null;
+  }
+  return p;
+}
 function tapeRows() {
   const t = state.active || {};
   const supply = t.circSupply || 0;
@@ -5473,11 +5486,10 @@ function tapeRows() {
     rows = rows.filter((x) => (x.walletCategories || []).some((c) => String(c).toLowerCase().includes(key)));
   }
   const dir = state.txDir === "asc" ? 1 : -1;
+  const spot = Number(state.prices && state.prices[t.id]) > 0 ? Number(state.prices[t.id]) : Number(t.usdPrice);
   // Jupiter sends ISO timestamps. Subtracting the strings returned NaN and
   // changed only the arrow, never the rows (including incoming stream trades).
-  const value = (x) => state.txSort === "mc"
-    ? (Number.isFinite(x.usdPrice) && x.usdPrice > 0 ? x.usdPrice : null)
-    : tradeTime(x.timestamp);
+  const value = (x) => state.txSort === "mc" ? tapePrice(x, spot) : tradeTime(x.timestamp);
   rows.sort((a, b) => {
     const va = value(a), vb = value(b);
     // Missing values belong at the end in either direction, not at a fake zero.
@@ -5487,7 +5499,8 @@ function tapeRows() {
   if (!rows.length) return `<div class="k" style="padding:12px 0">No ${state.txFilter.toLowerCase()} trades in the latest tape.</div>`;
   return rows.slice(0, 40).map((x) => {
     const buy = x.type === "buy";
-    const mc = supply && x.usdPrice ? usd(supply * x.usdPrice) : "—";
+    const px = tapePrice(x, spot);
+    const mc = supply && px ? usd(supply * px) : "—";
     const addr = x.traderAddress || "";
     const trader = addr
       ? `<a class="trader" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" aria-label="Trader on Solscan">${esc(addr.slice(-4))}</a>`
