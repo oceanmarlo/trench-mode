@@ -4296,6 +4296,25 @@ function tokenAge(iso, now = Date.now()) {
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
 }
+// Jupiter's asset createdAt can be the index date, hundreds of days after the
+// first pool. The list already ages from firstPool. The header must too, or
+// Bonk reads 903d beside a May 2023 pool. Use the earlier finite launch.
+function tokenBorn(t) {
+  if (!t || typeof t !== "object") return "";
+  const ms = (iso) => {
+    if (typeof iso !== "string" || !iso) return null;
+    const n = new Date(iso).getTime();
+    if (!Number.isFinite(n) || n < Date.UTC(2020, 0, 1)) return null;
+    if (n > Date.now() + 60000) return null;
+    return n;
+  };
+  const poolIso = t.firstPool && typeof t.firstPool === "object" ? t.firstPool.createdAt : "";
+  const pool = ms(poolIso);
+  const created = ms(t.createdAt);
+  if (pool != null && (created == null || pool <= created)) return poolIso;
+  if (created != null) return t.createdAt;
+  return "";
+}
 // Header age is not part of the price paint. Update only that node so a live
 // tick cannot rebuild the header or rewrite a trade-row age.
 function paintHeaderAge(root, iso, now) {
@@ -4303,7 +4322,7 @@ function paintHeaderAge(root, iso, now) {
   if (!doc) return "";
   const el = doc.querySelector(".token-head .age");
   if (!el) return "";
-  const born = arguments.length > 1 ? iso : (typeof state !== "undefined" && state.active ? state.active.createdAt : "");
+  const born = arguments.length > 1 ? iso : (typeof state !== "undefined" && state.active ? tokenBorn(state.active) : "");
   const next = tokenAge(born, now);
   if (el.textContent !== next) el.textContent = next;
   return next;
@@ -4552,7 +4571,7 @@ function tokenHead(t, price, chg) {
       <div class="tok-av">${tokenIcon(t.icon, 'width="42" height="42"')}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
       <div class="tok-name">
         <div class="sym"><span class="tok-sym">${esc(t.symbol)}</span><span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
-        <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
+        <div class="sub"><span class="age">${tokenAge(tokenBorn(t))}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
       </div>
       <div class="tok-actions">
         <button type="button" class="round" id="share" aria-label="Share"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg></button>
