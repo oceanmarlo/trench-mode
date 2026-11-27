@@ -5530,6 +5530,9 @@ function shareText(n) {
   return v.toFixed(2) + "%";
 }
 // Header and Alpha rows are one line. An integer round turns 0.70 into 1 and 99.6 into 100.
+// Near-100 shares used to keep two decimals ("T10 99.72%"), which overflowed the
+// 390px change column by a few pixels past the row edge. Prefer one decimal when
+// it still avoids printing 100 (99.7%); keep two only when 1dp would round up.
 function pctShown(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const v = Number(n);
@@ -5542,7 +5545,15 @@ function pctShown(n) {
     if (Math.abs(Number(text)) >= 10) text = v.toFixed(2);
     return text.replace(/\.0$/, "") + "%";
   }
-  if (abs < 100 && Math.abs(Math.round(v)) >= 100) return v.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%";
+  if (abs < 100 && Math.abs(Math.round(v)) >= 100) {
+    let d = 1;
+    let text = v.toFixed(d);
+    while (d < 2 && Math.abs(Number(text)) >= 100) {
+      d += 1;
+      text = v.toFixed(d);
+    }
+    return text.replace(/0+$/, "").replace(/\.$/, "") + "%";
+  }
   return Math.round(v) + "%";
 }
 // Split a single metric; volume and trader rows have independent denominators.
