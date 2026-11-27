@@ -854,7 +854,9 @@ function spotGate(t) {
 function lpPullBadge(t) {
   const g = spotGate(t);
   if (g === "allow" || alphaLiqOk(g)) return "";
-  if (g === "checking") return `<i class="b wait">LP…</i>`;
+  // "LP…" is an ellipsis, so the phone reads it as a clipped "LP can be pulled".
+  // Match the header: a grey ellipsis while the check is still in flight.
+  if (g === "checking") return `<i class="b wait" title="Checking liquidity" aria-label="Checking liquidity">…</i>`;
   return `<span class="lp-pull">LP can be pulled</span>`;
 }
 function spotScanParts() {
@@ -5082,7 +5084,7 @@ function lpBadgeNum(lp) {
 }
 function lpBadge(mint) {
   const r = rcGet(mint);
-  if (!r) return rc.queued.has(mint) ? `<i class="b wait" title="Checking RugCheck">LP…</i>` : "";
+  if (!r) return rc.queued.has(mint) ? `<i class="b wait" title="Checking RugCheck" aria-label="Checking RugCheck">…</i>` : "";
   if (r.missing) return `<i class="b wait" title="No RugCheck data">LP?</i>`;
   const lp = r.lp;
   const lpCls = lp == null ? "wait" : lp >= 90 ? "ok" : lp >= 50 ? "mid" : "bad";
