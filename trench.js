@@ -2603,12 +2603,13 @@ function sharedPriceLabel(a) {
   if (!(hi > 0) || !(lo < Infinity) || hi >= 0.01 || !(a > 0)) return null;
   if (a < lo * 0.2 || a > hi * 8) return null;
   const span = Math.max(hi - (lo > 0 ? lo : 0), hi * 0.01);
-  // Autoscale adds room above the high. Size the subscript from that top
-  // so a tick never prints a mantissa of 12.00.
-  const top = hi + span * 0.45;
-  let zeros = Math.floor(-Math.log10(top));
+  // Size the subscript from the candle high, not the autoscale padding.
+  // Padding above an 8e-6 high crosses 1e-5 and dropped every label to
+  // subscript 4, so the pill read 0.0₄022 beside a $0.0₅216 header.
+  // A padding tick that no longer fits the mantissa stays blank.
+  let zeros = Math.floor(-Math.log10(hi));
   if (zeros > 9) return null;
-  if (top >= 10 ** -zeros) zeros -= 1;
+  if (hi >= 10 ** -zeros) zeros -= 1;
   if (zeros < 2 || zeros > 9) return null;
   const step = span / 6;
   let digits = 3;
