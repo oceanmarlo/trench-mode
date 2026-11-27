@@ -4705,8 +4705,19 @@ function paintRcHead() {
   badge.className = "badge rc " + v.cls;
   badge.textContent = v.mark;
   badge.setAttribute("aria-label", v.label);
+  paintRcLine();
+}
+// The curve percent lives on the token, not in the RugCheck cache. A stream
+// update used to leave "Curve 6.5%" on screen after bondingCurve had already
+// moved. Refresh the line from the current token; skip the write when it matches.
+function paintRcLine() {
+  const t = state.active;
   const line = document.getElementById("rc-line");
-  if (line) line.innerHTML = rcLineInner(t);
+  if (!t || !line) return;
+  const next = rcLineInner(t);
+  if (line.getAttribute("data-rc") === next) return;
+  line.innerHTML = next;
+  line.setAttribute("data-rc", next);
 }
 function rcWantFront(mints) {
   const want = [];
@@ -7163,6 +7174,7 @@ function streamFlush() {
 // Price / liquidity / volume cells in the token header, without a full re-render.
 function paintHeadStats() {
   const t = state.active;
+  paintRcLine();
   const st = document.querySelectorAll(".stats .v");
   if (!t || st.length < 3) return;
   // Live ticks retry expired failures through the same cached, rate-limited queue.
