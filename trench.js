@@ -6124,6 +6124,8 @@ function bind() {
     // Keep invalid/incomplete text as invalid state, never the last valid spend.
     if (state.side === "sell") state.sellPct = v;
     else state.amount = v;
+    // A price tick must not be required to drop the previous chip. Invalid text stays unselected.
+    syncPresetButtons(state.side === "sell" ? "pct" : "amt", v, !amountInputError());
     scheduleQuote(700);
   };
   const go = $("#go");
