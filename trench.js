@@ -694,6 +694,7 @@ async function refreshVisibleHolders() {
 }
 function startHolderRefresh() {
   const tick = async () => {
+    try { paintHeaderAge(); } catch (_) {}
     try { await refreshVisibleHolders(); } catch (_) {}
     setTimeout(tick, 250);
   };
@@ -2194,6 +2195,9 @@ function paintLive() {
   }
   const utc = $("#utc");
   if (utc) utc.textContent = clockLabel();
+  // The clock moves on every tick. The launch age used to stay at whatever the
+  // last full render printed, so a 5s coin still read 5s at 12s.
+  paintHeaderAge();
   parkLogo();
   paintAxisEdge();
   const hb = holdBar(p);
@@ -4171,13 +4175,28 @@ function render() {
   scheduleFitTradeStatus(revealDock);
 }
 
-function tokenAge(iso) {
+function tokenAge(iso, now = Date.now()) {
   if (!iso) return "";
-  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  const born = new Date(iso).getTime();
+  if (!Number.isFinite(born)) return "";
+  const s = Math.max(0, (now - born) / 1000);
+  if (!Number.isFinite(s)) return "";
   if (s < 60) return Math.max(1, Math.floor(s)) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
+}
+// Header age is not part of the price paint. Update only that node so a live
+// tick cannot rebuild the header or rewrite a trade-row age.
+function paintHeaderAge(root, iso, now) {
+  const doc = root && root.querySelector ? root : (typeof document !== "undefined" ? document : null);
+  if (!doc) return "";
+  const el = doc.querySelector(".token-head .age");
+  if (!el) return "";
+  const born = arguments.length > 1 ? iso : (typeof state !== "undefined" && state.active ? state.active.createdAt : "");
+  const next = tokenAge(born, now);
+  if (el.textContent !== next) el.textContent = next;
+  return next;
 }
 function starList() {
   try { return JSON.parse(localStorage.getItem("trench-stars")) || []; } catch (_) { return []; }
