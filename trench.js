@@ -576,9 +576,10 @@ async function loadCandles(force = false) {
         || [c.open, c.high, c.low, c.close].some((v) => typeof v !== "number" || !Number.isFinite(v) || v < 0))) {
       throw new Error("Invalid Jupiter candle data");
     }
-    if (full) state.candles = got;
+    const fixed = got.map(repairCandle);
+    if (full) state.candles = fixed;
     else {
-      for (const c of got) {
+      for (const c of fixed) {
         const i = state.candles.findIndex((x) => Number(x.time) === Number(c.time));
         if (i >= 0) state.candles[i] = c;
         else if (!state.candles.length || Number(c.time) > Number(state.candles[state.candles.length - 1].time)) state.candles.push(c);
@@ -3072,14 +3073,37 @@ function paintLegend(bar, vol, param) {
   inds.textContent = parts.join("  ");
 }
 
+// Jupiter's 1s feed sends high: 0 on a one-print bucket while open, low and
+// close are the print. Plotting that high pulls the market-cap scale to zero
+// and draws a wick through the volume bars. A low above the body is the same
+// unfilled field. A real low of 0, with high still above the close, stays.
+function repairCandle(c) {
+  if (!c || typeof c !== "object") return c;
+  const priceOf = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const o = priceOf(c.open), h = priceOf(c.high), l = priceOf(c.low), cl = priceOf(c.close);
+  const body = [o, cl].filter((v) => v != null && v > 0);
+  if (!body.length) return c;
+  const bodyHi = Math.max(...body);
+  const bodyLo = Math.min(...body);
+  let high = h == null || !(h > 0) || h < bodyHi ? Math.max(bodyHi, l != null && l > 0 ? l : 0) : h;
+  let low = l == null ? bodyLo : l;
+  if (low > bodyLo) low = bodyLo;
+  if (!(low >= 0)) low = bodyLo;
+  if (high < low) high = low;
+  const open = o == null ? bodyLo : o;
+  const close = cl == null ? bodyHi : cl;
+  if (high === h && low === l && open === o && close === cl) return c;
+  return { ...c, open, high, low, close };
+}
 function toBars(list) {
   const k = chartScale();
   const bars = [];
   const vols = [];
   let last = 0;
-  for (const c of list || []) {
-    const time = Number(c.time);
-    if (!time || time <= last) continue;
+  for (const raw of list || []) {
+    const c = repairCandle(raw);
+    const time = Number(c && c.time);
+    if (!c || !time || time <= last) continue;
     last = time;
     bars.push({ time, open: c.open * k, high: c.high * k, low: c.low * k, close: c.close * k });
     vols.push({ time, value: Number(c.volume) || 0, color: c.close >= c.open ? "rgba(46,189,133,.45)" : "rgba(246,70,93,.45)" });
@@ -3242,6 +3266,13 @@ function tickChart(addVolume = 0) {
   const bucket = Math.floor(Date.now() / 1000 / sec) * sec;
   let last = state.candles[state.candles.length - 1];
   if (Number(last.time) !== chartUi.lastTime) return;
+  const fixed = repairCandle(last);
+  if (fixed && fixed !== last) {
+    last.open = fixed.open;
+    last.high = fixed.high;
+    last.low = fixed.low;
+    last.close = fixed.close;
+  }
   if (bucket > chartUi.lastTime) {
     last = { time: bucket, open: last.close, high: price, low: price, close: price, volume: 0 };
     state.candles.push(last);
