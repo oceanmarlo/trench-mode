@@ -4927,8 +4927,13 @@ async function loadAlpha() {
 }
 
 function ageText(h) {
-  if (h == null) return "—";
-  if (h < 1) return Math.max(1, Math.round(h * 60)) + "m";
+  if (h == null || !Number.isFinite(Number(h))) return "—";
+  // Hours under 1 used to round up to 1m, so an 11s launch read as a minute old.
+  if (h < 1) {
+    const sec = Math.max(0, Number(h)) * 3600;
+    if (sec < 60) return Math.max(1, Math.floor(sec)) + "s";
+    return Math.floor(sec / 60) + "m";
+  }
   if (h < 48) return Math.round(h) + "h";
   if (h < 24 * 60) return Math.round(h / 24) + "d";
   return Math.round(h / 24 / 30) + "mo";
