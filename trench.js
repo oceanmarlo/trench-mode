@@ -4661,6 +4661,8 @@ function rcGet(mint) {
   if (!v || Date.now() - v.at >= (v.missing ? RC_RETRY_MS : RC_TTL)) return null;
   // Do not trust a malformed success cached by an older version either.
   if (!v.missing && (!Number.isFinite(v.score) || !Array.isArray(v.risks))) return null;
+  // Cached SOL/USDC stub (score 1, lp 0, no risks) is not a measured zero.
+  if (!v.missing && v.score === 1 && v.lp === 0 && v.risks.length === 0) return null;
   return v;
 }
 function rcSave() {
@@ -4749,9 +4751,14 @@ function rcSummary(d) {
     throw new Error("Incomplete RugCheck summary");
   }
   const risks = d.risks.map((r) => ({ name: typeof r.name === "string" ? r.name : "", level: r.level }));
+  const lp = Number.isFinite(d.lpLockedPct) ? d.lpLockedPct : null;
+  // SOL, USDC and USDT come back as a 135-byte stub: score 1, lp 0, no risks.
+  // That is not a measured zero, and a green check beside LP 0% is a fake safe.
+  // WIF is also score 1 with no risks, but its LP is a real percent. A measured
+  // 0% still carries another score or a risk (a curve token's LP 0).
+  if (d.score_normalised === 1 && lp === 0 && risks.length === 0) throw new Error("Unmeasured RugCheck stub");
   const level = risks.some((r) => r.level === "danger") ? "danger" : risks.some((r) => r.level === "warn") ? "warn" : "good";
-  return { lp: Number.isFinite(d.lpLockedPct) ? d.lpLockedPct : null,
-    score: d.score_normalised, level, risks: risks.slice(0, 6) };
+  return { lp, score: d.score_normalised, level, risks: risks.slice(0, 6) };
 }
 
 function curvePctText(n) {
