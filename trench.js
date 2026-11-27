@@ -294,6 +294,14 @@ function mcapText(t) {
   if (listed > 0) return usd(listed);
   return "—";
 }
+// A missing cap is already an em dash. A second dash for the missing 24h
+// move reads as a glitch ("— —"). Keep a dash beside a real cap.
+function headerChange(t) {
+  const c = t && t.stats24h ? t.stats24h.priceChange : null;
+  const label = moveLabel(c);
+  if (label === "—" && mcapText(t) === "—") return "";
+  return label;
+}
 const priceLabel = (n) => {
   const v = Number(n);
   if (!(v > 0)) return v === 0 ? "$0" : "—";
@@ -2206,9 +2214,10 @@ function paintLive() {
     if (feeEl.innerHTML !== next) feeEl.innerHTML = next;
   }
   if (chg && t) {
-    const c = t.stats24h?.priceChange;
-    chg.textContent = moveLabel(c);
-    const tone = moveTone(c);
+    const label = headerChange(t);
+    chg.textContent = label;
+    chg.hidden = !label;
+    const tone = label ? moveTone(t.stats24h?.priceChange) : "";
     chg.className = tone ? "chg " + tone : "chg";
   }
   if (live && t) {
@@ -4492,7 +4501,7 @@ function tokenHead(t, price, chg) {
     <div class="gmgn-line" id="gmgn-line">${gmgnLineInner()}</div>
     <div class="mc-line">
       <span class="px" id="mc">${mcapText(t)}</span>
-      <span class="chg ${moveTone(t.stats24h?.priceChange)}" id="chg">${moveLabel(t.stats24h?.priceChange)}</span>
+      <span class="chg ${headerChange(t) ? moveTone(t.stats24h?.priceChange) : ""}" id="chg"${headerChange(t) ? "" : " hidden"}>${headerChange(t)}</span>
     </div>
     <div class="stats">
       <div><div class="k">Price</div><div class="v" id="stat-px">${livePrice(t) == null ? "—" : priceLabel(livePrice(t))}</div></div>
