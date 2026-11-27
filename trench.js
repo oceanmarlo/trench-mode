@@ -3110,9 +3110,10 @@ function toBars(list) {
   }
   return { bars, vols };
 }
-// A one-print coin has no candle body. A lone ranged print still paints one
-// full-height volume stick on the lower price label, which reads as a second
-// candle. Hide volume until a second bar arrives. A flat series stays hidden.
+// A short run of volume sticks sits on the lower price label and reads as a
+// wick the print never made. Hiding only a single bar left two- and three-bar
+// coins with the same stick. Wait until a histogram has formed. A flat series
+// stays hidden.
 function barsAreFlat(bars) {
   if (!bars || !bars.length) return false;
   for (const b of bars) {
@@ -3122,7 +3123,7 @@ function barsAreFlat(bars) {
   return true;
 }
 function loneVolumeStick(bars) {
-  return !!(bars && bars.length === 1);
+  return !!(bars && bars.length > 0 && bars.length < 6);
 }
 function volumeSeries(bars, vols) {
   if (barsAreFlat(bars) || loneVolumeStick(bars)) return [];
