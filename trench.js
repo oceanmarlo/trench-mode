@@ -2787,6 +2787,16 @@ function timeLabelGroups(host) {
   }
   return groups;
 }
+// A left date tick is centered on a bar near the edge, so lightweight-charts
+// drops the letters that would start off-canvas and leaves the rest in place.
+// "Nov 21" then reads "v 21" with ink from about 17px, past the old 10px check.
+function axisLeftSliced(first, textW) {
+  if (!first) return false;
+  const firstW = first[1] - first[0];
+  if (first[0] <= 1) return true;
+  if (first[0] <= 28 && textW && firstW < textW - 4) return true;
+  return false;
+}
 function paintAxisEdge() {
   const host = chartUi.host;
   const chart = chartUi.chart;
@@ -2810,9 +2820,8 @@ function paintAxisEdge() {
   const groups = timeLabelGroups(host);
   const first = groups && groups.length ? groups[0] : null;
   // A tick that starts on the canvas edge is already clipped ("15:03:00" reads
-  // "5:03"). A short group just inside the edge is the same remnant.
-  const firstW = first ? first[1] - first[0] : 0;
-  const sliced = first && (first[0] <= 1 || (first[0] <= 10 && textW && firstW < textW - 6));
+  // "5:03"). A date whose left letters were dropped ("v 21") is the same remnant.
+  const sliced = axisLeftSliced(first, textW);
   let show = false;
   let cover = 0;
   let text = "";
