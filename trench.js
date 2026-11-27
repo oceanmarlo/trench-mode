@@ -5705,6 +5705,13 @@ function shareShown(n) {
   const v = Number(n);
   return Math.abs(v) < 0.01 ? 0 : Number(v.toFixed(2));
 }
+// Color follows the raw share. shareShown collapses <0.01 to 0, so a dust
+// Dev hold painted green — the same class as a real zero — beside "<0.01%".
+function shareCls(n, zeroCls) {
+  if (typeof n === "boolean" || n == null || n === "" || !Number.isFinite(Number(n))) return "flat";
+  if (Number(n) > 0) return "down";
+  return zeroCls || "flat";
+}
 function sheetPct(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const v = Number(n);
@@ -5913,9 +5920,9 @@ function sheetVals() {
     liqD: deltaText(s.liquidityChange), liqDCls: deltaCls(s.liquidityChange),
     holdD: deltaText(s.holderChange), holdDCls: deltaCls(s.holderChange),
     top10: shareText(audit.topHoldersPercentage),
-    top10Cls: shareShown(audit.topHoldersPercentage) > 0 ? "down" : "flat",
+    top10Cls: shareCls(audit.topHoldersPercentage, "flat"),
     dev: shareText(audit.devBalancePercentage),
-    devCls: shareShown(audit.devBalancePercentage) == null ? "flat" : (shareShown(audit.devBalancePercentage) > 0 ? "down" : "up"),
+    devCls: shareCls(audit.devBalancePercentage, "up"),
     snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
     bundler, bundlerLab, bundlerCls,
