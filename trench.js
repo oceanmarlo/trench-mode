@@ -4670,9 +4670,17 @@ function rcGet(mint) {
   if (!v || Date.now() - v.at >= (v.missing ? RC_RETRY_MS : RC_TTL)) return null;
   // Do not trust a malformed success cached by an older version either.
   if (!v.missing && (!Number.isFinite(v.score) || !Array.isArray(v.risks))) return null;
-  // Cached SOL/USDC stub (score 1, lp 0, no risks) is not a measured zero.
-  if (!v.missing && v.score === 1 && v.lp === 0 && v.risks.length === 0) return null;
+  // Cached SOL stub (score 1, lp 0) and the fresh-pump default (score 1, lp 100).
+  if (!v.missing && rcUnmeasured(v.score, v.lp, v.risks)) return null;
   return v;
+}
+// RugCheck's empty report is score 1 and no risks. SOL/USDC/USDT default lp to 0;
+// a seconds-old pump token defaults lp to 100. Neither is a measurement, and a
+// green check beside RC 1 is a fake safe. WIF is the same score with no risks
+// but a measured LP (about 35%), so only those two exact defaults are rejected.
+// A risk, or any other score, still keeps a real 100% lock.
+function rcUnmeasured(score, lp, risks) {
+  return score === 1 && Array.isArray(risks) && risks.length === 0 && (lp === 0 || lp === 100);
 }
 function rcSave() {
   clearTimeout(rc.saveTimer);
@@ -4761,11 +4769,9 @@ function rcSummary(d) {
   }
   const risks = d.risks.map((r) => ({ name: typeof r.name === "string" ? r.name : "", level: r.level }));
   const lp = Number.isFinite(d.lpLockedPct) ? d.lpLockedPct : null;
-  // SOL, USDC and USDT come back as a 135-byte stub: score 1, lp 0, no risks.
-  // That is not a measured zero, and a green check beside LP 0% is a fake safe.
-  // WIF is also score 1 with no risks, but its LP is a real percent. A measured
-  // 0% still carries another score or a risk (a curve token's LP 0).
-  if (d.score_normalised === 1 && lp === 0 && risks.length === 0) throw new Error("Unmeasured RugCheck stub");
+  // SOL/USDC/USDT: score 1, lp 0, no risks. Fresh pump tokens: score 1, lp 100,
+  // no risks. Both are unmeasured defaults. WIF keeps score 1 with a real LP.
+  if (rcUnmeasured(d.score_normalised, lp, risks)) throw new Error("Unmeasured RugCheck stub");
   const level = risks.some((r) => r.level === "danger") ? "danger" : risks.some((r) => r.level === "warn") ? "warn" : "good";
   return { lp, score: d.score_normalised, level, risks: risks.slice(0, 6) };
 }
