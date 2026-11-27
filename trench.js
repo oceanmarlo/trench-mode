@@ -3086,8 +3086,9 @@ function toBars(list) {
   }
   return { bars, vols };
 }
-// A one-print coin has no candle body. The volume stick then sits on the lower
-// price labels and reads as the price. Hide it until a bar has a range.
+// A one-print coin has no candle body. A lone ranged print still paints one
+// full-height volume stick on the lower price label, which reads as a second
+// candle. Hide volume until a second bar arrives. A flat series stays hidden.
 function barsAreFlat(bars) {
   if (!bars || !bars.length) return false;
   for (const b of bars) {
@@ -3096,13 +3097,17 @@ function barsAreFlat(bars) {
   }
   return true;
 }
+function loneVolumeStick(bars) {
+  return !!(bars && bars.length === 1);
+}
 function volumeSeries(bars, vols) {
-  return barsAreFlat(bars) ? [] : (vols || []);
+  if (barsAreFlat(bars) || loneVolumeStick(bars)) return [];
+  return vols || [];
 }
 function paintVolume(bars, vols, full) {
   if (!chartUi.volume) return;
   const shown = volumeSeries(bars, vols);
-  const hide = shown.length === 0 && barsAreFlat(bars);
+  const hide = shown.length === 0 && (barsAreFlat(bars) || loneVolumeStick(bars));
   if (hide) {
     if (chartUi.volHidden) return;
     try { chartUi.volume.setData([]); } catch (_) {}
