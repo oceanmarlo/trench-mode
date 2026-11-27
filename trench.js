@@ -2533,11 +2533,15 @@ function fmtMcTick(v) {
   else if (a >= 1e6) { unit = 1e6; suf = "M"; }
   else if (a >= 1e3) { unit = 1e3; suf = "K"; }
   // 800.00 under 1.60K reads as the bigger number. A tick on that scale
-  // shares the K/M/B unit. A MACD value far below the candles does not.
+  // shares the K/M/B unit. The 5% rule left a crash under that line in raw
+  // dollars: 187.40 beside 1.00K looks larger than the tick above it.
+  // Share whenever the scaled label is still readable (>= 0.01). A value
+  // under half the visible low already returned blank, so a far-below pane
+  // does not borrow K. 800.00K under 2.00M is the same mix-up.
   const hi = mcScaleHigh();
   const scaleUnit = hi >= 1e9 ? 1e9 : hi >= 1e6 ? 1e6 : hi >= 1e3 ? 1e3 : 1;
   const scaleSuf = scaleUnit >= 1e9 ? "B" : scaleUnit >= 1e6 ? "M" : scaleUnit >= 1e3 ? "K" : "";
-  if (a < 1e3 && scaleUnit >= 1e3 && a > hi * 0.05) { unit = scaleUnit; suf = scaleSuf; }
+  if (a < scaleUnit && scaleUnit > 1 && a / scaleUnit >= 0.01) { unit = scaleUnit; suf = scaleSuf; }
   const step = (mcSpan() || a * 0.01) / 6 / unit;
   let dec = step < 0.005 ? 4 : step < 0.05 ? 3 : 2;
   let text = (a / unit).toFixed(dec);
