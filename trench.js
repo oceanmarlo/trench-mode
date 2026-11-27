@@ -210,7 +210,24 @@ const compactCount = (n) => {
 };
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const cls = (n) => (n >= 0 ? "up" : "down");
-const signed = (n, d = 2) => (n >= 0 ? "+" : "") + Number(n).toFixed(d);
+// Tiny non-zero values must not print as +0.00 / -0.00 at the requested digits.
+const signed = (n, d = 2) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return (0).toFixed(d);
+  const t = v.toFixed(d);
+  if (Number(t) === 0) return (0).toFixed(d);
+  return (v > 0 ? "+" : "") + t;
+};
+// Quote fill / impact labels: expand digits before falling back to plain 0.00%.
+function signedPctLabel(n, maxDigits = 4) {
+  if (n == null || !Number.isFinite(Number(n))) return null;
+  const v = Number(n);
+  if (v === 0) return { text: "0.00%", tone: 0 };
+  let d = 2;
+  while (d < maxDigits && Number(v.toFixed(d)) === 0) d++;
+  if (Number(v.toFixed(d)) === 0) return { text: "0.00%", tone: 0 };
+  return { text: signed(v, d) + "%", tone: v };
+}
 function clockLabel(d = new Date()) {
   const p = (n) => String(Math.abs(n)).padStart(2, "0");
   const off = -d.getTimezoneOffset();
@@ -5090,7 +5107,10 @@ function quoteBits(q) {
   const parts = [];
   if (labels.length) parts.push(labels.join(" · "));
   const impact = Number(q?.priceImpact);
-  if (Number.isFinite(impact)) parts.push("Impact " + signed(impact) + "%");
+  if (Number.isFinite(impact)) {
+    const label = signedPctLabel(impact);
+    if (label) parts.push("Impact " + label.text);
+  }
   const fee = Number(q?.feeBps);
   if (Number.isFinite(fee) && fee > 0) parts.push("Fee " + (fee / 100).toFixed(2) + "%");
   return { hops: plan.length, line: parts.join(" · ") };
@@ -5132,7 +5152,10 @@ function quoteSummary() {
     ? `<button type="button" id="est-more" aria-label="Route details" aria-expanded="${state.quoteOpen}"><span class="chev">${state.quoteOpen ? "⌄" : "›"}</span></button>`
     : "";
   const usdBit = outUsd > 0 ? usd(outUsd) : "—";
-  const pctBit = pct == null ? `<span class="est-usd">—</span>` : `<span class="${cls(pct)}">(${signed(pct)}%)</span>`;
+  const delta = signedPctLabel(pct);
+  const pctBit = delta == null
+    ? `<span class="est-usd">—</span>`
+    : `<span class="${cls(delta.tone)}">(${delta.text})</span>`;
   return `<span class="mini">${icon}</span><b>${qty(outUi)}</b> <span class="est-usd">${usdBit}</span> ${pctBit}${more}`;
 }
 function tradePanel() {
