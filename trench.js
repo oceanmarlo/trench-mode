@@ -3043,12 +3043,40 @@ function setChartData() {
   paintDrawings();
 }
 
+// Last 300 one-second buckets can cover hours when many seconds have no trade.
+// fitContent then leads the axis with 00:00:00 and stretches nothing the user can read.
+// The scale is bar-index, not linear time, so a clock window of two buckets becomes two slabs.
+// Show the last 40 buckets at a normal width. A dense few minutes still fits. Scroll reaches the rest.
+function recentSecondLogical(first, last, count, tf) {
+  if (tf !== "1s" || typeof first !== "number" || typeof last !== "number" || typeof count !== "number") return null;
+  if (!Number.isFinite(first) || !Number.isFinite(last) || !Number.isFinite(count) || !(last > first) || !(count > 40)) return null;
+  // 300 consecutive seconds is about five minutes. Only pull in when the buckets cover more than that.
+  if (!(last - first > 8 * 60)) return null;
+  return { from: count - 40, to: count - 1 + 8 };
+}
 // fitContent stretches a handful of bars across the whole plot, so a new coin's
 // only candle becomes a slab that covers the drawing toolbar. Keep a normal width.
 function frameCandles(n) {
   const ts = chartUi.chart && chartUi.chart.timeScale();
   if (!ts) return;
-  const sec = resolvedTf() === "1s" || resolvedTf() === "15s";
+  const tf = resolvedTf();
+  const sec = tf === "1s" || tf === "15s";
+  let first = 0;
+  let lastT = 0;
+  let plotted = 0;
+  for (const c of state.candles || []) {
+    const time = Number(c.time);
+    if (!time || time <= lastT) continue;
+    if (!first) first = time;
+    lastT = time;
+    plotted++;
+  }
+  const recent = recentSecondLogical(first, lastT, plotted, tf);
+  if (recent) {
+    ts.applyOptions({ secondsVisible: true, barSpacing: 8, rightOffset: 8, minBarSpacing: 4 });
+    try { ts.setVisibleLogicalRange(recent); return; }
+    catch (_) { ts.fitContent(); return; }
+  }
   if (n > 0 && n < 40) {
     ts.applyOptions({ secondsVisible: sec, barSpacing: 8, rightOffset: 8, minBarSpacing: 4 });
     const to = n - 1 + 8;
