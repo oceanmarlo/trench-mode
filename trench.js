@@ -4461,7 +4461,7 @@ function tokenHead(t, price, chg) {
   return `<div class="token-head">
       <div class="tok-av">${tokenIcon(t.icon, 'width="42" height="42"')}<button type="button" class="badge rc ${rcView(t).cls}" id="rc-badge" aria-label="${rcView(t).label}">${rcView(t).mark}</button></div>
       <div class="tok-name">
-        <div class="sym">${esc(t.symbol)} <span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
+        <div class="sym"><span class="tok-sym">${esc(t.symbol)}</span><span class="tok-full">${esc(t.name || "")}</span><button type="button" class="copy" data-copy="${esc(mint)}" aria-label="Copy mint"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button></div>
         <div class="sub"><span class="age">${tokenAge(t.createdAt)}</span><span class="mint">${esc(short)}</span>${socialsHtml(t)}<button type="button" class="copy" id="token-search" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button></div>
       </div>
       <div class="tok-actions">

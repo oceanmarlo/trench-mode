@@ -69,8 +69,12 @@ button { font: inherit; }
 .nav { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
 .token-head { display: flex; align-items: flex-start; gap: 10px; padding-top: 8px; }
 .token-head .tok-av, .token-head .tok-av img { width: 42px; height: 42px; }
-.tok-name .sym { font-weight: 750; font-size: 16px; display: flex; gap: 6px; align-items: center; min-width: 0; }
-.tok-name .tok-full { font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tok-name .sym { font-weight: 750; font-size: 16px; display: flex; gap: 4px; align-items: center; min-width: 0; }
+/* A 7-letter ticker plus a 12-letter name (TRUMPED TRUMPINSIDER) was 9px
+   past a 16px name box, so the name ellipsized while the copy hit target
+   still had room. Keep the ticker from eating the row; the name uses the rest. */
+.tok-name .tok-sym { flex: none; min-width: 0; max-width: 11ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tok-name .tok-full { flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tok-name .sub { color: var(--muted); font-size: 12px; margin-top: 3px; display: flex; gap: 8px; align-items: center; min-width: 0; }
 .sub .age { color: var(--muted); font-weight: 650; }
 .sub .mint { color: var(--muted); }
