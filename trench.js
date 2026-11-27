@@ -3946,13 +3946,18 @@ function holderMarks(h, token) {
   const dev = (token.dev && h.address === token.dev) || blobs.some((s) => /^dev(eloper)?$/i.test(String(s)));
   return [curve ? "Curve" : "", lp ? "LP" : "", dev ? "Dev" : ""].filter(Boolean);
 }
+function holderEmptyText(t) {
+  if (state.holdersLoading) return "Loading holders…";
+  // A count of 0 is a real empty wallet set. Unknown or a later live count is not.
+  return holderCountOf(t) === 0 ? "No holders yet." : "Addresses not in yet.";
+}
 function holderRows() {
   const t = state.active || {};
   const limited = Date.now() < holdersRefresh.rateUntil;
   const warning = state.holdersError ? `<div class="holder-warning k" role="status">${state.holders.length ? "Last known holders · " : ""}Couldn't refresh holders: ${esc(state.holdersError)}<button type="button" class="copy holder-retry" data-holders-retry ${state.holdersLoading || limited ? "disabled" : ""}>${state.holdersLoading ? "Refreshing…" : limited ? "Rate limited…" : "Retry"}</button></div>` : "";
   if (!state.holders.length) {
-    const msg = state.holdersLoading ? "Loading holders…" : (holderCountOf(t) === 0 ? "No holders yet." : "Addresses not in yet.");
-    return warning || `<div class="k" style="padding:12px 0">${esc(msg)}</div>`;
+    const msg = holderEmptyText(t);
+    return warning || `<div class="k" data-holder-empty style="padding:12px 0">${esc(msg)}</div>`;
   }
   return warning + state.holders.slice(0, 40).map((h, i) => {
     const addr = h.address || "";
@@ -4003,6 +4008,13 @@ function paintHolderCounts() {
     const label = state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
     if (status.textContent !== label) status.textContent = label;
     status.classList.toggle("updating", state.holdersLoading || stale || !!state.holdersError);
+  }
+  // Count labels update on every price tick. The empty list does not, so a
+  // later stream count left "No holders yet." under Holders 3.
+  const empty = $("#holder-list [data-holder-empty]");
+  if (empty && !state.holders.length) {
+    const msg = holderEmptyText(t);
+    if (empty.textContent !== msg) empty.textContent = msg;
   }
 }
 function paintHolders() {
