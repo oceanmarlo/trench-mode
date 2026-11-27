@@ -4279,10 +4279,20 @@ function rcLineInner(t) {
   const r = rcGet(t.id);
   const a = t.audit || {};
   const score = r?.missing ? "unavailable" : r && r.score != null ? String(Math.round(r.score)) : "…";
-  const lp = r?.missing ? "—" : r && r.lp != null ? pctShown(r.lp) : "…";
+  // Bonding-curve tokens have no locked pool LP yet. RugCheck's 0% reads as a fake
+  // total loss of protection beside Mint/Freeze off. Prefer live curve progress;
+  // graduated/pool tokens keep LP locked/burned from RugCheck.
+  const curveRaw = t && t.bondingCurve;
+  const curveNum = Number(curveRaw);
+  const onBond = !!(t && !t.graduatedAt && !t.graduatedPool
+    && curveRaw != null && curveRaw !== "" && typeof curveRaw !== "boolean"
+    && Number.isFinite(curveNum) && curveNum >= 0 && curveNum < 100);
+  const lpPart = onBond
+    ? (`Curve ${pctShown(curveNum)}`)
+    : (`LP ${r?.missing ? "—" : r && r.lp != null ? pctShown(r.lp) : "…"}`);
   const auth = (off) => off == null ? "—" : (off ? `<span class="ok">off</span>` : `<span class="bad">on</span>`);
   const top = pctShown(a.topHoldersPercentage);
-  return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
+  return `RC ${score} · ${lpPart} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
 }
 // GMGN has no public bundle websocket. Poll token info (weight 1) and honor the bucket.
 // Browser CORS preflight cannot carry X-APIKEY; Cloudflare then 429s OPTIONS and the
