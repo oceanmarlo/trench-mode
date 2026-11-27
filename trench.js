@@ -4560,6 +4560,13 @@ function alphaMcapCell(x) {
   if (x.mcap != null) return { main: usd(x.mcap), sub: "L " + usd(x.liq) };
   // Prefer real curve progress over a blank MCap cell on Graduating rows.
   if (x.curve != null) return { main: curvePctText(x.curve), sub: "curve" };
+  // Graduated gems often keep liquidity/volume after mcap and price drop out.
+  // Promote finite liquidity into the MCap cell instead of a blank dash.
+  // Number(null/false/"") is 0 — reject those the same way curve progress does.
+  if (x.liq != null && x.liq !== "" && typeof x.liq !== "boolean") {
+    const liq = Number(x.liq);
+    if (Number.isFinite(liq)) return { main: usd(liq), sub: "liq" };
+  }
   return { main: "—", sub: "L " + usd(x.liq) };
 }
 
