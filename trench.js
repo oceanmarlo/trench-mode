@@ -4017,9 +4017,12 @@ function rcLineInner(t) {
   return `RC ${score} · LP ${lp} · Mint ${auth(a.mintAuthorityDisabled)} · Freeze ${auth(a.freezeAuthorityDisabled)} · Top ${top}`;
 }
 // GMGN has no public bundle websocket. Poll token info (weight 1) and honor the bucket.
+// Browser CORS preflight cannot carry X-APIKEY; Cloudflare then 429s OPTIONS and the
+// page sees a CORS failure. Prefer Jupiter audit.bundlerStats (already on the token)
+// so the header stays honest, and only use GMGN volume when a poll actually succeeds.
 const GMGN_HOST = "https://openapi.gmgn.ai";
 const GMGN_PUBLISHED_READ_KEY = "gmgn_solbscbaseethmonadtron";
-const gmgn = { mint: "", gen: 0, timer: 0, coolUntil: 0, snap: null, error: "" };
+const gmgn = { mint: "", gen: 0, timer: 0, coolUntil: 0, snap: null, error: "", fails: 0 };
 function gmgnKey() {
   try {
     const k = window.GMGN_API_KEY;
@@ -4048,6 +4051,22 @@ function gmgnParse(body) {
     wallets: Number.isFinite(wallets) && wallets >= 0 ? wallets : null
   };
 }
+// Jupiter audit.bundlerStats: totalBundles + holdingPct (already percent points).
+// holdingPct is holdings share, never label it as volume.
+function jupBundler(t) {
+  const b = t && t.audit && t.audit.bundlerStats;
+  if (!b || typeof b !== "object" || Array.isArray(b)) return null;
+  const rawN = b.totalBundles;
+  const wallets = rawN == null || rawN === "" ? null : Number(rawN);
+  const heldRaw = b.holdingPct;
+  const held = heldRaw == null || heldRaw === "" ? null : Number(heldRaw);
+  const out = {
+    wallets: Number.isFinite(wallets) && wallets >= 0 ? wallets : null,
+    held: Number.isFinite(held) && held >= 0 ? held : null
+  };
+  if (out.wallets == null && out.held == null) return null;
+  return out;
+}
 function gmgnVolText(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   const v = Number(n);
@@ -4056,20 +4075,39 @@ function gmgnVolText(n) {
   if (v < 10) return v.toFixed(2).replace(/0$/, "").replace(/\.0?$/, "") + "%";
   return v.toFixed(1).replace(/\.0$/, "") + "%";
 }
+// Prefer a successful GMGN volume snapshot; otherwise Jupiter bundles + held %.
+function bundlerView() {
+  if (gmgn.snap && (gmgn.snap.vol != null || gmgn.snap.wallets != null)) {
+    return { wallets: gmgn.snap.wallets, metric: gmgn.snap.vol, kind: "vol", source: "gmgn" };
+  }
+  const j = jupBundler(state.active);
+  if (j) return { wallets: j.wallets, metric: j.held, kind: "held", source: "jup" };
+  if (gmgn.error) return { unavailable: true };
+  return { loading: true };
+}
 function gmgnLineInner() {
-  if (!gmgn.snap) return gmgn.error ? `Bundlers <span class="bad">unavailable</span>` : "Bundlers …";
-  const n = gmgn.snap.wallets == null ? "—" : Number(gmgn.snap.wallets).toLocaleString();
-  const vol = gmgnVolText(gmgn.snap.vol);
-  return `Bundlers <strong>${n}</strong> · <strong>${vol} vol</strong>`;
+  const v = bundlerView();
+  if (v.unavailable) return `Bundlers <span class="bad">unavailable</span>`;
+  if (v.loading) return "Bundlers …";
+  const n = v.wallets == null ? "—" : Number(v.wallets).toLocaleString();
+  const metric = gmgnVolText(v.metric);
+  const unit = v.kind === "vol" ? "vol" : "held";
+  return `Bundlers <strong>${n}</strong> · <strong>${metric} ${unit}</strong>`;
 }
 function paintGmgn() {
   const line = document.getElementById("gmgn-line");
   if (line) line.innerHTML = gmgnLineInner();
   const tile = document.querySelector('[data-sf="bundler"]');
+  const lab = document.querySelector('[data-sf="bundlerLab"]');
+  const v = bundlerView();
   if (tile) {
-    const text = !gmgn.snap || gmgn.snap.vol == null ? "—" : gmgnVolText(gmgn.snap.vol);
+    const text = v.loading || v.unavailable || v.metric == null ? "—" : gmgnVolText(v.metric);
     if (tile.textContent !== text) tile.textContent = text;
-    tile.className = !gmgn.snap || gmgn.snap.vol == null ? "flat" : (gmgn.snap.vol >= 20 ? "down" : "");
+    tile.className = v.loading || v.unavailable || v.metric == null ? "flat" : (Number(v.metric) >= 20 ? "down" : "");
+  }
+  if (lab) {
+    const label = v.kind === "vol" ? "Bundler vol" : (v.kind === "held" ? "Bundler H." : "Bundler");
+    if (lab.textContent !== label) lab.textContent = label;
   }
 }
 function gmgnArm(ms) {
@@ -4093,8 +4131,12 @@ function gmgnWatch(mint) {
     gmgn.mint = mint;
     gmgn.snap = null;
     gmgn.error = "";
+    gmgn.fails = 0;
+    gmgn.coolUntil = 0;
     gmgn.gen += 1;
   }
+  // Paint Jupiter bundler stats immediately so the header is never blank while GMGN tries.
+  paintGmgn();
   gmgnArm(0);
 }
 async function gmgnTick() {
@@ -4116,6 +4158,7 @@ async function gmgnTick() {
     });
     if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
     if (res.status === 429 || res.status === 403) {
+      gmgn.fails = Math.min((gmgn.fails || 0) + 1, 6);
       gmgn.coolUntil = Date.now() + gmgnDelay(res);
       if (!gmgn.snap) gmgn.error = "unavailable";
       paintGmgn();
@@ -4128,14 +4171,20 @@ async function gmgnTick() {
     if (parsed && (parsed.vol != null || parsed.wallets != null)) {
       gmgn.snap = parsed;
       gmgn.error = "";
+      gmgn.fails = 0;
     } else if (!gmgn.snap) gmgn.error = "unavailable";
     paintGmgn();
     gmgnArm(gmgnDelay(res));
   } catch (err) {
-    if (err && err.name === "AbortError") { gmgnArm(1000); return; }
+    if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
+    // CORS, CF 429 on OPTIONS, offline, or our 8s timeout: stop the ellipsis and
+    // back off hard. Jupiter bundlerStats (when present) already painted above.
+    gmgn.fails = Math.min((gmgn.fails || 0) + 1, 6);
     if (!gmgn.snap) gmgn.error = "unavailable";
     paintGmgn();
-    gmgnArm(4000);
+    const wait = Math.min(300000, 15000 * (2 ** Math.max(0, gmgn.fails - 1)));
+    gmgn.coolUntil = Date.now() + wait;
+    gmgnArm(wait);
   } finally {
     clearTimeout(timeout);
   }
@@ -5376,6 +5425,10 @@ function sheetVals() {
   const sellPct = traderSellPct(s);
   const curveOn = onCurve(t);
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
+  const bv = bundlerView();
+  const bundler = bv.loading || bv.unavailable || bv.metric == null ? "—" : gmgnVolText(bv.metric);
+  const bundlerLab = bv.kind === "vol" ? "Bundler vol" : (bv.kind === "held" ? "Bundler H." : "Bundler");
+  const bundlerCls = bv.loading || bv.unavailable || bv.metric == null ? "flat" : (Number(bv.metric) >= 20 ? "down" : "");
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
     price: (() => { const px = livePrice(t); return px == null ? "—" : priceLabel(px); })(), fdv: t.fdv > 0 ? usd(t.fdv) : (t.mcap > 0 ? usd(t.mcap) : "—"), liq: usd(t.liquidity),
@@ -5398,7 +5451,7 @@ function sheetVals() {
     devCls: shareShown(audit.devBalancePercentage) == null ? "flat" : (shareShown(audit.devBalancePercentage) > 0 ? "down" : "up"),
     snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
-    bundler: gmgn.snap && gmgn.snap.vol != null ? gmgnVolText(gmgn.snap.vol) : "—",
+    bundler, bundlerLab, bundlerCls,
     freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
     freezeCls: audit.freezeAuthorityDisabled == null ? "flat" : (audit.freezeAuthorityDisabled ? "up" : "down"),
     mint: audit.mintAuthorityDisabled == null ? "—" : (audit.mintAuthorityDisabled ? "No" : "Yes"),
@@ -5439,7 +5492,7 @@ function sheetHtml() {
         <div class="tile"><b data-sf="top10"></b>Top 10 H.</div>
         <div class="tile"><b data-sf="dev"></b>Dev H.</div>
         <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers H.</div>
-        <div class="tile"><b data-sf="bundler"></b>Bundler vol</div>
+        <div class="tile"><b data-sf="bundler"></b><span data-sf="bundlerLab">Bundler</span></div>
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
       </div>
@@ -5472,7 +5525,7 @@ function paintSheet() {
   const snip = root.querySelector('[data-sf="snip"]');
   if (snip) snip.className = v.snipCls || "";
   const bundler = root.querySelector('[data-sf="bundler"]');
-  if (bundler) bundler.className = !gmgn.snap || gmgn.snap.vol == null ? "flat" : (gmgn.snap.vol >= 20 ? "down" : "");
+  if (bundler) bundler.className = v.bundlerCls || "flat";
   const curve = root.querySelector("[data-sf-curve]");
   if (curve) curve.hidden = !v.curveOn;
   const snipTile = root.querySelector("[data-sf-snip]");
