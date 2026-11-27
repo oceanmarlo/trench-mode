@@ -4305,10 +4305,16 @@ function gmgnParse(body) {
   const vol = gmgnFraction(stat.top_bundler_trader_percentage);
   const rawN = tags.bundler_wallets;
   const wallets = rawN == null || rawN === "" ? null : Number(rawN);
-  return {
-    vol,
-    wallets: Number.isFinite(wallets) && wallets >= 0 ? wallets : null
-  };
+  const nWallets = Number.isFinite(wallets) && wallets >= 0 ? wallets : null;
+  // Unknown mints come back with an empty price address and string zeros
+  // (price "0", ratio "0", bundler_wallets 0). That is not a measurement.
+  // An indexed token still keeps a real zero (SOL's 0 wallets beside a price).
+  const px = data.price;
+  const stub = px && typeof px === "object" && !Array.isArray(px)
+    && (px.address == null || px.address === "")
+    && (px.price === 0 || px.price === "0" || px.price === "0.0");
+  if (stub && !(vol > 0) && !(nWallets > 0)) return null;
+  return { vol, wallets: nWallets };
 }
 // Jupiter audit.bundlerStats: totalBundles + holdingPct (already percent points).
 // holdingPct is holdings share, never label it as volume.
