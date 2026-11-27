@@ -5877,7 +5877,7 @@ const USD_QUOTES = { EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 6, Es9vMFrzaC
 const HEL_POOLS = 2;               // follow the 2 busiest pools of the open token (<= 6 account subs)
 const HEL_DAY_CREDITS = 20000;     // websocket: 2 credits / 0.1 MB -> <= 1 GB/day, far inside 1M/month
 const HEL_TEST = /[?&]heltest=1/.test(location.search); // adds a logsSubscribe to measure per-trade lead
-const hel = { ws: null, open: false, backoff: 1000, reqId: 1, req: new Map(), subs: new Map(), tracks: [], seq: 0,
+const hel = { ws: null, open: false, backoff: 1000, retryT: 0, connectT: 0, subEpoch: 0, reqId: 1, req: new Map(), subs: new Map(), tracks: [], seq: 0,
   lastAt: 0, jupPx: 0, jupSlot: 0, shown: null, reason: HKEY ? "" : "no key", rpcAt: 0, hiddenAt: 0, helSig: new Map(), jupSig: new Map(), leads: [] };
 const helToday = () => new Date().toISOString().slice(0, 10);
 const helUsage = (() => { try { const u = JSON.parse(localStorage.getItem("trench-helius") || "{}"); return u.d === helToday() ? u : { d: helToday(), b: 0 }; } catch (_) { return { d: helToday(), b: 0 }; } })();
@@ -6011,61 +6011,117 @@ function helPrice(t) {
 }
 
 function heliusConnect() {
-  if (!HKEY || (hel.ws && hel.ws.readyState <= 1)) return;
+  if (!HKEY || !hel.tracks.length || document.hidden || helCredits() >= HEL_DAY_CREDITS || (hel.ws && hel.ws.readyState <= 1)) return;
+  clearTimeout(hel.retryT); hel.retryT = 0;
   let ws;
-  try { ws = new WebSocket(HWS); } catch (_) { return; }
+  try { ws = new WebSocket(HWS); } catch (_) { heliusRetry(); return; }
   hel.ws = ws;
-  ws.onopen = () => { hel.open = true; hel.backoff = 1000; heliusSubAll(); };
+  hel.connectT = setTimeout(() => { if (hel.ws === ws) heliusRestart("connection timed out"); }, 10000);
+  ws.onopen = () => {
+    if (hel.ws !== ws) return;
+    clearTimeout(hel.connectT); hel.connectT = 0;
+    hel.open = true;
+    heliusSubAll();
+  };
   ws.onmessage = (ev) => {
+    if (hel.ws !== ws) return;
     helUsage.b += ev.data.length;
+    if (helCredits() >= HEL_DAY_CREDITS) { hel.reason = "daily credit cap reached"; heliusClose(); return; }
     let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+    if (!m || typeof m !== "object") return;
     if (m.id != null && hel.req.has(m.id)) {
-      const target = hel.req.get(m.id); hel.req.delete(m.id);
-      if (typeof m.result === "number" && target) hel.subs.set(m.result, target);
+      const req = hel.req.get(m.id); hel.req.delete(m.id); clearTimeout(req.timer);
+      const target = req.target;
+      if (target) {
+        if (Number.isSafeInteger(m.result) && m.result >= 0) {
+          // Unsubscribe a late ACK even when its token was replaced while subscribing.
+          if (req.epoch !== hel.subEpoch || !hel.tracks.includes(target.t)) {
+            heliusSend(target.logs ? "logsUnsubscribe" : "accountUnsubscribe", [m.result]);
+          } else {
+            hel.subs.set(m.result, target); hel.backoff = 1000; hel.reason = "";
+          }
+        } else if (req.epoch === hel.subEpoch && hel.tracks.includes(target.t)) {
+          heliusRestart("subscription rejected"); return;
+        }
+      } else if (m.error && !(req.method === "getHealth" && m.error.code === -32601)) {
+        heliusRestart("websocket RPC failed"); return;
+      }
+      heliusSubAll();
       return;
     }
-    if (m.method === "logsNotification") { heliusNoteSig(m.params?.result?.value?.signature); return; }
-    if (m.method !== "accountNotification") return;
     const target = hel.subs.get(m.params?.subscription);
-    if (!target || !target.t || !hel.tracks.includes(target.t)) return;
+    if (!target || !hel.tracks.includes(target.t)) return;
+    if (m.method === "logsNotification" && target.logs) { heliusNoteSig(m.params?.result?.value?.signature); return; }
+    if (m.method !== "accountNotification" || target.logs) return;
     const t = target.t;
-    t.data[target.acct] = b64bytes(m.params.result.value.data[0]);
+    const data = m.params?.result?.value?.data;
+    if (!Array.isArray(data) || data[1] !== "base64" || typeof data[0] !== "string") return;
+    try { t.data[target.acct] = b64bytes(data[0]); } catch (_) { return; }
     t.slot = m.params?.result?.context?.slot || t.slot || 0;
-    // A swap touches pool + both vaults: let them all land before pricing (no half-updated tick).
+    // A swap touches pool + both vaults: let them land before pricing.
     clearTimeout(t.calcT);
-    t.calcT = setTimeout(() => heliusApply(t), t.vaults ? 25 : 0);
-    if (helCredits() >= HEL_DAY_CREDITS) { hel.reason = "daily credit cap reached"; heliusClose(); }
+    t.calcT = setTimeout(() => { t.calcT = 0; if (hel.ws === ws) heliusApply(t); }, t.vaults ? 25 : 0);
   };
   ws.onclose = () => {
-    hel.open = false; hel.subs.clear(); hel.req.clear();
     if (hel.ws !== ws) return;
-    hel.ws = null;
-    if (!hel.tracks.length || document.hidden || helCredits() >= HEL_DAY_CREDITS) return;
-    setTimeout(heliusConnect, hel.backoff);
-    hel.backoff = Math.min(hel.backoff * 2, 30000);
+    heliusRestart("websocket disconnected");
   };
-  ws.onerror = () => {};
+  ws.onerror = () => { if (hel.ws === ws) heliusRestart("websocket unavailable"); };
+}
+function heliusRetry() {
+  if (hel.retryT || !HKEY || !hel.tracks.length || document.hidden || helCredits() >= HEL_DAY_CREDITS) return;
+  hel.retryT = setTimeout(() => { hel.retryT = 0; heliusConnect(); }, hel.backoff);
+  hel.backoff = Math.min(hel.backoff * 2, 30000);
+}
+function heliusRestart(reason) {
+  hel.reason = reason;
+  heliusClose();
+  heliusRetry();
 }
 function heliusSend(method, params, target) {
-  if (!hel.ws || hel.ws.readyState !== 1) return;
+  const ws = hel.ws;
+  if (!ws || ws.readyState !== 1) return;
   const id = hel.reqId++;
-  hel.req.set(id, target || null);
-  hel.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  const req = { method, target, epoch: hel.subEpoch, timer: 0 };
+  req.timer = setTimeout(() => {
+    if (hel.ws === ws && hel.req.has(id)) heliusRestart("websocket request timed out");
+  }, 10000);
+  hel.req.set(id, req);
+  try { ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params })); }
+  catch (_) { if (hel.ws === ws) heliusRestart("websocket send failed"); }
 }
 function heliusSubAll() {
-  if (!hel.tracks.length || !hel.open || hel.subs.size || hel.req.size) return;
+  if (!hel.tracks.length || !hel.open) return;
+  // Only a pending subscription for this exact target counts, never health/unsubscribe.
+  const has = (t, acct, logs) => [...hel.subs.values(), ...[...hel.req.values()]
+    .filter((r) => r.epoch === hel.subEpoch).map((r) => r.target)]
+    .some((x) => x && x.t === t && x.acct === acct && !!x.logs === logs);
   for (const t of hel.tracks) {
-    for (const a of t.accts) heliusSend("accountSubscribe", [a, { encoding: "base64", commitment: "processed" }], { t, acct: a });
-    if (HEL_TEST) heliusSend("logsSubscribe", [{ mentions: [t.pool] }, { commitment: "processed" }], { t, logs: true });
+    for (const a of t.accts) if (!has(t, a, false)) heliusSend("accountSubscribe", [a, { encoding: "base64", commitment: "processed" }], { t, acct: a });
+    if (HEL_TEST && !has(t, undefined, true)) heliusSend("logsSubscribe", [{ mentions: [t.pool] }, { commitment: "processed" }], { t, logs: true });
   }
 }
 function heliusUnsubAll() {
+  hel.subEpoch++;
+  for (const t of hel.tracks) { clearTimeout(t.calcT); t.calcT = 0; }
   for (const [id, target] of hel.subs) heliusSend(target.logs ? "logsUnsubscribe" : "accountUnsubscribe", [id]);
   hel.subs.clear();
+  // Keep pending subscribe records until ACK so orphaned server subscriptions are removed.
 }
-function heliusClose() { heliusUnsubAll(); const ws = hel.ws; hel.ws = null; hel.open = false; try { ws?.close(); } catch (_) {} }
+function heliusClose() {
+  const ws = hel.ws;
+  hel.ws = null; hel.open = false; hel.subEpoch++;
+  clearTimeout(hel.retryT); clearTimeout(hel.connectT); hel.retryT = 0; hel.connectT = 0;
+  for (const req of hel.req.values()) clearTimeout(req.timer);
+  for (const t of hel.tracks) { clearTimeout(t.calcT); t.calcT = 0; }
+  hel.req.clear(); hel.subs.clear();
+  // Closing the socket releases all server subscriptions, including unacknowledged ones.
+  try { ws?.close(); } catch (_) {}
+}
 // Idle keepalive (Helius drops silent sockets). Browser WebSocket cannot send ping
-// frames, so a getHealth request every 30 s is the ping. Pause in background tabs.
+// frames, so a getHealth request every 30 s is the ping. Its method-not-found
+// reply also proves liveness (this RPC is HTTP-only); don't restart on that reply.
+// Pause in background tabs.
 setInterval(() => { if (hel.open) heliusSend("getHealth", []); }, 30000);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) { hel.hiddenAt = Date.now(); setTimeout(() => { if (document.hidden && Date.now() - hel.hiddenAt >= 30000) heliusClose(); }, 30500); }
