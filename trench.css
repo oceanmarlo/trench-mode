@@ -124,6 +124,7 @@ button { font: inherit; }
 .gmgn-line { color: var(--muted); font-size: 11px; padding-top: 2px; line-height: 1.35; }
 .gmgn-line strong { color: var(--text); font-weight: 650; }
 .gmgn-line .bad { color: var(--red); }
+.gmgn-line .bwin { opacity: .75; margin-left: 2px; }
 .tok-av {
   width: 36px; height: 36px; border-radius: 50%;
   display: grid; place-items: center; font-size: 16px; flex: none;

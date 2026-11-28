@@ -661,6 +661,9 @@ function selectTimeframe(tf) {
   });
   queueNavigationSave();
   paintChartStatus();
+  // Bundler vol follows the timeframe: repaint from the cached tape, load deeper if the window needs it.
+  paintGmgn();
+  bundlerLoad().catch(() => {});
   loadCandles(true).catch(() => {});
 }
 
@@ -4475,8 +4478,74 @@ function gmgnVolText(n) {
   if (v < 10) return v.toFixed(2).replace(/0$/, "").replace(/\.0?$/, "") + "%";
   return v.toFixed(1).replace(/\.0$/, "") + "%";
 }
-// Prefer a successful GMGN volume snapshot; otherwise Jupiter bundles + held %.
-function bundlerView() {
+// GMGN and Jupiter only publish a lifetime bundler figure, so it cannot follow a
+// timeframe. The windowed figure is measured from Jupiter's trade tape instead:
+// bundler-tagged volume over total volume inside the window. The tape is walked
+// back until it reaches the window start (bounded). If it cannot, the number is
+// marked partial and labelled with the span it actually covers.
+const BUNDLER_WINS = { "1m": 60e3, "5m": 300e3, "15m": 900e3, "1h": 3600e3, "6h": 21600e3, "24h": 86400e3 };
+const BUNDLER_PAGES = 30;
+const BUNDLER_MAX_ROWS = 1500;
+const bundlerTape = { mint: "", rows: new Map(), cursor: "", end: false, at: 0, busy: false, gen: 0, error: "" };
+// Chart timeframe -> the window its bundler volume covers.
+function bundlerWinForTf(tf) {
+  const k = tf === "Auto" ? resolvedTf() : tf;
+  const sec = TF_SEC[k] || 60;
+  if (sec <= 60) return "1m";
+  if (sec <= 300) return "5m";
+  if (sec <= 1800) return "15m";
+  if (sec <= 3600) return "1h";
+  if (sec <= 14400) return "6h";
+  return "24h";
+}
+function bundlerSpanText(ms) {
+  const s = Math.max(0, Number(ms) || 0) / 1000;
+  if (s < 90) return Math.max(1, Math.round(s)) + "s";
+  if (s < 5400) return Math.round(s / 60) + "m";
+  return (Math.round(s / 360) / 10) + "h";
+}
+function bundlerRow(x) {
+  if (!x || typeof x !== "object") return null;
+  const ts = tradeTime(x.timestamp);
+  const id = x.actionId || x.txHash;
+  if (ts == null || !id || x.usdVolume == null || x.usdVolume === "") return null;
+  const usd = Number(x.usdVolume);
+  if (!Number.isFinite(usd) || usd < 0) return null;
+  const tags = [].concat(Array.isArray(x.holderTags) ? x.holderTags : [], Array.isArray(x.walletCategories) ? x.walletCategories : []);
+  return { id: String(id), ts, usd, trader: String(x.traderAddress || ""), bundler: tags.some((v) => String(v).toLowerCase().includes("bundler")) };
+}
+// Bundler share of the volume traded inside the window. Unknown (null) when the
+// tape holds nothing for it; a partial result says how far back it really reaches.
+function bundlerWindowStat(rows, win, now = Date.now(), end = false) {
+  const span = BUNDLER_WINS[win];
+  if (!span) return null;
+  const cutoff = now - span;
+  let oldest = Infinity, total = 0, tagged = 0, trades = 0;
+  const wallets = new Set();
+  for (const r of rows) {
+    if (r.ts < oldest) oldest = r.ts;
+    if (r.ts < cutoff || r.ts > now + 60000) continue;
+    trades += 1;
+    total += r.usd;
+    if (r.bundler) {
+      tagged += r.usd;
+      if (r.trader) wallets.add(r.trader);
+    }
+  }
+  if (oldest === Infinity) return null;
+  const complete = end || oldest <= cutoff;
+  if (!trades || !(total > 0)) return complete ? { win, vol: null, wallets: null, trades, complete, spanMs: span } : null;
+  return { win, vol: (tagged / total) * 100, wallets: wallets.size, trades, complete, spanMs: complete ? span : Math.max(0, now - oldest) };
+}
+// A windowed tape figure when the tape has it; otherwise the lifetime GMGN volume
+// snapshot, otherwise Jupiter bundles + held % (both lifetime, labelled as such).
+function bundlerView(win) {
+  const w = BUNDLER_WINS[win] ? win : bundlerWinForTf(state.tf);
+  const t = state.active;
+  if (t && bundlerTape.mint === t.id && bundlerTape.rows.size) {
+    const s = bundlerWindowStat(bundlerTape.rows.values(), w, Date.now(), bundlerTape.end);
+    if (s && s.vol != null) return { wallets: s.wallets, metric: s.vol, kind: "win", win: w, partial: !s.complete, spanMs: s.spanMs, source: "tape" };
+  }
   if (gmgn.snap && (gmgn.snap.vol != null || gmgn.snap.wallets != null)) {
     return { wallets: gmgn.snap.wallets, metric: gmgn.snap.vol, kind: "vol", source: "gmgn" };
   }
@@ -4485,29 +4554,131 @@ function bundlerView() {
   if (gmgn.error) return { unavailable: true };
   return { loading: true };
 }
+function bundlerTag(v) {
+  if (v.kind === "win") return ` <span class="bwin">${v.partial ? "last " + bundlerSpanText(v.spanMs) : v.win}</span>`;
+  if (v.kind === "vol") return ` <span class="bwin">all</span>`;
+  return "";
+}
+function bundlerLabel(v) {
+  if (v.kind === "win") return v.partial ? "Bundler vol · " + bundlerSpanText(v.spanMs) : "Bundler vol " + v.win;
+  if (v.kind === "vol") return "Bundler vol";
+  return v.kind === "held" ? "Bundler H." : "Bundler";
+}
+function bundlerText(v) {
+  return (v.partial ? "~" : "") + gmgnVolText(v.metric);
+}
 function gmgnLineInner() {
   const v = bundlerView();
   if (v.unavailable) return `Bundlers <span class="bad">unavailable</span>`;
   if (v.loading) return "Bundlers …";
   const n = v.wallets == null ? "—" : Number(v.wallets).toLocaleString();
-  const metric = gmgnVolText(v.metric);
-  const unit = v.kind === "vol" ? "vol" : "held";
-  return `Bundlers <strong>${n}</strong> · <strong>${metric} ${unit}</strong>`;
+  const unit = v.kind === "held" ? "held" : "vol";
+  return `Bundlers <strong>${n}</strong> · <strong>${bundlerText(v)} ${unit}</strong>${bundlerTag(v)}`;
 }
 function paintGmgn() {
   const line = document.getElementById("gmgn-line");
-  if (line) line.innerHTML = gmgnLineInner();
+  if (line) {
+    const html = gmgnLineInner();
+    if (line.innerHTML !== html) line.innerHTML = html;
+  }
   const tile = document.querySelector('[data-sf="bundler"]');
   const lab = document.querySelector('[data-sf="bundlerLab"]');
-  const v = bundlerView();
+  const v = bundlerView(state.infoWin);
   if (tile) {
-    const text = v.loading || v.unavailable || v.metric == null ? "—" : gmgnVolText(v.metric);
+    const text = v.loading || v.unavailable || v.metric == null ? "—" : bundlerText(v);
     if (tile.textContent !== text) tile.textContent = text;
     tile.className = v.loading || v.unavailable || v.metric == null ? "flat" : (Number(v.metric) >= 20 ? "down" : "");
   }
   if (lab) {
-    const label = v.kind === "vol" ? "Bundler vol" : (v.kind === "held" ? "Bundler H." : "Bundler");
+    const label = bundlerLabel(v);
     if (lab.textContent !== label) lab.textContent = label;
+  }
+}
+function bundlerReset(mint) {
+  bundlerTape.mint = mint;
+  bundlerTape.rows = new Map();
+  bundlerTape.cursor = "";
+  bundlerTape.end = false;
+  bundlerTape.at = 0;
+  bundlerTape.busy = false;
+  bundlerTape.error = "";
+  bundlerTape.gen += 1;
+}
+function bundlerOldest(bt) {
+  let o = Infinity;
+  for (const r of bt.rows.values()) if (r.ts < o) o = r.ts;
+  return o;
+}
+// The longest window anything on screen needs: the header follows the chart
+// timeframe; the open Token Info sheet follows its own 5m/1h/6h/24h switch.
+function bundlerNeedMs() {
+  let span = BUNDLER_WINS[bundlerWinForTf(state.tf)] || 0;
+  if (state.infoOpen) span = Math.max(span, BUNDLER_WINS[state.infoWin] || 0);
+  return span;
+}
+// Pull tape pages (newest first) into bt.rows until stop() says enough.
+async function bundlerWalk(bt, gen, mint, start, stop) {
+  let cursor = start;
+  for (let pages = 0; pages < BUNDLER_PAGES; pages++) {
+    // v2 pages with an opaque nextCursor (v1 ignores every cursor parameter and repeats page one).
+    if (pages) await new Promise((resolve) => setTimeout(resolve, 120));
+    const data = await datapi(`https://datapi.jup.ag/v2/txs/${mint}?limit=30` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""));
+    if (gen !== bt.gen) return null;
+    const raw = Array.isArray(data && data.txs) ? data.txs : [];
+    let known = 0, oldestTs = Infinity;
+    for (const x of raw) {
+      const r = bundlerRow(x);
+      if (!r) continue;
+      if (r.ts < oldestTs) oldestTs = r.ts;
+      if (bt.rows.has(r.id)) known += 1;
+      else bt.rows.set(r.id, r);
+    }
+    const next = data && data.nextCursor != null && data.nextCursor !== "" ? String(data.nextCursor) : "";
+    if (!raw.length || !next) return { cursor: "", end: true };
+    cursor = next;
+    if (stop({ known, oldestTs }) || bt.rows.size >= BUNDLER_MAX_ROWS) return { cursor, end: false };
+  }
+  return { cursor, end: false };
+}
+async function bundlerLoad(force = false) {
+  const t = state.active;
+  if (!t || !t.id) return;
+  const bt = bundlerTape;
+  if (bt.mint !== t.id) bundlerReset(t.id);
+  if (bt.busy) return;
+  if (bt.rows.size > 5000) bundlerReset(t.id);
+  const now = Date.now();
+  const cutoff = now - bundlerNeedMs();
+  const fresh = bt.at > 0 && now - bt.at < 15000;
+  const deep = bt.end || bt.rows.size >= BUNDLER_MAX_ROWS || bundlerOldest(bt) <= cutoff;
+  if (!force && fresh && (deep || bt.error)) return;
+  if (!force && bt.error && now - bt.at < 30000) return;
+  const gen = bt.gen;
+  bt.busy = true;
+  try {
+    const first = !bt.rows.size;
+    if (first || !fresh) {
+      const r = await bundlerWalk(bt, gen, t.id, "", ({ known, oldestTs }) => known > 0 || oldestTs <= cutoff);
+      if (!r) return;
+      if (first) { bt.cursor = r.cursor; bt.end = r.end; }
+    }
+    if (!bt.end && bt.rows.size < BUNDLER_MAX_ROWS && bundlerOldest(bt) > cutoff) {
+      const r = await bundlerWalk(bt, gen, t.id, bt.cursor, ({ oldestTs }) => oldestTs <= cutoff);
+      if (!r) return;
+      bt.cursor = r.cursor;
+      bt.end = r.end;
+    }
+    const keep = Date.now() - BUNDLER_WINS["24h"] - 60000;
+    for (const [id, r] of bt.rows) if (r.ts < keep) bt.rows.delete(id);
+    bt.error = "";
+    bt.at = Date.now();
+  } catch (err) {
+    if (gen === bt.gen) { bt.error = (err && err.message) || "tape"; bt.at = Date.now(); }
+  } finally {
+    if (gen === bt.gen) {
+      bt.busy = false;
+      try { paintGmgn(); } catch (_) {}
+    }
   }
 }
 function gmgnArm(ms) {
@@ -4537,6 +4708,7 @@ function gmgnWatch(mint) {
   }
   // Paint Jupiter bundler stats immediately so the header is never blank while GMGN tries.
   paintGmgn();
+  bundlerLoad().catch(() => {});
   gmgnArm(0);
 }
 async function gmgnTick() {
@@ -6059,9 +6231,9 @@ function sheetVals() {
   const sellPct = traderSellPct(s);
   const curveOn = onCurve(t);
   const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
-  const bv = bundlerView();
-  const bundler = bv.loading || bv.unavailable || bv.metric == null ? "—" : gmgnVolText(bv.metric);
-  const bundlerLab = bv.kind === "vol" ? "Bundler vol" : (bv.kind === "held" ? "Bundler H." : "Bundler");
+  const bv = bundlerView(state.infoWin);
+  const bundler = bv.loading || bv.unavailable || bv.metric == null ? "—" : bundlerText(bv);
+  const bundlerLab = bundlerLabel(bv);
   const bundlerCls = bv.loading || bv.unavailable || bv.metric == null ? "flat" : (Number(bv.metric) >= 20 ? "down" : "");
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
@@ -6204,7 +6376,7 @@ function openSheet() {
   root.addEventListener("click", (e) => {
     if (e.target.closest("[data-sheet-close]")) { e.preventDefault(); closeSheet(); return; }
     const w = e.target.closest("[data-win]");
-    if (w) { state.infoWin = w.dataset.win; paintSheet(); }
+    if (w) { state.infoWin = w.dataset.win; paintSheet(); bundlerLoad().catch(() => {}); }
   });
   bindSheetSwipe(root);
   paintSheet();
@@ -7464,7 +7636,7 @@ async function boot() {
     streamConnect();
     every(PRICE_EVERY_MS, () => pollPrices());
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
-    every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {})]));
+    every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {}), (state.view === "spot" && !document.hidden ? bundlerLoad() : null)?.catch?.(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
     startHolderRefresh();
     if (state.active && state.active.id) gmgnWatch(state.active.id);
