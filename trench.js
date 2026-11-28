@@ -6513,7 +6513,8 @@ function sheetVals() {
     price: (() => { const px = livePrice(t); return px == null ? "—" : priceLabel(px); })(), fdv: t.fdv > 0 ? usd(t.fdv) : (t.mcap > 0 ? usd(t.mcap) : "—"), liq: usd(t.liquidity),
     holders: holderCountOf(t) == null ? "—" : holderCountOf(t).toLocaleString(),
     fees: solAmt(t.fees),
-    curve: curveOn ? Number(t.bondingCurve).toFixed(2) + "%" : "",
+    // Match the header's dust threshold without losing the sheet's two-decimal precision.
+    curve: curveOn ? shareText(t.bondingCurve) : "",
     curveOn,
     vol: volSum == null ? "—" : usd(volSum), net: netSum == null ? "—" : usd(netSum), netCls: netSum == null ? "flat" : cls(netSum),
     buyPct, sellPct,
