@@ -755,3 +755,7 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 @media (max-height: 740px) {
   .bar { padding-top: 5px; padding-bottom: 5px; font-size: 13px; }
 }
+
+/* Drag handles of the search / indicators sheets: let the finger pull the sheet instead of scrolling. */
+#search-sheet .grab, #search-sheet h2, #ind-sheet .grab, #ind-sheet h2 { touch-action: none; cursor: grab; }
+#search-sheet h2, #ind-sheet h2 { padding-bottom: 4px; }

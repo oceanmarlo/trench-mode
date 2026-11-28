@@ -6753,6 +6753,57 @@ function bindSheetSwipe(root) {
   head.addEventListener("pointerup", end);
   head.addEventListener("pointercancel", end);
 }
+// Tapping the amount box selects what is in it, so the first keystroke replaces "0.1" instead of
+// appending to it ("0.1" + "2.5" used to become the invalid "0.12.5").
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (!(el instanceof HTMLInputElement) || el.id !== "amt") return;
+  setTimeout(() => { if (document.activeElement === el) { try { el.select(); } catch (_) {} } }, 0);
+});
+// Drag the top of any sheet down to dismiss it (Token Info already did; wallet, filters, search and
+// indicators did not). One delegated gesture: follows the finger, flicks away on a quick pull or
+// past ~90px, otherwise springs back. Controls inside the handle keep working as plain taps.
+const SHEET_DRAG = [
+  { sheet: "#wallet-root .sheet", handle: ".sheet-head", close: () => closeWalletPicker() },
+  { sheet: "#alpha-sheet .sheet", handle: ".sheet-head", close: () => $("#alpha-sheet .sheet-backdrop")?.click() },
+  { sheet: "#search-sheet", handle: ".grab, h2", close: () => { closeSearch(); render(); } },
+  { sheet: "#ind-sheet", handle: ".grab, h2", close: () => closeIndSheet() },
+];
+document.addEventListener("pointerdown", (e) => {
+  if (e.button > 0 || !(e.target instanceof Element) || e.target.closest("button, a, input, select, textarea")) return;
+  for (const spec of SHEET_DRAG) {
+    const el = e.target.closest(spec.sheet);
+    const handle = el && e.target.closest(spec.handle);
+    if (!el || !handle || !el.contains(handle)) continue;
+    const y0 = e.clientY, t0 = Date.now(), id = e.pointerId;
+    let dy = 0, moved = false;
+    const move = (ev) => {
+      if (ev.pointerId !== id) return;
+      dy = Math.max(0, ev.clientY - y0);
+      if (!moved && dy < 4) return;
+      if (!moved) { moved = true; el.style.transition = "none"; }
+      el.style.translate = `0 ${dy}px`;
+    };
+    const end = (ev) => {
+      if (ev.pointerId !== id) return;
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", end);
+      document.removeEventListener("pointercancel", end);
+      if (!moved) return;
+      el.style.transition = "translate .16s ease-out";
+      if (ev.type !== "pointercancel" && (dy > 90 || (dy > 30 && Date.now() - t0 < 250))) {
+        el.style.translate = "0 110%";
+        setTimeout(() => spec.close(el), 150);
+      } else {
+        el.style.translate = "";
+      }
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", end);
+    document.addEventListener("pointercancel", end);
+    return;
+  }
+}, { passive: true });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // Match search / Token Info / wallet: dismiss the topmost overlay first.
