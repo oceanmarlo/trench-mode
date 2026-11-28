@@ -5194,7 +5194,7 @@ function holdingsPanel() {
       ? `<b>—</b><span>—</span>`
       : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b${String(h.symbol || "").length >= 8 ? ' class="long"' : ""}>${esc(h.symbol || h.mint.slice(0, 4))}</b><span data-last-traded>${holdLastTraded(h.mint)}</span></div></div>
+      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b${String(h.symbol || "").length >= 9 ? ' class="xlong"' : String(h.symbol || "").length >= 8 ? ' class="long"' : ""}>${esc(h.symbol || h.mint.slice(0, 4))}</b><span data-last-traded>${holdLastTraded(h.mint)}</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
