@@ -683,3 +683,6 @@ button, [role=button], [role=tab] { -webkit-user-select: none; user-select: none
 .tools button::before { top: 0; bottom: 0; left: -4px; right: -12px; }
 .seg button::before, .market::before { top: -6px; bottom: -9px; left: -2px; right: -2px; }
 #est-more::before { top: -7px; bottom: -14px; left: -30px; right: -12px; }
+
+/* Visual haptic ring (startTapHaptics): overlay only, never takes a tap. */
+.tap-ring { position: fixed; pointer-events: none; z-index: 8999; box-shadow: 0 0 0 2px rgba(255,255,255,.55), 0 0 14px rgba(125,255,107,.35); }

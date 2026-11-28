@@ -848,6 +848,33 @@ function startTouchFeedback() {
   // An empty passive touchstart is what lets iOS Safari apply :active at all.
   document.addEventListener("touchstart", () => {}, { passive: true });
 }
+// Visual "haptic": key trading controls get a short ring on pointerdown. The ring is a
+// fixed overlay at the control's rect, so it survives the control being re-rendered.
+const HAPTIC_SEL = ".seg button, #go, .presets button, .tabs button, .tf-scroll button, .nav button, #star, .otype-chips button, .mini-seg button";
+function tapPulse(el, reduce = false) {
+  if (!el || !el.getBoundingClientRect) return null;
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const ring = document.createElement("div");
+  ring.className = "tap-ring";
+  ring.style.cssText = `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;border-radius:${getComputedStyle(el).borderRadius || "8px"}`;
+  document.body.appendChild(ring);
+  const done = () => ring.remove();
+  if (!reduce && ring.animate) {
+    const a = ring.animate([{ opacity: 0.95, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.16)" }], { duration: 260, easing: "ease-out" });
+    a.onfinish = done;
+    a.oncancel = done;
+  } else setTimeout(done, 160);
+  return ring;
+}
+function startTapHaptics() {
+  const mq = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+  document.addEventListener("pointerdown", (e) => {
+    if (e.button > 0) return;
+    const el = e.target && e.target.closest ? e.target.closest(HAPTIC_SEL) : null;
+    if (el && !el.disabled) tapPulse(el, !!(mq && mq.matches));
+  }, { capture: true, passive: true });
+}
 function startValueFlash() {
   if (typeof MutationObserver !== "function" || typeof document === "undefined") return;
   try { if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch (_) {}
@@ -7880,6 +7907,7 @@ async function boot() {
     startHolderRefresh();
     try { startValueFlash(); } catch (_) {}
     try { startTouchFeedback(); } catch (_) {}
+    try { startTapHaptics(); } catch (_) {}
     if (state.active && state.active.id) gmgnWatch(state.active.id);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.active && state.active.id) gmgnArm(0);
