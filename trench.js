@@ -736,8 +736,26 @@ function noteGmgnHolders(mint, n) {
   gmgnHolders.samples.push({ n, at: Date.now() });
   if (gmgnHolders.samples.length > 5) gmgnHolders.samples.splice(0, gmgnHolders.samples.length - 5);
 }
+// Measured 2026-11-28 (busy/mid/quiet, 60 s each; /workspace/trench-source-timing.md):
+// the Jupiter asset stream moves holders every ~3 s with no reversals; GMGN changes
+// every ~1.3 s but ~half of those are replicas flipping back; Jupiter REST /holders
+// changes every ~11 s and used to overwrite the fresher stream count. So: stream
+// count while frames arrive, smoothed GMGN when the stream is quiet, REST last.
+const holderStreamAt = new Map();
+const HOLDERS_STREAM_MS = 8000;
+function noteHolderStream(t) {
+  if (!t?.id || !validHolderCount(t.holderCount)) return;
+  holderStreamAt.delete(t.id);
+  holderStreamAt.set(t.id, Date.now());
+  if (holderStreamAt.size > 1000) holderStreamAt.delete(holderStreamAt.keys().next().value);
+}
+function holderStreamFresh(t) {
+  const at = t && t.id ? holderStreamAt.get(t.id) : 0;
+  return !!at && Date.now() - at <= HOLDERS_STREAM_MS;
+}
 function liveHolderCount(t) {
   if (!t || !t.id || gmgnHolders.mint !== t.id) return null;
+  if (holderStreamFresh(t)) return null;
   const now = Date.now();
   const fresh = gmgnHolders.samples.filter((x) => now - x.at <= HOLDERS_LIVE_MS);
   if (!fresh.length) return null;
@@ -858,7 +876,8 @@ async function loadHolders() {
     if (!unindexedZero) {
       state.holders = data.holders;
       // A count pushed while this snapshot was in flight wins over the older request.
-      if (holderCounts.get(t.id) === request.countRecord) noteHolderCount(t, data.count);
+      // REST lags the stream by ~10 s; while stream frames arrive it must not overwrite them.
+      if (holderCounts.get(t.id) === request.countRecord && !holderStreamFresh(t)) noteHolderCount(t, data.count);
     }
     holdersRefresh.at = Date.now();
     holdersRefresh.failures = 0;
@@ -4222,9 +4241,9 @@ function paintHolderCounts() {
   if (topEl) topEl.textContent = Number.isFinite(top) ? top.toFixed(2) + "%" : "—";
   const status = $("[data-holders-status]");
   if (status) {
-    const live = liveHolderCount(t) != null;
+    const live = holderStreamFresh(t) || liveHolderCount(t) != null;
     const stale = !live && (!holdersRefresh.at || Date.now() - holdersRefresh.at > 5000);
-    const label = live ? "Live · ~1s" : state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
+    const label = live ? (holderStreamFresh(t) ? "Live · stream" : "Live · ~1s") : state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
     if (status.textContent !== label) status.textContent = label;
     status.classList.toggle("updating", !live && (state.holdersLoading || stale || !!state.holdersError));
   }
@@ -4495,7 +4514,7 @@ function rcLineInner(t) {
 // so the header stays honest, and only use GMGN volume when a poll actually succeeds.
 const GMGN_HOST = "https://openapi.gmgn.ai";
 const GMGN_PUBLISHED_READ_KEY = "gmgn_solbscbaseethmonadtron";
-const gmgn = { mint: "", gen: 0, timer: 0, coolUntil: 0, snap: null, error: "", fails: 0 };
+const gmgn = { mint: "", gen: 0, timer: 0, coolUntil: 0, snap: null, error: "", fails: 0, extra: null };
 function gmgnKey() {
   try {
     const k = window.GMGN_API_KEY;
@@ -4532,7 +4551,11 @@ function gmgnParse(body) {
   const h = rawH == null ? null : Number(rawH);
   // A stub's holder_count is not a measurement either.
   const holders = !stub && Number.isSafeInteger(h) && h >= 0 ? h : null;
-  return { vol, wallets: nWallets, holders };
+  // Fallbacks for Token Info tiles Jupiter's audit often omits (rates are 0-1).
+  const share = (v) => (stub ? null : gmgnFraction(v));
+  const dev = share(stat.dev_team_hold_rate != null && stat.dev_team_hold_rate !== "" ? stat.dev_team_hold_rate : stat.creator_hold_rate);
+  const sniper = share(stat.top70_sniper_hold_rate);
+  return { vol, wallets: nWallets, holders, dev, sniper };
 }
 // Jupiter audit.bundlerStats: totalBundles + holdingPct (already percent points).
 // holdingPct is holdings share, never label it as volume.
@@ -4820,6 +4843,7 @@ async function gmgnTick() {
     const body = await res.json().catch(() => null);
     if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
     const parsed = res.ok ? gmgnParse(body) : null;
+    if (parsed) gmgn.extra = { mint, dev: parsed.dev, sniper: parsed.sniper, at: Date.now() };
     if (parsed && parsed.holders != null) {
       noteGmgnHolders(mint, parsed.holders);
       try { paintHolderCounts(); } catch (_) {}
@@ -6297,6 +6321,11 @@ function paintNetSeries(box, vals) {
     ctx.fillText(usd(rawLo), 2, h - 1);
   }
 }
+function gmgnExtra(t) {
+  const x = typeof gmgn !== "undefined" ? gmgn.extra : null;
+  if (!x || !t || x.mint !== t.id || Date.now() - x.at > 60000) return { dev: null, sniper: null };
+  return { dev: x.dev == null ? null : x.dev, sniper: x.sniper == null ? null : x.sniper };
+}
 function sheetVals() {
   const t = state.active || {};
   const audit = t.audit || {};
@@ -6314,7 +6343,11 @@ function sheetVals() {
   const buyPct = pair ? pair[0] : null;
   const sellPct = traderSellPct(s);
   const curveOn = onCurve(t);
-  const snipOn = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct));
+  // Jupiter audit first (same source as the rest of the sheet); GMGN when Jupiter omits it.
+  const gx = gmgnExtra(t);
+  const devPct = audit.devBalancePercentage != null ? audit.devBalancePercentage : gx.dev;
+  const snipPct = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct)) ? Number(audit.sniperPct) : gx.sniper;
+  const snipOn = snipPct != null && Number.isFinite(Number(snipPct));
   const bv = bundlerView(state.infoWin);
   const bundler = bv.loading || bv.unavailable || bv.metric == null ? "—" : bundlerText(bv);
   const bundlerLab = bundlerLabel(bv);
@@ -6337,10 +6370,10 @@ function sheetVals() {
     holdD: deltaText(s.holderChange), holdDCls: deltaCls(s.holderChange),
     top10: shareText(audit.topHoldersPercentage),
     top10Cls: shareCls(audit.topHoldersPercentage, "flat"),
-    dev: shareText(audit.devBalancePercentage),
-    devCls: shareCls(audit.devBalancePercentage, "up"),
-    snip: snipOn ? Number(audit.sniperPct).toFixed(2) + "%" : "",
-    snipOn, snipCls: snipOn && Number(audit.sniperPct) > 0 ? "down" : "up",
+    dev: shareText(devPct),
+    devCls: shareCls(devPct, "up"),
+    snip: snipOn ? Number(snipPct).toFixed(2) + "%" : "",
+    snipOn, snipCls: snipOn && Number(snipPct) > 0 ? "down" : "up",
     bundler, bundlerLab, bundlerCls,
     freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
     freezeCls: audit.freezeAuthorityDisabled == null ? "flat" : (audit.freezeAuthorityDisabled ? "up" : "down"),
@@ -7497,6 +7530,7 @@ function onStreamAssets(list) {
     const t = u?.asset;
     if (!t?.id) continue;
     noteHolderCount(t, t.holderCount);
+    noteHolderStream(t);
     // Null/omitted counts in partial frames are not a drop to zero/unknown.
     if (holderCountOf(t) != null) t.holderCount = holderCountOf(t);
     if (a && t.id === a.id) {
