@@ -506,9 +506,6 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .al-num { display: grid; min-width: 0; overflow: hidden; }
 .al-num b { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .al-num b.al-change-long { font-size: 11px; }
-.holder-live { display: block; color: var(--muted); font-size: 10px; line-height: 1.6; }
-.holder-live::before { content: "● "; color: #2ebd85; }
-.holder-live.updating::before { color: var(--muted); }
 .al-meta .b { font-style: normal; font-size: 9px; font-weight: 700; padding: 0 3px; border-radius: 3px; margin-left: 2px; }
 .al-meta .b.ok { color: #2ebd85; background: rgba(46,189,133,.12); }
 .al-meta .b.bad { color: #f6465d; background: rgba(246,70,93,.12); }

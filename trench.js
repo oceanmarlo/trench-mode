@@ -534,7 +534,7 @@ async function loadToken(query, restored = null, prefetched = null) {
     state.holdersError = "";
     state.quote = null;
     state.samples = [hit.usdPrice];
-    state.status = "Live · Jupiter";
+    state.status = "";
     state.scrollTop = restored?.scroll || 0;
     render();
     heliusTrack(hit);
@@ -2043,12 +2043,21 @@ function trailNote() {
   const tr = trailFromHigh(1, state.trailPct);
   return tr.ok ? "Jupiter Trigger trail · sells " + tr.pct + "% under the high · tab can close" : tr.reason;
 }
+function paintStatusLine() {
+  const el = document.getElementById("status");
+  if (!el) return;
+  const msg = state.quoting ? "Quoting…" : (state.status || "");
+  if (el.textContent !== msg) el.textContent = msg;
+  if (el.hidden !== !msg) el.hidden = !msg;
+  const dot = document.getElementById("status-dot");
+  if (dot && dot.hidden !== !msg) dot.hidden = !msg;
+}
 function setQuoteStatus(message, replace = false) {
   // Price/preview repaints own only quote messages, never wallet progress or an
   // order result (especially "Bought, stop not set"). A new quote/edit may reset
   // a finished result, but nothing may replace status while an order is busy.
   const ownsStatus = !state.status || state.status === state.quoteStatus
-    || state.status === "Live · Jupiter" || state.status === "Quoting…";
+    || state.status === "Jupiter" || state.status === "Live · Jupiter" || state.status === "Quoting…";
   state.quoteStatus = message;
   if (!state.busy && (replace || ownsStatus)) state.status = message;
 }
@@ -2066,8 +2075,8 @@ function paintOrderPreview() {
   // Keep status / go in sync with stop-trail validity without waiting on a re-quote.
   const idle = idleQuoteStatus();
   if (idle) setQuoteStatus(idle);
-  else if (currentQuote() && !state.quoting) setQuoteStatus(friendlyError(state.quote?.errorMessage) || "Live · Jupiter");
-  setText(document.getElementById("status"), state.status);
+  else if (currentQuote() && !state.quoting) setQuoteStatus(friendlyError(state.quote?.errorMessage) || "");
+  paintStatusLine();
   const go = document.getElementById("go");
   if (go && state.wallet) go.disabled = !!state.busy || !orderParams() || !!solShortfall() || !p.ok;
 }
@@ -2260,7 +2269,7 @@ async function refreshQuote() {
     order._params = key;
     state.quote = order;
     const idle = idleQuoteStatus();
-    setQuoteStatus(friendlyError(order.errorMessage) || idle || "Live · Jupiter", true);
+    setQuoteStatus(friendlyError(order.errorMessage) || idle || "", true);
     return order;
   } catch (err) {
     if (seq === quoteSeq) { state.quote = null; setQuoteStatus(friendlyError(err.message), true); }
@@ -2289,6 +2298,27 @@ async function confirmSig(sig) {
     } catch (_) {}
   }
   return { status: "Failed", error: "Not confirmed yet, check your wallet", signature: sig };
+}
+
+// Land a signed Swap V2 order. /execute handles broadcast, retries, and
+// confirmation. The same body can be retried for about two minutes to poll.
+async function executeSwap(signedTransaction, requestId) {
+  if (!requestId) throw new Error("Jupiter did not return a request id.");
+  const body = JSON.stringify({ signedTransaction, requestId });
+  const opts = { method: "POST", headers: { "content-type": "application/json" }, body };
+  let lastErr = "Swap was not confirmed.";
+  for (let i = 0; i < 8; i++) {
+    try {
+      const result = await jup(SWAP + "/execute", opts);
+      if (result && result.status === "Success") return result;
+      if (result && result.status === "Failed") return result;
+      lastErr = (result && (result.error || result.message)) || lastErr;
+    } catch (e) {
+      lastErr = (e && e.message) || String(e) || lastErr;
+    }
+    if (i < 7) await sleep(1500);
+  }
+  return { status: "Failed", error: lastErr };
 }
 
 async function heliusSendSigned(signed) {
@@ -2327,18 +2357,11 @@ async function sendMarket() {
     if (order._params !== quoteParamsKey()) throw new Error("Order changed. Review it and try again.");
     state.status = "Sending…";
     paintLive();
-    done = null;
-    if (HKEY) {
-      try { done = await heliusSendSigned(signed); }
-      catch (_) { done = null; }
-    }
-    if (!done) {
-      done = await jup(SWAP + "/execute", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ signedTransaction: bytesToB64(signed), requestId: order.requestId })
-      });
-    }
+    // Always land via Swap V2 /execute (retry + confirmation). Do not send
+    // the order through our RPC: a one-shot Helius broadcast with
+    // skipPreflight and maxRetries 0 can sit pending after the wallet signs.
+    if (!order.requestId) throw new Error("Jupiter did not return a request id.");
+    done = await executeSwap(bytesToB64(signed), order.requestId);
   } else {
     // Wallet only offers signAndSend: OK unless Jupiter must co-sign (gasless/RFQ).
     const need = solanaWeb3.VersionedTransaction.deserialize(unsigned).message.header.numRequiredSignatures;
@@ -2624,7 +2647,7 @@ function paintLive() {
     }
   }
   paintQuoteExtras();
-  if (stat) setText(stat, state.quoting ? "Quoting…" : state.status);
+  if (stat) paintStatusLine();
   const go = $("#go");
   if (go) {
     go.disabled = state.busy || (!!state.wallet && (!orderParams() || !!solShortfall()));
@@ -3069,6 +3092,7 @@ function ensureChart() {
       if (seen && was) {
         loadCandles().catch(() => {});
         tickChart();
+        if (state.candles && state.candles.length) frameCandlesSoon(toBars(state.candles).bars.length);
         paintAxisEdge();
       }
     });
@@ -3613,7 +3637,7 @@ function setChartData() {
     chartUi.line.setData(linePts);
     paintVolume(bars, vols, true);
     chartUi.key = key;
-    frameCandles(bars.length);
+    frameCandlesSoon(bars.length);
   } else {
     bars.forEach((b, i) => {
       if (b.time >= chartUi.lastTime) {
@@ -3652,8 +3676,21 @@ function recentSecondLogical(first, last, count, tf) {
   if (!(last - first > dense)) return null;
   return { from: count - 40, to: count - 1 + 8 };
 }
-// fitContent stretches a handful of bars across the whole plot, so a new coin's
-// only candle becomes a slab that covers the drawing toolbar. Keep a normal width.
+// fitContent on a long 1h/4h history packs every bar into the pane (tiny candles).
+// Leaving the previous timeframe's logical range is worse: a 1m range of ~300
+// indexes on a shorter 1h series parks the bars on the left with a blank right.
+// Always reset to a normal bar width and a recent window, like a first load.
+const FRAME_BAR_SPACING = 8;
+const FRAME_RIGHT = 6;
+const FRAME_BARS = 56;
+function frameRange(n, recent) {
+  if (recent) return recent;
+  if (!(n > 0)) return null;
+  const last = n - 1;
+  const to = last + FRAME_RIGHT;
+  const from = last + 1 < FRAME_BARS ? to - FRAME_BARS : last - (FRAME_BARS - 1);
+  return { from, to };
+}
 function frameCandles(n) {
   const ts = chartUi.chart && chartUi.chart.timeScale();
   if (!ts) return;
@@ -3670,20 +3707,18 @@ function frameCandles(n) {
     plotted++;
   }
   const recent = recentSecondLogical(first, lastT, plotted, tf);
-  if (recent) {
-    ts.applyOptions({ secondsVisible: true, barSpacing: 8, rightOffset: 8, minBarSpacing: 4 });
-    try { ts.setVisibleLogicalRange(recent); return; }
-    catch (_) { ts.fitContent(); return; }
-  }
-  if (n > 0 && n < 40) {
-    ts.applyOptions({ secondsVisible: sec, barSpacing: 8, rightOffset: 8, minBarSpacing: 4 });
-    const to = n - 1 + 8;
-    try { ts.setVisibleLogicalRange({ from: to - 48, to }); }
-    catch (_) { ts.fitContent(); }
-  } else {
-    ts.applyOptions({ secondsVisible: sec, barSpacing: 6, rightOffset: 4, minBarSpacing: 0.5 });
-    ts.fitContent();
-  }
+  ts.applyOptions({ secondsVisible: !!sec || !!recent, barSpacing: FRAME_BAR_SPACING, rightOffset: FRAME_RIGHT, minBarSpacing: 4 });
+  const range = frameRange(n, recent);
+  if (!range) return;
+  try { ts.setVisibleLogicalRange(range); }
+  catch (_) { try { ts.fitContent(); } catch (__) {} }
+}
+function frameCandlesSoon(n) {
+  frameCandles(n);
+  const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 0);
+  if (frameCandlesSoon.t && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frameCandlesSoon.t);
+  else if (frameCandlesSoon.t) clearTimeout(frameCandlesSoon.t);
+  frameCandlesSoon.t = raf(() => { frameCandlesSoon.t = 0; frameCandles(n); });
 }
 function priceSeries() {
   return state.chartStyle === "line" && chartUi.line ? chartUi.line : chartUi.candles;
@@ -4663,14 +4698,6 @@ function paintHolderCounts() {
   const top = t.audit?.topHoldersPercentage;
   const topEl = $("[data-holder-top]");
   if (topEl) setText(topEl, Number.isFinite(top) ? top.toFixed(2) + "%" : "—");
-  const status = $("[data-holders-status]");
-  if (status) {
-    const live = holderStreamFresh(t) || liveHolderCount(t) != null;
-    const stale = !live && (!holdersRefresh.at || Date.now() - holdersRefresh.at > 5000);
-    const label = live ? (holderStreamFresh(t) ? "Live · stream" : "Live · ~1s") : state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
-    if (status.textContent !== label) status.textContent = label;
-    status.classList.toggle("updating", !live && (state.holdersLoading || stale || !!state.holdersError));
-  }
   // Count labels update on every price tick. The empty list does not, so a
   // later stream count left "No holders yet." under Holders 3.
   const empty = $("#holder-list [data-holder-empty]");
@@ -5455,7 +5482,7 @@ function tokenHead(t, price, chg) {
       <div><div class="k">Liquidity</div><div class="v">${t.liquidity == null ? "—" : usd(t.liquidity)}</div></div>
       <div><div class="k">1h Vol</div><div class="v">${t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null) ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0)) : "—"}</div></div>
       <div><div class="k">Fees Paid</div><div class="v fee-sol" id="stat-fees">${feeHtml(t.fees)}</div></div>
-      <div><div class="k">Org Score</div><div class="v">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
+      <div><div class="k">Org Score</div><div class="v" id="stat-org">${t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1)}</div></div>
       <button type="button" class="stat-more" id="info" aria-label="Token info">⌄</button>
     </div>
     <div class="tf"><div class="tf-scroll">${tfButtons()}</div><span class="tf-tools"><button type="button" id="chart-style" class="${state.chartStyle === "line" ? "on" : ""}" aria-label="${state.chartStyle === "line" ? "Show candles" : "Show line"}">${styleIcon()}</button><button type="button" id="fx" class="${state.inds.length ? "on" : ""}" aria-label="Indicators">fx</button><button type="button" class="chart-full-btn" id="chart-full" aria-label="Full screen">⤢</button></span></div>
@@ -6515,7 +6542,7 @@ function tradePanel() {
     ${orderFields()}
     <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span> <span class="quote-age${quoteAgeInfo().stale ? " stale" : ""}" id="quote-age">${esc(quoteAgeInfo().text)}</span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
     <div class="quote-detail" id="quote-detail" hidden></div>
-    <div class="ultra">✦ ${engine} · <span id="status">${esc(state.status)}</span></div>`;
+    <div class="ultra">✦ ${engine}<span id="status-dot"${state.status ? "" : " hidden"}> · </span><span id="status"${state.status ? "" : " hidden"}>${esc(state.status)}</span></div>`;
 }
 
 // A finite positive token amount. Null, "", true, and NaN are not a fill.
@@ -6701,7 +6728,7 @@ function holdersPanel() {
     ? `<a class="bubblemaps" href="https://app.bubblemaps.io/sol/token/${esc(mint)}" target="_blank" rel="noopener noreferrer">Bubblemaps</a>`
     : "";
   return `<div class="holder-stats holder-head">
-      <div>Holders: <span data-holder-count>${holderCountOf(t) == null ? "—" : holderCountOf(t).toLocaleString()}</span> &nbsp; Top 10: <span class="down" data-holder-top>${Number.isFinite(top) ? top.toFixed(2) + "%" : "—"}</span><small class="holder-live" data-holders-status>Updating…</small></div>
+      <div>Top 10: <span class="down" data-holder-top>${Number.isFinite(top) ? top.toFixed(2) + "%" : "—"}</span></div>
       ${bubble}
     </div>
     <div class="hcols"><span>#</span><span>Address</span><span>Supply</span><span>Amount</span></div>
@@ -7269,7 +7296,7 @@ document.addEventListener("click", (e) => {
   if (est) est.innerHTML = quoteSummary();
   paintQuoteExtras();
   // Expanding the route line grows the dock; scroll it clear of the Holding bar
-  // so "Jupiter Swap · Live" and the detail stay readable.
+  // so the engine line and the detail stay readable.
   if (state.quoteOpen) revealQuote();
 });
 document.addEventListener("click", (e) => {
@@ -8365,6 +8392,13 @@ function paintHeadStats() {
   setText(st[2], t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null)
     ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0))
     : "—");
+  const org = document.getElementById("stat-org");
+  if (org) setText(org, t.organicScore == null ? "—" : Number(t.organicScore).toFixed(1));
+  const feesEl = document.getElementById("stat-fees");
+  if (feesEl) {
+    const next = feeHtml(t.fees);
+    if (feesEl.innerHTML !== next) feesEl.innerHTML = next;
+  }
 }
 
 // Shareable GitHub Pages routes. Never persist wallet, quote or order credentials.
@@ -8490,8 +8524,55 @@ window.addEventListener("hashchange", onNavigationHistory);
 window.addEventListener("pagehide", () => saveNavigation("replace"));
 document.addEventListener("pointerdown", () => { navigation.scrollTarget = null; }, { passive: true });
 
+// Quiet refresh of the open token's slower fields (liquidity, 1h vol, fees,
+// organic score, audit / top-10 / bundler holdings). The price itself stays
+// on the stream; this only fills gaps the stream or the first search omitted.
+const STATS_EVERY_MS = 15000;
+function mergeActiveStats(row) {
+  const a = state.active;
+  if (!a || !row || row.id !== a.id) return false;
+  const keepPx = streamPricesLive() && state.prices[a.id] > 0;
+  const price = keepPx ? state.prices[a.id] : a.usdPrice;
+  const prevFees = a.fees, prevCurve = a.bondingCurve, prevGradAt = a.graduatedAt, prevGradPool = a.graduatedPool;
+  const prevSniper = a.audit && a.audit.sniperPct;
+  Object.assign(a, row);
+  if (keepPx) {
+    a.usdPrice = price;
+    if (a.circSupply) a.mcap = a.circSupply * price;
+  }
+  if (prevFees != null && a.fees == null) a.fees = prevFees;
+  if (prevCurve != null && a.bondingCurve == null) a.bondingCurve = prevCurve;
+  if (prevGradAt != null && a.graduatedAt == null) a.graduatedAt = prevGradAt;
+  if (prevGradPool != null && a.graduatedPool == null) a.graduatedPool = prevGradPool;
+  if (prevSniper != null && (!a.audit || a.audit.sniperPct == null)) {
+    a.audit = a.audit || {};
+    a.audit.sniperPct = prevSniper;
+  }
+  return true;
+}
+async function refreshActiveStats() {
+  const t = state.active;
+  if (!t || !t.id || (typeof document !== "undefined" && document.hidden)) return;
+  if (refreshActiveStats.busy) return;
+  refreshActiveStats.busy = true;
+  try {
+    const meta = await datapi("https://datapi.jup.ag/v1/assets?ids=" + encodeURIComponent(t.id));
+    if (state.active !== t) return;
+    const list = Array.isArray(meta) ? meta : (meta && meta.assets) || [];
+    const row = list.find((m) => m && m.id === t.id) || list[0] || null;
+    if (!mergeActiveStats(row)) return;
+    paintHeadStats();
+    paintLive();
+    paintGmgn();
+    if (typeof document !== "undefined" && document.getElementById("sheet-root")) paintSheet();
+  } catch (_) {
+    // Stay quiet: the stream and the last known figures remain on screen.
+  } finally {
+    refreshActiveStats.busy = false;
+  }
+}
 function resumeRefresh() {
-  const jobs = [loadTape(), loadCandles(), pollPrices(true)];
+  const jobs = [loadTape(), loadCandles(), pollPrices(true), refreshActiveStats()];
   if (state.wallet) jobs.push(loadHoldings());
   if (state.view === "alpha") jobs.push(loadMarketFeeds());
   if (state.view === "spot" && state.active) jobs.push(refreshQuote());
@@ -8517,6 +8598,7 @@ async function boot() {
     every(QUOTE_EVERY_MS, () => { if (!state.busy) return refreshQuote(); });
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {}), (state.view === "spot" && !document.hidden ? bundlerLoad() : null)?.catch?.(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
+    every(STATS_EVERY_MS, () => refreshActiveStats());
     startHolderRefresh();
     try { startValueFlash(); } catch (_) {}
     try { startTouchFeedback(); } catch (_) {}
