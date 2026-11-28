@@ -667,6 +667,10 @@ button, [role=button], [role=tab] { -webkit-user-select: none; user-select: none
 .icon-btn::before, .round::before, .token-head .copy::before, .token-head .soc::before, .stat-more::before,
 .tf-scroll button::before, .tf-tools button::before, .scale-btns button::before, #chart-mode::before,
 .tools button::before, .seg button::before, .market::before, #est-more::before { content: ""; position: absolute; }
+.url { position: relative; }
+/* The address/search pill was omitted from the expanded touch targets. Keep its
+   36px reference shape; the 44px hit box stays inside the browser row's padding. */
+.url::before { content: ""; position: absolute; top: 50%; left: 0; right: 0; height: 44px; transform: translateY(-50%); }
 .icon-btn::before { inset: -4px; }
 .round::before { inset: -6px -4px; }
 .token-head .copy::before { inset: -6px -5px 0; }
