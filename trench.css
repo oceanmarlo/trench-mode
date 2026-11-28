@@ -847,3 +847,26 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .sk-r i { height: 10px; width: 100%; }
 @keyframes sk-shine { from { background-position: 130% 0; } to { background-position: -90% 0; } }
 @media (prefers-reduced-motion: reduce) { .sk i, .go .spin { animation-duration: 3s; } .toast { animation: none; } }
+
+/* Bundlers (GMGN token-page style): grey "Bundler" label, plain % in green/red, then the
+   buy / sell split for the chart window. The sell side is always red and gets louder as it grows. */
+.gmgn-line .b1, .gmgn-line .b2 { display: block; min-height: 1.35em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gmgn-line .bl { color: #8b939e; }
+.gmgn-line strong.up { color: var(--green); }
+.gmgn-line strong.down { color: var(--red); }
+.gmgn-line strong.flat { color: #9aa3ad; }
+.gmgn-line .bc { color: #8b939e; }
+.gmgn-line .b2.dim, .gmgn-line .b2 .bwin { color: #7d8691; }
+.gmgn-line .bb b { color: var(--green); font-weight: 650; }
+.gmgn-line .bs, .bsplit-row .bs { color: var(--red); border-radius: 6px; }
+.gmgn-line .bs b, .bsplit-row .bs b { color: var(--red); font-weight: 650; }
+.gmgn-line .bs.zero, .bsplit-row .bs.zero, .gmgn-line .bs.zero b, .bsplit-row .bs.zero b { color: #8b939e; font-weight: 500; }
+.gmgn-line .bs.high, .bsplit-row .bs.high { padding: 0 5px; margin: 0 -1px; background: rgba(229,84,111,.15); box-shadow: inset 0 0 0 1px rgba(229,84,111,.3); }
+.gmgn-line .bs.high b, .bsplit-row .bs.high b { font-weight: 800; }
+.gmgn-line .bs.hot, .bsplit-row .bs.hot { padding: 0 5px; margin: 0 -1px; background: rgba(229,84,111,.3); box-shadow: inset 0 0 0 1px rgba(229,84,111,.7); }
+.gmgn-line .bs.hot b, .bsplit-row .bs.hot b { font-weight: 800; color: #ff7a93; }
+.gmgn-line .bup, .bsplit-row .bup { font-style: normal; font-size: 9px; margin-left: 3px; color: #ff7a93; }
+.bsplit-row { margin-top: 8px; padding: 9px 10px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255,255,255,.02); font-size: 13px; color: #9aa4b0; text-align: center; min-height: 20px; font-variant-numeric: tabular-nums; }
+.bsplit-row .bb b { color: var(--green); font-weight: 650; }
+.bsplit-row .b2.dim { color: #7d8691; }
+.bsplit-row .bwin { opacity: .75; }

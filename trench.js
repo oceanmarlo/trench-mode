@@ -5070,7 +5070,8 @@ function bundlerRow(x) {
   const usd = Number(x.usdVolume);
   if (!Number.isFinite(usd) || usd < 0) return null;
   const tags = [].concat(Array.isArray(x.holderTags) ? x.holderTags : [], Array.isArray(x.walletCategories) ? x.walletCategories : []);
-  return { id: String(id), ts, usd, trader: String(x.traderAddress || ""), bundler: tags.some((v) => String(v).toLowerCase().includes("bundler")) };
+  const kind = String(x.type || "").toLowerCase();
+  return { id: String(id), ts, usd, trader: String(x.traderAddress || ""), side: kind === "buy" || kind === "sell" ? kind : "", bundler: tags.some((v) => String(v).toLowerCase().includes("bundler")) };
 }
 // Bundler share of the volume traded inside the window. Unknown (null) when the
 // tape holds nothing for it; a partial result says how far back it really reaches.
@@ -5078,7 +5079,12 @@ function bundlerWindowStat(rows, win, now = Date.now(), end = false) {
   const span = BUNDLER_WINS[win];
   if (!span) return null;
   const cutoff = now - span;
+  const mid = now - span / 2;
   let oldest = Infinity, total = 0, tagged = 0, trades = 0;
+  // Buy / sell split: bundler volume over ALL volume on the same side. The window is also cut in
+  // halves so a sell share that is climbing (recent half vs older half) can be flagged.
+  let buyAll = 0, sellAll = 0, buyB = 0, sellB = 0;
+  let sellAllNew = 0, sellBNew = 0, sellBNewN = 0, sellAllOld = 0, sellBOld = 0;
   const wallets = new Set();
   for (const r of rows) {
     if (r.ts < oldest) oldest = r.ts;
@@ -5089,65 +5095,119 @@ function bundlerWindowStat(rows, win, now = Date.now(), end = false) {
       tagged += r.usd;
       if (r.trader) wallets.add(r.trader);
     }
+    if (r.side === "buy") { buyAll += r.usd; if (r.bundler) buyB += r.usd; }
+    else if (r.side === "sell") {
+      sellAll += r.usd;
+      if (r.bundler) sellB += r.usd;
+      if (r.ts >= mid) { sellAllNew += r.usd; if (r.bundler) { sellBNew += r.usd; sellBNewN += 1; } }
+      else { sellAllOld += r.usd; if (r.bundler) sellBOld += r.usd; }
+    }
   }
   if (oldest === Infinity) return null;
   const complete = end || oldest <= cutoff;
-  if (!trades || !(total > 0)) return complete ? { win, vol: null, wallets: null, trades, complete, spanMs: span } : null;
-  return { win, vol: (tagged / total) * 100, wallets: wallets.size, trades, complete, spanMs: complete ? span : Math.max(0, now - oldest) };
+  const buyPct = buyAll > 0 ? (buyB / buyAll) * 100 : null;
+  const sellPct = sellAll > 0 ? (sellB / sellAll) * 100 : null;
+  const newShare = sellAllNew > 0 ? (sellBNew / sellAllNew) * 100 : 0;
+  const oldShare = sellAllOld > 0 ? (sellBOld / sellAllOld) * 100 : 0;
+  const rising = sellPct != null && sellPct >= 10 && sellBNewN >= 3 && newShare - oldShare >= 10;
+  if (!trades || !(total > 0)) return complete ? { win, vol: null, wallets: null, trades, complete, spanMs: span, buyPct: null, sellPct: null, rising: false } : null;
+  return { win, vol: (tagged / total) * 100, wallets: wallets.size, trades, complete, spanMs: complete ? span : Math.max(0, now - oldest), buyPct, sellPct, rising };
 }
-// A windowed tape figure when the tape has it; otherwise the lifetime GMGN volume
-// snapshot, otherwise Jupiter bundles + held % (both lifetime, labelled as such).
-function bundlerView(win) {
-  const w = BUNDLER_WINS[win] ? win : bundlerWinForTf(state.tf);
-  const t = state.active;
-  if (t && bundlerTape.mint === t.id && bundlerTape.rows.size) {
-    const s = bundlerWindowStat(bundlerTape.rows.values(), w, Date.now(), bundlerTape.end);
-    if (s && s.vol != null) return { wallets: s.wallets, metric: s.vol, kind: "win", win: w, partial: !s.complete, spanMs: s.spanMs, source: "tape" };
-  }
-  if (gmgn.snap && (gmgn.snap.vol != null || gmgn.snap.wallets != null)) {
-    return { wallets: gmgn.snap.wallets, metric: gmgn.snap.vol, kind: "vol", source: "gmgn" };
-  }
+// GMGN's token page lists Bundler as a plain tile: grey "Bundler" label, one percentage (up to
+// 2 decimals, zeros trimmed), green when it looks fine, red when it does not. That tile is the
+// share of supply bundlers hold (Jupiter audit holdingPct, on the token already, so no wait). If
+// Jupiter omits it, GMGN's lifetime bundler volume share stands in, labelled "of vol".
+const BUNDLER_RED_PCT = 20;
+function bundlerView() {
   const j = jupBundler(state.active);
-  if (j) return { wallets: j.wallets, metric: j.held, kind: "held", source: "jup" };
+  const g = gmgn.snap;
+  const wallets = g && g.wallets != null ? g.wallets : null;
+  const bundles = j && j.wallets != null ? j.wallets : null;
+  if (j && j.held != null) return { kind: "held", metric: j.held, wallets, bundles, source: "jup" };
+  if (g && g.vol != null) return { kind: "vol", metric: g.vol, wallets, bundles, source: "gmgn" };
+  if (j) return { kind: "held", metric: null, wallets, bundles, source: "jup" };
+  if (g && g.wallets != null) return { kind: "held", metric: null, wallets, bundles, source: "gmgn" };
   if (gmgn.error) return { unavailable: true };
   return { loading: true };
 }
+// The buy / sell split for one window, measured from the trade tape. null until the tape has rows.
+function bundlerSplit(win) {
+  const w = BUNDLER_WINS[win] ? win : bundlerWinForTf(state.tf);
+  const t = state.active;
+  if (!t || bundlerTape.mint !== t.id || !bundlerTape.rows.size) return null;
+  const s = bundlerWindowStat(bundlerTape.rows.values(), w, Date.now(), bundlerTape.end);
+  if (!s) return null;
+  return { win: w, partial: !s.complete, spanMs: s.spanMs, buyPct: s.buyPct, sellPct: s.sellPct, rising: !!s.rising };
+}
+// How loud the sell side is: climbing or very high = hot, high = high, any = low, none = zero.
+function bundlerSellLevel(sp) {
+  if (!sp || sp.sellPct == null) return "";
+  if (!(sp.sellPct > 0)) return "zero";
+  if (sp.rising || sp.sellPct >= 40) return "hot";
+  return sp.sellPct >= BUNDLER_RED_PCT ? "high" : "low";
+}
+function bundlerPct1(n) {
+  return n == null || !Number.isFinite(Number(n)) ? "…" : Number(n).toFixed(1) + "%";
+}
+function bundlerSplitHtml(sp) {
+  if (!sp) return `<span class="b2 dim">Buy … · Sell … of vol</span>`;
+  const lvl = bundlerSellLevel(sp);
+  const tag = ` <span class="bwin">${sp.partial ? "last " + bundlerSpanText(sp.spanMs) : sp.win}</span>`;
+  const up = sp.rising && lvl !== "zero" ? `<i class="bup" title="Rising">▲</i>` : "";
+  const sell = sp.sellPct == null ? "—" : bundlerPct1(sp.sellPct);
+  const buy = sp.buyPct == null ? "—" : bundlerPct1(sp.buyPct);
+  return `<span class="b2"><span class="bb">Buy <b>${sp.partial && sp.buyPct != null ? "~" : ""}${buy}</b></span> · <span class="bs ${lvl}">Sell <b>${sp.partial && sp.sellPct != null ? "~" : ""}${sell}</b>${up}</span> of vol${tag}</span>`;
+}
 function bundlerTag(v) {
-  if (v.kind === "win") return ` <span class="bwin">${v.partial ? "last " + bundlerSpanText(v.spanMs) : v.win}</span>`;
-  if (v.kind === "vol") return ` <span class="bwin">all</span>`;
-  return "";
+  return v.kind === "vol" ? ` <span class="bwin">of vol</span>` : "";
 }
 function bundlerLabel(v) {
-  if (v.kind === "win") return v.partial ? "Bundler vol · " + bundlerSpanText(v.spanMs) : "Bundler vol " + v.win;
-  if (v.kind === "vol") return "Bundler vol";
-  return v.kind === "held" ? "Bundlers hold" : "Bundlers";
+  return v.kind === "vol" ? "Bundler vol" : "Bundler";
 }
 function bundlerText(v) {
-  return (v.partial ? "~" : "") + gmgnVolText(v.metric);
+  if (v == null || v.metric == null || !Number.isFinite(Number(v.metric))) return "—";
+  const n = Math.round(Number(v.metric) * 100) / 100;
+  return n + "%";
+}
+function bundlerCls(v) {
+  if (!v || v.loading || v.unavailable || v.metric == null) return "flat";
+  return Number(v.metric) >= BUNDLER_RED_PCT ? "down" : "up";
+}
+// "1,000+" because GMGN's per-tag wallet counts stop at 1000.
+function bundlerCountText(v) {
+  if (v.wallets != null) {
+    const n = Number(v.wallets);
+    return (n >= 1000 ? "1,000+" : n.toLocaleString()) + (n === 1 ? " wallet" : " wallets");
+  }
+  if (v.bundles != null) return Number(v.bundles).toLocaleString() + (Number(v.bundles) === 1 ? " bundle" : " bundles");
+  return "";
 }
 function gmgnLineInner() {
   const v = bundlerView();
-  if (v.unavailable) return `Bundlers <span class="bad">unavailable</span>`;
-  if (v.loading) return "Bundlers …";
-  const n = v.wallets == null ? "—" : Number(v.wallets).toLocaleString();
-  const noun = v.wallets === 1 ? "wallet" : "wallets";
-  const unit = v.kind === "held" ? "of supply" : "of vol";
-  return `Bundlers <strong>${n}</strong> ${noun} · <strong>${bundlerText(v)}</strong> ${unit}${bundlerTag(v)}`;
+  if (v.unavailable) return `<span class="b1"><span class="bl">Bundler</span> <span class="bad">unavailable</span></span>`;
+  if (v.loading) return `<span class="b1"><span class="bl">Bundler</span> …</span>${bundlerSplitHtml(null)}`;
+  const count = bundlerCountText(v);
+  return `<span class="b1"><span class="bl">Bundler</span> <strong class="${bundlerCls(v)}">${bundlerText(v)}</strong>${bundlerTag(v)}${count ? ` <span class="bc">· ${count}</span>` : ""}</span>${bundlerSplitHtml(bundlerSplit())}`;
 }
 // Plain-words meaning of the header line, shown when it is tapped.
-function bundlerTipText() {
+function bundlerTipText(win) {
   const v = bundlerView();
   if (v.unavailable) return "Bundler data is unavailable for this token right now.";
   if (v.loading) return "Loading bundler data…";
-  const n = v.wallets == null ? "?" : Number(v.wallets).toLocaleString();
   const w = v.wallets === 1 ? "wallet" : "wallets";
   let main;
-  if (v.kind === "win") main = `${n} bundler ${w} traded in the ${v.partial ? "last " + bundlerSpanText(v.spanMs) : v.win + " window"}, together ${bundlerText(v)} of that window's volume.`;
-  else if (v.kind === "vol") main = `${n} bundler ${w} so far, together ${bundlerText(v)} of all volume (lifetime, GMGN).`;
-  else main = `${n} bundler ${w}, still holding ${bundlerText(v)} of supply (lifetime, Jupiter).`;
-  const j = jupBundler(state.active);
-  const life = j && j.held != null && v.kind !== "held" ? ` Bundlers still hold ${gmgnVolText(j.held)} of supply overall.` : "";
-  return main + life;
+  if (v.metric == null) main = "Bundler share is not published for this token yet.";
+  else if (v.kind === "held") main = `Bundlers still hold ${bundlerText(v)} of the supply (GMGN's Bundler tile, from Jupiter).`;
+  else main = `Bundlers made ${bundlerText(v)} of all trading volume so far (GMGN, lifetime).`;
+  const n = v.wallets != null ? ` ${v.wallets >= 1000 ? "1,000+" : Number(v.wallets).toLocaleString()} bundler ${w} (GMGN).` : "";
+  const sp = bundlerSplit(win);
+  let split = "";
+  if (sp && (sp.buyPct != null || sp.sellPct != null)) {
+    const span = sp.partial ? "last " + bundlerSpanText(sp.spanMs) : sp.win;
+    split = ` In the ${span}: bundlers were ${bundlerPct1(sp.buyPct)} of all buy volume and ${bundlerPct1(sp.sellPct)} of all sell volume.`;
+    if (sp.rising) split += " Their sell share is rising.";
+  }
+  return main + n + split;
 }
 function toggleBundlerTip() {
   const old = document.getElementById("bund-tip");
@@ -5172,18 +5232,24 @@ function paintGmgn() {
   const line = document.getElementById("gmgn-line");
   if (line) {
     const html = gmgnLineInner();
-    if (line.innerHTML !== html) line.innerHTML = html;
+    if (line._html !== html) { line.innerHTML = html; line._html = html; }
   }
   const at = state.active;
   const jb = at ? jupBundler(at) : null;
   if (at && jb && jb.held != null) dropNote("bundlers", at.id + "|held", jb.held);
   const tile = document.querySelector('[data-sf="bundler"]');
   const lab = document.querySelector('[data-sf="bundlerLab"]');
-  const v = bundlerView(state.infoWin);
+  const v = bundlerView();
   if (tile) {
     const text = v.loading || v.unavailable || v.metric == null ? "—" : bundlerText(v);
     if (tile.textContent !== text) tile.textContent = text;
-    tile.className = v.loading || v.unavailable || v.metric == null ? "flat" : (Number(v.metric) >= 20 ? "down" : "");
+    const tcls = bundlerCls(v);
+    if (tile.className !== tcls) tile.className = tcls;
+  }
+  const bs = document.querySelector("[data-sf-bsplit]");
+  if (bs) {
+    const html = bundlerSplitHtml(bundlerSplit(state.infoWin));
+    if (bs._html !== html) { bs.innerHTML = html; bs._html = html; }
   }
   if (lab) {
     const label = bundlerLabel(v);
@@ -6929,10 +6995,10 @@ function sheetVals() {
   const devPct = audit.devBalancePercentage != null ? audit.devBalancePercentage : gx.dev;
   const snipPct = audit.sniperPct != null && Number.isFinite(Number(audit.sniperPct)) ? Number(audit.sniperPct) : gx.sniper;
   const snipOn = snipPct != null && Number.isFinite(Number(snipPct));
-  const bv = bundlerView(state.infoWin);
+  const bv = bundlerView();
   const bundler = bv.loading || bv.unavailable || bv.metric == null ? "—" : bundlerText(bv);
   const bundlerLab = bundlerLabel(bv);
-  const bundlerCls = bv.loading || bv.unavailable || bv.metric == null ? "flat" : (Number(bv.metric) >= 20 ? "down" : "");
+  const bundlerCls = bv.loading || bv.unavailable || bv.metric == null ? "flat" : (Number(bv.metric) >= BUNDLER_RED_PCT ? "down" : "up");
   return {
     title: (t.name || t.symbol || "").replace(/\s*token\s*$/i, "") + " Token Info",
     price: (() => { const px = livePrice(t); return px == null ? "—" : priceLabel(px); })(), fdv: t.fdv > 0 ? usd(t.fdv) : (t.mcap > 0 ? usd(t.mcap) : "—"), liq: usd(t.liquidity),
@@ -6956,7 +7022,7 @@ function sheetVals() {
     devCls: shareCls(devPct, "up"),
     snip: snipOn ? Number(snipPct).toFixed(2) + "%" : "",
     snipOn, snipCls: snipOn && Number(snipPct) > 0 ? "down" : "up",
-    bundler, bundlerLab, bundlerCls,
+    bundler, bundlerLab, bundlerCls, bundlerSplit: bundlerSplitHtml(bundlerSplit(state.infoWin)),
     freeze: audit.freezeAuthorityDisabled == null ? "—" : (audit.freezeAuthorityDisabled ? "No" : "Yes"),
     freezeCls: audit.freezeAuthorityDisabled == null ? "flat" : (audit.freezeAuthorityDisabled ? "up" : "down"),
     mint: audit.mintAuthorityDisabled == null ? "—" : (audit.mintAuthorityDisabled ? "No" : "Yes"),
@@ -7003,6 +7069,7 @@ function sheetHtml() {
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
       </div>
+      <div class="bsplit-row" data-sf-bsplit></div>
       <button type="button" class="go buy sheet-close-btn" data-sheet-close>Close</button>
     </div>
   </div>`;
@@ -7033,6 +7100,8 @@ function paintSheet() {
   if (snip) snip.className = v.snipCls || "";
   const bundler = root.querySelector('[data-sf="bundler"]');
   if (bundler) bundler.className = v.bundlerCls || "flat";
+  const bsp = root.querySelector("[data-sf-bsplit]");
+  if (bsp && bsp._html !== v.bundlerSplit) { bsp.innerHTML = v.bundlerSplit; bsp._html = v.bundlerSplit; }
   const curve = root.querySelector("[data-sf-curve]");
   if (curve) curve.hidden = !v.curveOn;
   const snipTile = root.querySelector("[data-sf-snip]");
