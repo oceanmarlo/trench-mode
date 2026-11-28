@@ -704,7 +704,7 @@ async function loadTape(force = false) {
   }
   feedMark("tradesPoll");
   const box = $("#tape");
-  if (box) box.innerHTML = tapeRows();
+  if (box) paintTape(box);
   else if (state.tab === "tx") render();
 }
 
@@ -3509,6 +3509,17 @@ function paintEntryLine() {
     chartUi.entryLine = series.createPriceLine({ price: want, color: "#5ed68c", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "Avg Entry" });
     chartUi.entrySeries = series;
   }
+  // The Avg Entry price tag sits on top of the live-price tag when the two are close; hide just the
+  // axis tag then (the dashed line and its "Avg Entry" title stay).
+  if (chartUi.entryLine && series.priceToCoordinate) {
+    try {
+      const last = Number(state.prices[t.id]) * chartScale();
+      const yE = series.priceToCoordinate(want);
+      const yL = last > 0 ? series.priceToCoordinate(last) : null;
+      const near = yE != null && yL != null && Math.abs(yE - yL) < 20;
+      if (chartUi.entryLine.options().axisLabelVisible === near) chartUi.entryLine.applyOptions({ axisLabelVisible: !near });
+    } catch (_) {}
+  }
 }
 
 function tickChart(addVolume = 0) {
@@ -4886,9 +4897,44 @@ function gmgnLineInner() {
   if (v.unavailable) return `Bundlers <span class="bad">unavailable</span>`;
   if (v.loading) return "Bundlers …";
   const n = v.wallets == null ? "—" : Number(v.wallets).toLocaleString();
-  const unit = v.kind === "held" ? "held" : "vol";
-  return `Bundlers <strong>${n}</strong> · <strong>${bundlerText(v)} ${unit}</strong>${bundlerTag(v)}`;
+  const noun = v.wallets === 1 ? "wallet" : "wallets";
+  const unit = v.kind === "held" ? "of supply" : "of vol";
+  return `Bundlers <strong>${n}</strong> ${noun} · <strong>${bundlerText(v)}</strong> ${unit}${bundlerTag(v)}`;
 }
+// Plain-words meaning of the header line, shown when it is tapped.
+function bundlerTipText() {
+  const v = bundlerView();
+  if (v.unavailable) return "Bundler data is unavailable for this token right now.";
+  if (v.loading) return "Loading bundler data…";
+  const n = v.wallets == null ? "?" : Number(v.wallets).toLocaleString();
+  const w = v.wallets === 1 ? "wallet" : "wallets";
+  let main;
+  if (v.kind === "win") main = `${n} bundler ${w} traded in the ${v.partial ? "last " + bundlerSpanText(v.spanMs) : v.win + " window"}, together ${bundlerText(v)} of that window's volume.`;
+  else if (v.kind === "vol") main = `${n} bundler ${w} so far, together ${bundlerText(v)} of all volume (lifetime, GMGN).`;
+  else main = `${n} bundler ${w}, still holding ${bundlerText(v)} of supply (lifetime, Jupiter).`;
+  const j = jupBundler(state.active);
+  const life = j && j.held != null && v.kind !== "held" ? ` Bundlers still hold ${gmgnVolText(j.held)} of supply overall.` : "";
+  return main + life;
+}
+function toggleBundlerTip() {
+  const old = document.getElementById("bund-tip");
+  if (old) { old.remove(); return; }
+  const line = document.getElementById("gmgn-line");
+  if (!line) return;
+  const r = line.getBoundingClientRect();
+  const tip = document.createElement("div");
+  tip.id = "bund-tip";
+  tip.setAttribute("role", "status");
+  tip.textContent = bundlerTipText();
+  tip.style.top = Math.round(r.bottom + 6) + "px";
+  document.body.appendChild(tip);
+  clearTimeout(toggleBundlerTip.t);
+  toggleBundlerTip.t = setTimeout(() => tip.remove(), 7000);
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#gmgn-line")) { toggleBundlerTip(); return; }
+  document.getElementById("bund-tip")?.remove();
+});
 function paintGmgn() {
   const line = document.getElementById("gmgn-line");
   if (line) {
@@ -5148,7 +5194,7 @@ function holdingsPanel() {
       ? `<b>—</b><span>—</span>`
       : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span data-last-traded>${holdLastTraded(h.mint)}</span></div></div>
+      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b${String(h.symbol || "").length >= 8 ? ' class="long"' : ""}>${esc(h.symbol || h.mint.slice(0, 4))}</b><span data-last-traded>${holdLastTraded(h.mint)}</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
@@ -6218,6 +6264,26 @@ function tapeEmptyLabel(filter) {
   if (!filter || filter === "All") return "No trades in the latest tape.";
   return "No " + String(filter).toLowerCase() + " trades in the latest tape.";
 }
+// Repaint the trades list. Safari has no scroll anchoring, so when the reader has scrolled down into
+// the list, new rows arriving at the top used to push everything they were reading downward. Pin the
+// first row in view instead; at the top of the list new rows still slide in as before.
+function paintTape(box) {
+  const sc = document.querySelector(".scroll");
+  let key = "", off = 0;
+  if (sc) {
+    const top = sc.getBoundingClientRect().top;
+    const rows = [...box.querySelectorAll(".trow[data-k]")];
+    if (rows.length && rows[0].getBoundingClientRect().top < top) {
+      const r = rows.find((e) => e.dataset.k && e.getBoundingClientRect().bottom > top + 24);
+      if (r) { key = r.dataset.k; off = r.getBoundingClientRect().top; }
+    }
+  }
+  box.innerHTML = tapeRows();
+  if (key && sc) {
+    const n = [...box.querySelectorAll(".trow[data-k]")].find((e) => e.dataset.k === key);
+    if (n) sc.scrollTop += n.getBoundingClientRect().top - off;
+  }
+}
 function tapeRows() {
   const t = state.active || {};
   const supply = t.circSupply || 0;
@@ -6248,7 +6314,7 @@ function tapeRows() {
     const trader = addr
       ? `<a class="trader" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" aria-label="Trader on Solscan">${esc(addr.slice(-4))}</a>`
       : `<span class="trader">—</span>`;
-    return `<div class="trow ${buy ? "side-buy" : "side-sell"}"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span>${trader}</div>`;
+    return `<div class="trow ${buy ? "side-buy" : "side-sell"}" data-k="${esc(x.txHash || x.actionId || "")}"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span>${trader}</div>`;
   }).join("");
 }
 
@@ -7877,7 +7943,7 @@ function streamFlush() {
     if (stream.dirty.tape) {
       stream.dirty.tape = false;
       const box = $("#tape");
-      if (box) box.innerHTML = tapeRows();
+      if (box) paintTape(box);
     }
     if (stream.dirty.alpha) {
       const wait = 250 - (Date.now() - stream.alphaAt);
