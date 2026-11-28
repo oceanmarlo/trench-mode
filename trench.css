@@ -699,3 +699,12 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .nav { padding-top: 0; padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
 .nav button { min-height: 44px; font-size: 11px; font-weight: 600; letter-spacing: .01em; position: relative; align-content: center; }
 .nav button.on::after { content: ""; position: absolute; top: 0; left: 50%; width: 24px; height: 2px; transform: translateX(-50%); border-radius: 0 0 2px 2px; background: var(--accent); box-shadow: 0 0 8px rgba(125,255,107,.5); }
+
+/* Timeframe row: full 44 px tap height without taking more space. The scroller's own padding
+   carries the hit area (overflow clips pseudo-elements), pulled back with negative margins so
+   the row keeps its height; it overlaps only the non-interactive stat text above. */
+.tf { overflow: visible; position: relative; z-index: 2; }
+.tf-scroll { padding: 11px 0 10px; margin: -11px 0 -10px; }
+.tf-tools { position: relative; }
+.tf-tools button::before { top: -6px; bottom: -10px; }
+.tf-full .tf-scroll { padding: 0; margin: 0; }
