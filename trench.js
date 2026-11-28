@@ -1127,7 +1127,7 @@ function spotScanHtml() {
   const chips = `<div class="chips scan-chips">${SPOT_LISTS.map(([k, l]) => `<button type="button" data-scan="${k}" class="${s.kind === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
   const warning = s.err ? `<div class="k" role="status" style="padding:12px 0">${s.rows.length ? "Last known list · " : ""}Couldn't refresh: ${esc(s.err)} <button type="button" class="copy" data-scan-retry>Retry</button></div>` : "";
   const rows = list.map(({ t, g }) => `<button class="row" data-pick="${t.id}" data-liq="${g}"><b>${esc(t.symbol)}</b> <span class="k">${esc(t.name || "")}</span> <span>${usd(t.mcap)}</span></button>`).join("");
-  const body = s.loading && !s.rows.length ? `<div class="k" role="status">Loading…</div>` : rows || (!s.err ? `<div class="k">No eligible tokens in this list.</div>` : "");
+  const body = s.loading && !s.rows.length ? skeleton(6, "Loading…") : rows || (!s.err ? `<div class="k">No eligible tokens in this list.</div>` : "");
   return chips + note + warning + body;
 }
 function paintScan() {
@@ -1377,6 +1377,7 @@ async function loadHoldings() {
   state.holdingsLoading = false;
   state.holdingsError = "";
   state.sol = request.sol ?? bal.sol;
+  state.solKnown = true;
   const snapshot = new Map(bal.rows.map((h) => [h.mint, h]));
   for (const [mint, row] of request.balances) {
     if (row) snapshot.set(mint, row);
@@ -1584,6 +1585,7 @@ async function useWallet(w, silent) {
       state.wallet = a;
       state.holdings = [];
       state.sol = 0;
+      state.solKnown = false;
       if (!a) state.provider = null;
       if (a) loadHoldings().catch(() => {});
       streamSync();
@@ -1603,7 +1605,7 @@ async function disconnectWallet() {
   const w = state.provider;
   if (state.walletOff) { try { state.walletOff(); } catch (_) {} state.walletOff = null; }
   holdingsRequest = null;
-  state.provider = null; state.wallet = null; state.holdings = []; state.sol = 0;
+  state.provider = null; state.wallet = null; state.holdings = []; state.sol = 0; state.solKnown = false;
   localStorage.removeItem(WALLET_PREF);
   closeWalletPicker();
   if (w) await w.disconnect();
@@ -1654,10 +1656,33 @@ function sellTokens() {
   const pct = Math.min(100, Math.max(0, Number(state.sellPct) || 0));
   return held ? held.ui * pct / 100 : 0;
 }
+// A buy for more SOL than the wallet holds can never fill. Say so before the click instead of
+// letting Jupiter answer "Insufficient funds". Only once the balance is actually known.
+function solShortfall() {
+  if (state.side !== "buy" || !state.wallet || !state.solKnown || state.holdingsError) return "";
+  const n = Number(state.amount);
+  if (!(n > 0) || amountInputError()) return "";
+  const have = Number(state.sol) || 0;
+  return n > have ? "Insufficient SOL · you have " + solBalText(have) : "";
+}
+// Jupiter and wallet errors in words a trader can act on. Unknown messages pass through.
+function friendlyError(msg, side) {
+  const m = String(msg == null ? "" : msg).trim();
+  if (!m) return m;
+  if (/insufficient (funds|lamports|balance)|not enough sol/i.test(m)) return (side || state.side) === "sell" ? "Not enough tokens for this sale" : "Not enough SOL for this amount + fees";
+  if (/user rejected|rejected the request|declined|denied|cancell?ed/i.test(m)) return "Cancelled in your wallet";
+  if (/slippage|price moved|0x1771|custom program error: 6001/i.test(m)) return "Price moved too fast · quote again and retry";
+  if (/blockhash|expired|timed? ?out/i.test(m)) return "Order expired · quote again and retry";
+  if (/\b429\b|rate limit|too many requests/i.test(m)) return "Jupiter is busy · retry in a moment";
+  if (/failed to fetch|networkerror|load failed/i.test(m)) return "Network hiccup · check your connection and retry";
+  return m;
+}
 function idleQuoteStatus() {
   if (!state.active) return null;
   const invalid = amountInputError();
   if (invalid) return invalid;
+  const short = solShortfall();
+  if (short) return short;
   if (state.side === "buy" && state.active.id === SOL) return "SOL is the pay token";
   if (state.side === "sell" && !orderParams()) return "No balance";
   // Stop / trail params must be valid before a protect order looks "Live".
@@ -1883,9 +1908,18 @@ function orderMathOk() {
 function orderTypeLabel() {
   return state.orderType === "msl" ? "Mkt + SL" : state.orderType === "trail" ? "Trail" : "Market";
 }
+// What the button says while an order is in flight, from the stage the flow reports.
+function busyLabel() {
+  const st = String(state.status || "");
+  if (/confirm in your wallet/i.test(st)) return "Confirm in wallet";
+  if (/confirming/i.test(st)) return "Confirming…";
+  if (/sending/i.test(st)) return "Sending…";
+  if (/building/i.test(st)) return "Building…";
+  return "Quoting…";
+}
 function goLabel() {
   if (!state.wallet) return "Connect";
-  if (state.busy) return "…";
+  if (state.busy) return busyLabel();
   if (state.orderType === "msl") return state.side === "buy" ? "Buy + SL" : "Set stop";
   if (state.orderType === "trail") return state.side === "buy" ? "Buy + trail" : "Set trail";
   return state.side === "buy" ? "Buy" : "Sell";
@@ -2011,11 +2045,11 @@ function paintOrderPreview() {
   // Keep status / go in sync with stop-trail validity without waiting on a re-quote.
   const idle = idleQuoteStatus();
   if (idle) setQuoteStatus(idle);
-  else if (currentQuote() && !state.quoting) setQuoteStatus(state.quote?.errorMessage || "Live · Jupiter");
+  else if (currentQuote() && !state.quoting) setQuoteStatus(friendlyError(state.quote?.errorMessage) || "Live · Jupiter");
   const stat = document.getElementById("status");
   if (stat) stat.textContent = state.status;
   const go = document.getElementById("go");
-  if (go && state.wallet) go.disabled = !!state.busy || !orderParams() || !p.ok;
+  if (go && state.wallet) go.disabled = !!state.busy || !orderParams() || !!solShortfall() || !p.ok;
 }
 function asSig58(sig) {
   if (!sig) throw new Error("Wallet did not sign.");
@@ -2206,10 +2240,10 @@ async function refreshQuote() {
     order._params = key;
     state.quote = order;
     const idle = idleQuoteStatus();
-    setQuoteStatus(order.errorMessage || idle || "Live · Jupiter", true);
+    setQuoteStatus(friendlyError(order.errorMessage) || idle || "Live · Jupiter", true);
     return order;
   } catch (err) {
-    if (seq === quoteSeq) { state.quote = null; setQuoteStatus(err.message, true); }
+    if (seq === quoteSeq) { state.quote = null; setQuoteStatus(friendlyError(err.message), true); }
     throw err;
   } finally {
     if (seq === quoteSeq) { state.quoting = false; paintLive(); }
@@ -2254,7 +2288,7 @@ async function sendMarket() {
   const w = state.provider;
   if (!w?.signTransaction && !w?.signAndSend) throw new Error("This wallet can't sign transactions here.");
   const unchanged = orderGuard();
-  if (!orderParams()) throw new Error(idleQuoteStatus() || "Enter a valid order.");
+  if (!orderParams() || solShortfall()) throw new Error(idleQuoteStatus() || "Enter a valid order.");
   // Orders are single-use and expire fast, so always take a fresh one for the click.
   clearTimeout(quoteTimer);
   const order = await refreshQuote();
@@ -2316,11 +2350,12 @@ async function trade() {
     if (side === "buy" && price) localStorage.setItem(entryKey(t.id, owner), String(price));
     state.txs.unshift({ side, symbol: t.symbol, sig: done.signature, sol: solIn, t: "now" });
     state.toast = (side === "buy" ? "Bought: " + solIn + " SOL of " : "Sold: " + qty(soldQty) + " ") + t.symbol;
+    state.toastSig = done.signature || null;
     state.status = "Done · " + String(done.signature || "").slice(0, 8) + "…";
     await sleep(1500);
     await loadHoldings().catch(() => {});
   } catch (err) {
-    state.status = err.message || String(err);
+    state.status = friendlyError(err.message || String(err), side);
     state.toast = state.status;
   } finally {
     state.busy = false;
@@ -2354,7 +2389,7 @@ async function placeProtect() {
   const t = state.active;
   if (!t) return;
   const preview = orderPreview();
-  if (!orderParams()) { state.status = idleQuoteStatus() || "Enter a valid order."; state.toast = state.status; render(); return; }
+  if (!orderParams() || solShortfall()) { state.status = idleQuoteStatus() || "Enter a valid order."; state.toast = state.status; render(); return; }
   if (!preview.ok) { state.toast = preview.reason || preview.line; state.status = state.toast; render(); return; }
   const unchanged = orderGuard();
   state.busy = true;
@@ -2396,7 +2431,7 @@ async function placeProtect() {
       : "Stop set at " + priceLabel(built.stop) + " · tab can close";
     state.status = state.toast;
   } catch (err) {
-    const msg = err.message || String(err);
+    const msg = friendlyError(err.message || String(err), side);
     state.status = bought ? ("Bought, stop not set: " + msg) : msg;
     state.toast = state.status;
   } finally {
@@ -2558,7 +2593,16 @@ function paintLive() {
   paintQuoteExtras();
   if (stat) stat.textContent = state.quoting ? "Quoting…" : state.status;
   const go = $("#go");
-  if (go) go.disabled = state.busy || (!!state.wallet && !orderParams());
+  if (go) {
+    go.disabled = state.busy || (!!state.wallet && (!orderParams() || !!solShortfall()));
+    go.classList.toggle("busy", !!state.busy);
+    const want = goLabel();
+    if (go.dataset.label !== want) {
+      go.dataset.label = want;
+      go.innerHTML = (state.busy ? `<i class="spin" aria-hidden="true"></i>` : "") + esc(want);
+    }
+  }
+  paintQuoteAge();
   const amt = $("#amt");
   if (amt) amt.setAttribute("aria-invalid", String(!!amountInputError()));
   syncPresetButtons("amt", state.amount, !amountInputError());
@@ -2924,7 +2968,7 @@ function ensureChart() {
       borderVisible: false, timeVisible: true, secondsVisible: state.tf === "1s" || state.tf === "15s", rightOffset: 4,
       tickMarkFormatter: (time, type) => tickMarkText(time, type)
     },
-    crosshair: { mode: L.CrosshairMode.Normal, vertLine: { labelVisible: false } },
+    crosshair: { mode: L.CrosshairMode.Normal, vertLine: { labelVisible: false, color: "rgba(190,198,210,.5)", width: 1 }, horzLine: { labelVisible: true, labelBackgroundColor: "#2c3542", color: "rgba(190,198,210,.5)", width: 1 } },
     localization: { priceFormatter: fmtAxis, timeFormatter: (time) => tickMarkText(time, (resolvedTf() === "1s" || resolvedTf() === "15s") ? 4 : 3) },
     handleScale: { axisPressedMouseMove: true, pinch: true, mouseWheel: true },
     handleScroll: { horzTouchDrag: true, vertTouchDrag: false, pressedMouseMove: true, mouseWheel: true }
@@ -2979,6 +3023,7 @@ function ensureChart() {
     paintPaneTags(param);
     paintCrosshairTime(param);
     paintScaleClash();
+    paintCrosshairPrice(param);
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); paintCrosshairTime(chartUi.cross); });
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, grips, extra: [], extraMap: {}, indLayout: "" });
@@ -3294,6 +3339,27 @@ function paintScaleClashNow() {
   }
 }
 
+// The library's own crosshair price label is hidden by the tick masks (paintScaleClash), so the
+// finger had a line but no number. Draw the value at the crosshair on the price axis ourselves.
+function paintCrosshairPrice(param) {
+  const host = chartUi.host;
+  if (!host) return;
+  let el = host.querySelector(".xh-price");
+  const pt = param && param.point;
+  const series = priceSeries();
+  if (!pt || !Number.isFinite(pt.y) || !series || !series.coordinateToPrice) { if (el) el.hidden = true; return; }
+  const v = series.coordinateToPrice(pt.y);
+  if (v == null || !Number.isFinite(v)) { if (el) el.hidden = true; return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "xh-price";
+    host.appendChild(el);
+  }
+  el.hidden = false;
+  el.textContent = fmtAxis(v);
+  const hh = host.clientHeight || 0;
+  el.style.top = Math.max(0, Math.min(hh - 20, Math.round(pt.y - 10))) + "px";
+}
 // The library's crosshair time is painted on the tick canvas, so it slices the
 // tick beside it ("06" left of "06:17:45"). Draw the time ourselves and cover
 // any tick the pill would cut.
@@ -3358,10 +3424,11 @@ function paintLegend(bar, vol, param) {
   if (ohlc) {
     if (!bar) ohlc.replaceChildren();
     else if (bar.open == null) {
-      ohlc.innerHTML = `<span>C</span><b>${fmtAxis(bar.value)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+      ohlc.innerHTML = `<em class="oh"><span>C</span><b>${fmtAxis(bar.value)}</b></em><wbr>${vol != null ? `<em class="oh"><span>V</span><b>${usd(vol).replace("$", "")}</b></em>` : ""}`;
     } else {
       const c = bar.close >= bar.open ? "up" : "down";
-      ohlc.innerHTML = `<span>O</span><b class="${c}">${fmtAxis(bar.open)}</b><span>H</span><b class="${c}">${fmtAxis(bar.high)}</b><span>L</span><b class="${c}">${fmtAxis(bar.low)}</b><span>C</span><b class="${c}">${fmtAxis(bar.close)}</b>${vol != null ? `<span>V</span><b>${usd(vol).replace("$", "")}</b>` : ""}`;
+      const pair = (k, v, cl) => `<em class="oh"><span>${k}</span><b${cl ? ` class="${cl}"` : ""}>${v}</b></em>`;
+      ohlc.innerHTML = pair("O", fmtAxis(bar.open), c) + "<wbr>" + pair("H", fmtAxis(bar.high), c) + "<wbr>" + pair("L", fmtAxis(bar.low), c) + "<wbr>" + pair("C", fmtAxis(bar.close), c) + (vol != null ? "<wbr>" : "") + (vol != null ? pair("V", usd(vol).replace("$", "")) : "");
     }
   }
   if (!inds) return;
@@ -4355,6 +4422,12 @@ function holderMarks(h, token) {
   const dev = (token.dev && h.address === token.dev) || blobs.some((s) => /^dev(eloper)?$/i.test(String(s)));
   return [curve ? "Curve" : "", lp ? "LP" : "", dev ? "Dev" : ""].filter(Boolean);
 }
+// Shimmering placeholder rows. The label stays in the DOM (visually hidden) so the text a screen
+// reader or a test reads is still "Loading holders…".
+function skeleton(rows, label) {
+  const row = `<div class="sk-row"><i class="sk-av"></i><span class="sk-l"><i></i><i></i></span><span class="sk-r"><i></i></span></div>`;
+  return `<div class="sk" role="status" aria-busy="true"><span class="sr-only">${esc(label)}</span>${row.repeat(rows)}</div>`;
+}
 function holderEmptyText(t) {
   if (state.holdersLoading) return "Loading holders…";
   // A count of 0 is a real empty wallet set. Unknown or a later live count is not.
@@ -4372,7 +4445,7 @@ function holderRows() {
   const warning = state.holdersError ? `<div class="holder-warning k" role="status">${state.holders.length ? "Last known holders · " : ""}Couldn't refresh holders: ${esc(state.holdersError)}<button type="button" class="copy holder-retry" data-holders-retry ${state.holdersLoading || limited ? "disabled" : ""}>${state.holdersLoading ? "Refreshing…" : limited ? "Rate limited…" : "Retry"}</button></div>` : "";
   if (!state.holders.length) {
     const msg = holderEmptyText(t);
-    return warning || `<div class="k" data-holder-empty style="padding:12px 0">${esc(msg)}</div>`;
+    return warning || `<div class="k" data-holder-empty style="padding:12px 0">${state.holdersLoading ? skeleton(5, msg) : esc(msg)}</div>`;
   }
   const shown = state.holders.slice(0, 40);
   const maxPct = shown.reduce((m, h) => Math.max(m, holderPct(h, t) || 0), 0);
@@ -4529,7 +4602,7 @@ function paintHolderCounts() {
   const empty = $("#holder-list [data-holder-empty]");
   if (empty && !state.holders.length) {
     const msg = holderEmptyText(t);
-    if (empty.textContent !== msg) empty.textContent = msg;
+    if (empty.textContent !== msg) { if (state.holdersLoading) empty.innerHTML = skeleton(5, msg); else empty.textContent = msg; }
   }
 }
 function paintHolders() {
@@ -4624,6 +4697,37 @@ function revealQuote() {
   const overflow = dock.getBoundingClientRect().bottom - floor;
   if (overflow > 1) sc.scrollTop += overflow;
 }
+// Toasts used to sit there until someone hit ✕, all the same colour. Tone them (green done,
+// red problem) and let them leave on their own; a bought/sold toast links to the transaction.
+const TOAST_OK = /^(Bought:|Sold:|Stop set|Trailing stop set|Stop cancelled|Saved preset)/;
+const TOAST_ERR = /couldn't|can't|cannot|failed|not set|insufficient|not enough|enter |invalid|changed|expired|moved|busy|hiccup|reject|minimum|need at least|cancelled in|wallet did not/i;
+function toastTone(text) {
+  const t = String(text || "");
+  if (TOAST_OK.test(t)) return "ok";
+  return TOAST_ERR.test(t) ? "err" : "";
+}
+function toastHtml() {
+  const tone = toastTone(state.toast);
+  const mark = tone === "ok" ? "✓ " : tone === "err" ? "⚠ " : "";
+  const link = tone === "ok" && state.toastSig && /^[1-9A-HJ-NP-Za-km-z]{43,100}$/.test(state.toastSig)
+    ? ` <a class="toast-tx" href="https://solscan.io/tx/${esc(state.toastSig)}" target="_blank" rel="noopener noreferrer">View</a>` : "";
+  return `<div class="toast ${tone}" role="status"><span>${mark}${esc(state.toast)}${link}</span><button id="toast-x" aria-label="Dismiss">✕</button></div>`;
+}
+let toastShown = null, toastTimer = 0;
+function dismissToast() {
+  clearTimeout(toastTimer); toastTimer = 0; toastShown = null;
+  state.toast = null; state.toastSig = null;
+  const el = document.querySelector(".toast");
+  if (el) { el.classList.add("out"); setTimeout(() => { if (!state.toast) el.remove(); }, 220); }
+}
+function syncToast() {
+  if (state.toast === toastShown) return;
+  clearTimeout(toastTimer);
+  toastShown = state.toast || null;
+  if (!toastShown) return;
+  const ms = toastTone(toastShown) === "err" ? 9000 : 6000;
+  toastTimer = setTimeout(dismissToast, ms);
+}
 function render() {
   if (chartUi.dragging) { chartUi.pendingRender = true; return; }
   const prevScroll = document.querySelector(".scroll");
@@ -4662,7 +4766,7 @@ function render() {
     </nav>
     ${state.searchOpen ? searchSheet() : ""}
     ${state.view === "alpha" && state.alpha.open ? alphaFilterSheet() : ""}
-    ${state.toast ? `<div class="toast"><span>${/^(Bought|Sold)/.test(state.toast) ? "✓ " : ""}${esc(state.toast)}</span><button id="toast-x">✕</button></div>` : ""}
+    ${state.toast ? toastHtml() : ""}
   `;
   bind();
   if (state.view === "alpha") bindAlpha();
@@ -5237,7 +5341,7 @@ function connectPrompt(text) {
 function holdingsPanel() {
   const head = `<div class="cols"><span>Last Traded</span><span>Holding</span><span>Unrealised</span><span>Actions</span></div>`;
   if (!state.wallet) return head + connectPrompt("Connect your wallet to see your holdings.");
-  if (state.holdingsLoading && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Loading holdings…</div>`;
+  if (state.holdingsLoading && !state.holdings.length) return head + skeleton(3, "Loading holdings…");
   if (state.holdingsError && !state.holdings.length) return head + `<div class="k" style="padding:16px 0">Couldn't load holdings: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>`;
   if (!state.holdings.length) return head + `<div class="k" style="padding:16px 0">No token balances in this wallet yet. Tokens you buy will appear here.</div>`;
   const warning = state.holdingsError ? `<div class="k" role="status" style="padding:8px 0">Last known balances · Refresh failed: ${esc(state.holdingsError)} <button type="button" data-reload-holdings class="copy">Retry</button></div>` : "";
@@ -5807,6 +5911,7 @@ function alphaRowsHtml() {
   const warning = feed.err ? `<div class="k" role="status" style="padding:12px 0">${a.rows.length ? "Last known list · " : ""}Couldn't refresh: ${esc(feed.err)} <button type="button" class="copy" data-alpha-retry>Retry</button></div>` : "";
   const head = note + `<div class="al-count">${feed.loading && !a.rows.length ? "Loading…" : `${list.length} of ${a.rows.length} tokens`}${feed.loading && a.rows.length ? " · refreshing" : ""}${feed.at ? ` · ${new Date(feed.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</div>` + warning;
   if (!list.length) {
+    if (feed.loading && !a.rows.length) return head + skeleton(6, "Loading tokens…");
     if (checking || !a.rows.length || hidden === a.rows.length) return head;
     return head + `<div class="k" style="padding:16px 0">No tokens match these filters.</div>`;
   }
@@ -6179,7 +6284,30 @@ function quoteBits(q) {
   }
   const fee = Number(q?.feeBps);
   if (Number.isFinite(fee) && fee > 0) parts.push("Fee " + (fee / 100).toFixed(2) + "%");
+  // The no-wallet quote reports 0 slippage and no priority fee. Show them only when real.
+  const slip = Number(q?.slippageBps);
+  if (Number.isFinite(slip) && slip > 0) parts.push("Slippage " + (slip / 100).toFixed(2).replace(/\.?0+$/, "") + "%");
+  const minOut = Number(q?.otherAmountThreshold);
+  if (Number.isFinite(minOut) && minOut > 0 && slip > 0) parts.push("Min " + qty(ui(String(q.otherAmountThreshold), outDec)));
+  const prio = Number(q?.prioritizationFeeLamports);
+  if (Number.isFinite(prio) && prio > 0) parts.push("Priority " + (prio / 1e9).toFixed(6).replace(/\.?0+$/, "") + " SOL");
   return { hops: plan.length, line: parts.join(" · ") };
+}
+// How old the shown quote is. Jupiter refreshes it every 12s; past ~17s something stalled
+// and the number on screen is no longer what a click would get.
+function quoteAgeInfo(now = Date.now()) {
+  const q = currentQuote();
+  if (!q || !q._at || state.busy || !state.active || !orderParams()) return { text: "", stale: false };
+  const age = Math.max(0, Math.floor((now - q._at) / 1000));
+  if (age * 1000 > QUOTE_EVERY_MS + 5000) return { text: "stale · " + age + "s", stale: true };
+  return { text: state.quoting ? "refreshing…" : age < 2 ? "live" : age + "s ago", stale: false };
+}
+function paintQuoteAge() {
+  const el = document.getElementById("quote-age");
+  if (!el) return;
+  const a = quoteAgeInfo();
+  if (el.textContent !== a.text) el.textContent = a.text;
+  el.classList.toggle("stale", a.stale);
 }
 function paintQuoteExtras() {
   const bits = quoteBits(currentQuote());
@@ -6198,8 +6326,9 @@ function paintQuoteExtras() {
 function quoteSummary() {
   const t = state.active;
   if (!t) return "—";
+  if (solShortfall()) return `<span class="down">Insufficient SOL</span>`;
   if (!currentQuote()) return state.quoting && orderParams() ? "…" : "—";
-  if (state.quote?.errorMessage && state.wallet) return `<span class="down">${esc(state.quote.errorMessage)}</span>`;
+  if (state.quote?.errorMessage && state.wallet) return `<span class="down">${esc(friendlyError(state.quote.errorMessage))}</span>`;
   if (!state.quote?.outAmount) return state.quoting ? "…" : "—";
   const outDec = state.side === "buy" ? (t.decimals || 6) : 9;
   const outUi = ui(state.quote.outAmount, outDec);
@@ -6241,10 +6370,10 @@ function tradePanel() {
     <div class="presets">${state.side === "buy" ? [0.1, 0.5, 1, 10].map((n)=>`<button data-amt="${n}" class="${Number(state.amount)===n?"on":""}">${n < 1 ? n.toFixed(1) : String(n)}</button>`).join("") : [10, 25, 50, 100].map((n)=>`<button data-pct="${n}" class="${Number(state.sellPct)===n?"on":""}">${n}%</button>`).join("")}</div>
     <div class="amt-row">
       <label class="amt-box"><span class="k">${state.side === "buy" ? "AMOUNT" : "PERCENT"}</span><input id="amt" inputmode="decimal" aria-invalid="${!!amountInputError()}" value="${esc(state.side === "buy" ? state.amount : state.sellPct)}">${state.side === "buy" ? `<span class="mini"><img src="${SOL_ICON}" alt=""></span>` : `<span class="pct-unit">%</span>`}</label>
-      <button class="go ${state.side}" id="go" ${state.busy || (state.wallet && (!orderParams() || !orderPreview().ok)) ? "disabled" : ""}>${state.busy ? "…" : label}</button>
+      <button class="go ${state.side}${state.busy ? " busy" : ""}" id="go" data-label="${esc(label)}" ${state.busy || (state.wallet && (!orderParams() || solShortfall() || !orderPreview().ok)) ? "disabled" : ""}>${state.busy ? `<i class="spin" aria-hidden="true"></i>` : ""}${label}</button>
     </div>
     ${orderFields()}
-    <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
+    <div class="fine"><span>Est. Received <span class="badge" id="route-n" hidden></span> <span class="quote-age${quoteAgeInfo().stale ? " stale" : ""}" id="quote-age">${esc(quoteAgeInfo().text)}</span></span><span id="est" class="est-right">${quoteSummary()}</span></div>
     <div class="quote-detail" id="quote-detail" hidden></div>
     <div class="ultra">✦ ${engine} · <span id="status">${esc(state.status)}</span></div>`;
 }
@@ -6420,7 +6549,7 @@ function txPanel() {
   const arrow = (k) => state.txSort === k ? (state.txDir === "asc" ? " ↑" : " ↓") : "";
   return `<div class="filters">${chips.map((f) => `<button data-txf="${f}" class="${state.txFilter === f ? "on" : ""}">${f}</button>`).join("")}</div>
     <div class="tcols"><button type="button" data-txsort="age">Age${arrow("age")}</button><button type="button" data-txsort="mc">MC${arrow("mc")}</button><span>${esc(state.active?.symbol || "")}</span><span>Vol</span><span>Trader</span></div>
-    <div id="tape">${state.tape.length ? tapeRows() : `<div class="k">Loading trades…</div>`}</div>`;
+    <div id="tape">${state.tape.length ? tapeRows() : skeleton(7, "Loading trades…")}</div>`;
 }
 
 function holdersPanel() {
@@ -7237,7 +7366,8 @@ function bind() {
     render();
   });
   const tx = $("#toast-x");
-  if (tx) tx.onclick = () => { state.toast = null; render(); };
+  if (tx) tx.onclick = () => { dismissToast(); };
+  syncToast();
 }
 
 // ---------------- Jupiter stream (wss://api.jup.ag/stream/v1/ws) ----------------
@@ -7740,6 +7870,7 @@ function streamWatch(limit = STREAM_SILENT_MS) {
   else streamConnect();
 }
 setInterval(() => streamWatch(), 5000);
+setInterval(() => { if (!document.hidden) paintQuoteAge(); }, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) streamWatch(STREAM_RESUME_SILENT_MS); });
 window.addEventListener("online", () => { stream.retry = 0; streamReset(); });
 
@@ -7829,6 +7960,7 @@ function onStreamPnl(data) {
     const pending = holdingsRequest?.owner === w ? holdingsRequest : null;
     if (mint === NATIVE_SOL) {
       state.sol = next.ui;
+      state.solKnown = true;
       if (pending) pending.sol = state.sol;
       changed = true;
       continue;

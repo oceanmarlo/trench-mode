@@ -807,3 +807,39 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .al-row { transition: background-color .12s, box-shadow .12s; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .al-row:active { background: rgba(255, 255, 255, .045); box-shadow: inset 3px 0 0 rgba(125, 255, 107, .55); }
 [data-pf-sol] { -webkit-user-select: none; user-select: none; }
+
+/* Crosshair price chip on the right axis (drawn by us; the library's label is masked). */
+.xh-price { position: absolute; right: 0; z-index: 8; height: 20px; line-height: 20px; padding: 0 6px; border-radius: 4px 0 0 4px; background: #2c3542; color: #f3f5f7; font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; pointer-events: none; white-space: nowrap; }
+.xh-price[hidden] { display: none; }
+/* Crosshair OHLC readout: readable on a phone and always on a dark pill. */
+@media (max-width: 420px) { .chart-label .lg-ohlc { font-size: 10px; line-height: 13px; } }
+.lg-ohlc .oh { font-style: normal; white-space: nowrap; display: inline-block; }
+
+/* Quote freshness (beside "Est. Received") */
+.quote-age { margin-left: 6px; font-size: 10.5px; color: #6f7a87; font-variant-numeric: tabular-nums; }
+.quote-age.stale { color: #e0a63a; }
+.quote-age:empty { display: none; }
+/* Busy Go button: spinner + stage label */
+.go .spin { display: inline-block; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; animation: go-spin .7s linear infinite; }
+@keyframes go-spin { to { transform: rotate(360deg); } }
+.go.busy:disabled { opacity: 1; }
+.go:disabled:not(.busy) { filter: saturate(.55) brightness(.8); }
+/* Toast tone + exit */
+.toast { border-left: 3px solid #3a4452; animation: toast-in .22s ease-out; }
+.toast.ok { border-left-color: #2fbf71; }
+.toast.err { border-left-color: #e5536f; background: #1d1519; }
+.toast.out { opacity: 0; transform: translateY(-6px); transition: opacity .2s, transform .2s; }
+.toast .toast-tx { color: #8fb4ff; margin-left: 6px; font-weight: 650; text-decoration: none; }
+.toast button { margin-left: 10px; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } }
+/* Skeleton rows */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sk { position: relative; display: block; }
+.sk-row { display: grid; grid-template-columns: 34px 1fr 64px; gap: 12px; align-items: center; padding: 9px 0; }
+.sk-row:nth-child(n+3) { opacity: .75; } .sk-row:nth-child(n+5) { opacity: .5; } .sk-row:nth-child(n+7) { opacity: .3; }
+.sk i { display: block; border-radius: 6px; background: linear-gradient(90deg, #151b24 0%, #232c39 45%, #151b24 90%); background-size: 220% 100%; animation: sk-shine 1.5s ease-in-out infinite; }
+.sk-av { width: 34px; height: 34px; border-radius: 50% !important; }
+.sk-l { display: grid; gap: 7px; } .sk-l i { height: 9px; width: 62%; } .sk-l i + i { width: 38%; height: 8px; }
+.sk-r i { height: 10px; width: 100%; }
+@keyframes sk-shine { from { background-position: 130% 0; } to { background-position: -90% 0; } }
+@media (prefers-reduced-motion: reduce) { .sk i, .go .spin { animation-duration: 3s; } .toast { animation: none; } }
