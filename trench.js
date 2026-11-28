@@ -493,7 +493,7 @@ async function jup(url, opts = {}) {
 }
 
 let loadSeq = 0;
-async function loadToken(query, restored = null) {
+async function loadToken(query, restored = null, prefetched = null) {
   const seq = ++loadSeq;
   if (!restored && navigation.restoring) {
     ++navigation.seq;
@@ -503,7 +503,8 @@ async function loadToken(query, restored = null) {
   navigation.tokenPending = seq;
   const q = String(query).trim();
   try {
-    const list = await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(q));
+    // A search row is the same /assets/search object this call would fetch. Reuse it and save a round trip.
+    const list = prefetched ? [prefetched] : await datapi("https://datapi.jup.ag/v1/assets/search?query=" + encodeURIComponent(q));
     if (seq !== loadSeq) return;
     const hit = (list || []).find((t) => t.id === q)
       || (list || []).find((t) => t.symbol?.toLowerCase() === q.toLowerCase())
@@ -1043,11 +1044,18 @@ function closeSearch() {
   state.searchError = "";
 }
 function pick(mint) {
+  // Take the row before closeSearch() clears the results; only a fresh one (30s) is used as-is.
+  const row = Date.now() - (state.resultsAt || 0) < SEARCH_FRESH_MS ? (state.results || []).find((t) => t && t.id === mint) : null;
   closeSearch();
   state.view = "spot";
   render();
-  loadToken(mint).catch((err) => { state.status = err.message; render(); });
+  loadToken(mint, null, row || null).catch((err) => { state.status = err.message; render(); });
 }
+const SEARCH_DEBOUNCE_MS = 220;
+const SEARCH_FRESH_MS = 30000;
+const searchCache = new Map();
+// A pasted address is a finished query: no reason to wait for more typing.
+function searchDelay(q) { return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(q) ? 0 : SEARCH_DEBOUNCE_MS; }
 function search(q) {
   clearTimeout(searchTimer);
   const seq = ++searchSeq;
@@ -1060,10 +1068,20 @@ function search(q) {
     paintScan();
     return;
   }
+  const query = state.searchQ;
+  const hot = searchCache.get(query.toLowerCase());
+  if (hot && Date.now() - hot.at < SEARCH_FRESH_MS) {
+    // Backspace and retype, or reopen the sheet: answer instantly from the last response.
+    state.results = hot.list;
+    state.resultsAt = hot.at;
+    state.searching = false;
+    rcWantFront((state.results || []).filter((t) => spotGate(t) === "checking").map((t) => t.id));
+    paintResults();
+    return;
+  }
   state.results = [];
   state.searching = true;
   paintResults();
-  const query = state.searchQ;
   searchTimer = setTimeout(async () => {
     const controller = new AbortController();
     const request = { controller, timeout: setTimeout(() => controller.abort(), 12000) };
@@ -1074,6 +1092,9 @@ function search(q) {
       if (controller.signal.aborted) throw new Error("Search timed out. Try again.");
       if (!Array.isArray(list) || list.some((t) => !t || typeof t.id !== "string" || !t.id)) throw new Error("Invalid Jupiter search results");
       state.results = list;
+      state.resultsAt = Date.now();
+      searchCache.set(query.toLowerCase(), { list, at: state.resultsAt });
+      if (searchCache.size > 30) searchCache.delete(searchCache.keys().next().value);
       state.searching = false;
       rcWantFront((state.results || []).filter((t) => spotGate(t) === "checking").map((t) => t.id));
       paintResults();
@@ -1086,7 +1107,7 @@ function search(q) {
       clearTimeout(request.timeout);
       if (searchRequest === request) searchRequest = null;
     }
-  }, 450);
+  }, searchDelay(query));
 }
 
 const MAJORS = new Set([
@@ -2035,19 +2056,18 @@ function paintOrderPreview() {
   const p = orderPreview();
   const el = document.getElementById("sl-live") || document.getElementById("trail-live");
   if (el) {
-    el.textContent = p.line;
+    setText(el, p.line);
     el.classList.toggle("down", !p.ok);
   }
   syncPresetButtons("slpct", state.slPct, state.slMode !== "price");
   syncPresetButtons("trail", state.trailPct);
   const note = document.getElementById("trail-note");
-  if (note) note.textContent = trailNote();
+  if (note) setText(note, trailNote());
   // Keep status / go in sync with stop-trail validity without waiting on a re-quote.
   const idle = idleQuoteStatus();
   if (idle) setQuoteStatus(idle);
   else if (currentQuote() && !state.quoting) setQuoteStatus(friendlyError(state.quote?.errorMessage) || "Live · Jupiter");
-  const stat = document.getElementById("status");
-  if (stat) stat.textContent = state.status;
+  setText(document.getElementById("status"), state.status);
   const go = document.getElementById("go");
   if (go && state.wallet) go.disabled = !!state.busy || !orderParams() || !!solShortfall() || !p.ok;
 }
@@ -2511,28 +2531,39 @@ function paintHoldingPnl(node, d, pct) {
     else child.removeAttribute("class");
   }
 }
+// Write only on change: an identical write still makes the browser re-style and re-layout.
+function setText(el, v) {
+  if (!el) return;
+  v = String(v);
+  if (el.textContent !== v) el.textContent = v;
+}
+function setCls(el, v) {
+  if (el && el.className !== v) el.className = v;
+}
 function paintLive() {
+  // A hidden tab paints nothing. Remember that it owes a repaint and do it on return.
+  if (typeof document !== "undefined" && document.hidden) { paintLive.owed = true; return; }
   const t = state.active;
   paintHolderCounts();
   const pf = $("#pf-total");
   if (pf) {
     const h = portfolioHeadText();
-    if (pf.textContent !== h.money) pf.textContent = h.money;
-    const cap = $("#pf-cap"); if (cap && cap.textContent !== h.cap) cap.textContent = h.cap;
+    if (pf.textContent !== h.money) setText(pf, h.money);
+    const cap = $("#pf-cap"); if (cap && cap.textContent !== h.cap) setText(cap, h.cap);
     const pn = $("#pf-pnl");
-    if (pn) { if (pn.textContent !== h.pnl) pn.textContent = h.pnl; pn.className = "pf-pnl " + h.cls; pn.hidden = !h.pnl; }
+    if (pn) { if (pn.textContent !== h.pnl) setText(pn, h.pnl); setCls(pn, "pf-pnl " + h.cls); if (pn.hidden !== !h.pnl) pn.hidden = !h.pnl; }
   }
   const tradeBalance = $("#trade-bal");
-  if (tradeBalance) tradeBalance.textContent = tradeBal();
+  if (tradeBalance) setText(tradeBalance, tradeBal());
   const solRow = $("[data-pf-sol]");
   if (solRow) {
-    $(".meta span", solRow).textContent = usd(holdingPrice(SOL));
-    $(".hold-n", solRow).textContent = usd(holdingValue(SOL, state.sol));
-    $(".hold-q", solRow).textContent = solBalText(state.sol);
+    setText($(".meta span", solRow), usd(holdingPrice(SOL)));
+    setText($(".hold-n", solRow), usd(holdingValue(SOL, state.sol)));
+    setText($(".hold-q", solRow), solBalText(state.sol));
   }
   const p = activePnl();
   const solPx = $("#sol-px");
-  if (solPx) solPx.textContent = usd(holdingPrice(SOL));
+  if (solPx) setText(solPx, usd(holdingPrice(SOL)));
   const chg = $("#chg");
   const live = $("#live");
   const barH = $("#bar-hold");
@@ -2540,11 +2571,11 @@ function paintLive() {
   const est = $("#est");
   const stat = $("#status");
   const mc = $("#mc");
-  if (mc && t) mc.textContent = mcapText(t);
+  if (mc && t) setText(mc, mcapText(t));
   const pxEl = $("#stat-px");
   if (pxEl && t) {
     const px = livePrice(t);
-    pxEl.textContent = px == null ? "—" : priceLabel(px);
+    setText(pxEl, px == null ? "—" : priceLabel(px));
   }
   const feeEl = $("#stat-fees");
   if (feeEl && t) {
@@ -2553,10 +2584,10 @@ function paintLive() {
   }
   if (chg && t) {
     const label = headerChange(t);
-    chg.textContent = label;
-    chg.hidden = !label;
+    setText(chg, label);
+    if (chg.hidden !== !label) chg.hidden = !label;
     const tone = label && label !== "—" ? moveTone(t.stats24h?.priceChange) : "";
-    chg.className = tone ? "chg " + tone : "chg";
+    setCls(chg, tone ? "chg " + tone : "chg");
   }
   if (live && t) {
     const supply = t.circSupply || 0;
@@ -2567,31 +2598,33 @@ function paintLive() {
     const dUsd = mc - prev;
     const pct = prev ? (dUsd / prev) * 100 : 0;
     const bare = (n) => usd(Math.abs(n)).replace("$", "");
-    live.textContent = bare(mc) + "  " + bare(dUsd) + " (" + signed(pct) + "%)";
-    live.className = "chart-live " + cls(pct);
+    setText(live, bare(mc) + "  " + bare(dUsd) + " (" + signed(pct) + "%)");
+    setCls(live, "chart-live " + cls(pct));
   }
   const utc = $("#utc");
-  if (utc) utc.textContent = clockLabel();
+  if (utc) setText(utc, clockLabel());
   // The clock moves on every tick. The launch age used to stay at whatever the
   // last full render printed, so a 5s coin still read 5s at 12s.
   paintHeaderAge();
-  parkLogo();
+  parkLogoSoon();
   paintAxisEdge();
   const hb = barModel();
-  if (barH) barH.textContent = hb.hold;
+  if (barH) setText(barH, hb.hold);
   if (barP) {
-    barP.textContent = hb.pnl;
-    barP.className = hb.clsName;
+    setText(barP, hb.pnl);
+    setCls(barP, hb.clsName);
   }
   if (est) {
     const nextEst = quoteSummary();
-    if (est.innerHTML !== nextEst) {
+    // innerHTML never reads back identical to the template string, so compare against what we wrote.
+    if (est._html !== nextEst) {
+      est._html = nextEst;
       est.innerHTML = nextEst;
       scheduleFitTradeStatus(false);
     }
   }
   paintQuoteExtras();
-  if (stat) stat.textContent = state.quoting ? "Quoting…" : state.status;
+  if (stat) setText(stat, state.quoting ? "Quoting…" : state.status);
   const go = $("#go");
   if (go) {
     go.disabled = state.busy || (!!state.wallet && (!orderParams() || !!solShortfall()));
@@ -2604,7 +2637,7 @@ function paintLive() {
   }
   paintQuoteAge();
   const amt = $("#amt");
-  if (amt) amt.setAttribute("aria-invalid", String(!!amountInputError()));
+  if (amt) { const inv = String(!!amountInputError()); if (amt.getAttribute("aria-invalid") !== inv) amt.setAttribute("aria-invalid", inv); }
   syncPresetButtons("amt", state.amount, !amountInputError());
   syncPresetButtons("pct", state.sellPct, !amountInputError());
   document.querySelectorAll("[data-mint]").forEach((row) => {
@@ -2616,10 +2649,10 @@ function paintLive() {
     const hn = $(".hold-n", row);
     const hq = $(".hold-q", row);
     const pn = $(".pnl", row);
-    if (hn) hn.textContent = usd(value);
-    if (hq) hq.textContent = qty(h.ui);
+    if (hn) setText(hn, usd(value));
+    if (hq) setText(hq, qty(h.ui));
     const lt = $("[data-last-traded]", row);
-    if (lt) { const txt = holdLastTraded(h.mint); if (lt.textContent !== txt) lt.textContent = txt; }
+    if (lt) { const txt = holdLastTraded(h.mint); if (lt.textContent !== txt) setText(lt, txt); }
     if (pn) {
       if (!(entry > 0) || !(price > 0)) paintHoldingPnl(pn, null, null);
       else paintHoldingPnl(pn, value - h.ui * entry, ((price - entry) / entry) * 100);
@@ -3027,6 +3060,20 @@ function ensureChart() {
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintDrawings(); paintAxisEdge(); paintCrosshairTime(chartUi.cross); });
   Object.assign(chartUi, { host, chart, candles, line, volume, legend: null, draw, tags, grips, extra: [], extraMap: {}, indLayout: "" });
+  // Scrolled out of view, the chart has nobody to paint for. Skip its per-tick work and catch up on return.
+  if (typeof IntersectionObserver !== "undefined") {
+    chartUi.io = new IntersectionObserver((entries) => {
+      const seen = entries[entries.length - 1].isIntersecting;
+      const was = chartUi.offscreen;
+      chartUi.offscreen = !seen;
+      if (seen && was) {
+        loadCandles().catch(() => {});
+        tickChart();
+        paintAxisEdge();
+      }
+    });
+    chartUi.io.observe(host);
+  }
   bindPaneResize(grips);
   bindDraw(draw);
   parkLogo();
@@ -3035,6 +3082,14 @@ function ensureChart() {
 }
 // Keep the TradingView mark a child of the chart library. Reparenting it makes
 // lightweight-charts throw removeChild when a pane is added or removed.
+// parkLogo reads layout (two getBoundingClientRect calls) and rewrites six styles. Live ticks call it
+// 13 times a second for a logo that only moves on scroll or resize, so ticks go through this gate.
+function parkLogoSoon() {
+  const now = Date.now();
+  if (now - (parkLogoSoon.at || 0) < 400) return;
+  parkLogoSoon.at = now;
+  parkLogo();
+}
 function parkLogo() {
   const logo = document.getElementById("tv-attr-logo");
   const host = chartUi.host;
@@ -3164,7 +3219,7 @@ function axisLeftSliced(first, textW) {
 function paintAxisEdge() {
   const host = chartUi.host;
   const chart = chartUi.chart;
-  if (!host || !chart) return;
+  if (!host || !chart || chartUi.offscreen) return;
   let bar = host.querySelector(".axis-edge");
   if (!bar) {
     bar = document.createElement("div");
@@ -3174,6 +3229,15 @@ function paintAxisEdge() {
   const range = chart.timeScale().getVisibleRange();
   const toX = range ? chart.timeScale().timeToCoordinate(range.to) : null;
   const paneW = timePaneWidth(host);
+  // The time axis only changes when the visible range or the chart box does. Re-reading its pixels
+  // (getImageData) on every price tick was the single biggest chart cost; the price scale still repaints.
+  const axisKey = [range ? range.from : "", range ? range.to : "", toX == null ? "" : Math.round(toX), paneW, host.clientWidth, host.clientHeight, chartUi.key, state.tf].join("|");
+  if (axisKey === chartUi.axisKey && bar.isConnected && host.querySelector(".axis-edge-r")) {
+    parkLogoSoon();
+    paintScaleClash();
+    return;
+  }
+  chartUi.axisKey = axisKey;
   const rightClipped = toX != null && paneW && toX > paneW - 28;
   const label = range ? axisClock(range.from) : "";
   bar.textContent = label;
@@ -3243,7 +3307,7 @@ function paintAxisEdge() {
     right.style.left = "";
     right.style.width = "";
   }
-  parkLogo();
+  parkLogoSoon();
   paintScaleClash();
 }
 // The last-price pill is painted on the scale canvas. A tick that sits on it
@@ -3260,7 +3324,7 @@ function paintScaleClash() {
 function paintScaleClashNow() {
   const host = chartUi.host;
   if (!host || !host.isConnected) return;
-  host.querySelectorAll(".scale-cut").forEach((n) => n.remove());
+  const cuts = [];
   const hostR = host.getBoundingClientRect();
   const scales = [];
   for (const canvas of host.querySelectorAll("canvas")) {
@@ -3328,14 +3392,23 @@ function paintScaleClashNow() {
     }
     for (const i of hide) {
       const [y0, y1] = s.bands[i];
-      const cut = document.createElement("div");
-      cut.className = "scale-cut";
-      cut.style.top = Math.max(0, baseTop + y0 * sy - 1) + "px";
-      cut.style.height = ((y1 - y0 + 1) * sy + 2) + "px";
-      cut.style.left = left + "px";
-      cut.style.width = s.canvas.clientWidth + "px";
-      host.appendChild(cut);
+      cuts.push({
+        top: Math.max(0, baseTop + y0 * sy - 1) + "px", height: ((y1 - y0 + 1) * sy + 2) + "px",
+        left: left + "px", width: s.canvas.clientWidth + "px"
+      });
     }
+  }
+  // Same masks as last time (the usual case on a price tick): leave the DOM alone.
+  const sig = cuts.map((c) => c.top + "," + c.height + "," + c.left + "," + c.width).join(";");
+  const have = host.querySelectorAll(".scale-cut");
+  if (have.length === cuts.length && host._cutSig === sig) return;
+  have.forEach((n) => n.remove());
+  host._cutSig = sig;
+  for (const c of cuts) {
+    const cut = document.createElement("div");
+    cut.className = "scale-cut";
+    cut.style.top = c.top; cut.style.height = c.height; cut.style.left = c.left; cut.style.width = c.width;
+    host.appendChild(cut);
   }
 }
 
@@ -3648,6 +3721,7 @@ function tickChart(addVolume = 0) {
   const t = state.active;
   if (state.candlesKey !== candleKey()) return;
   if (!chartUi.candles || !t || !chartUi.lastTime || !state.candles.length) return;
+  if (chartUi.offscreen) return;
   const price = state.prices[t.id];
   if (!price) return;
   const sec = TF_SEC[resolvedTf()] || 60;
@@ -4588,7 +4662,7 @@ function paintHolderCounts() {
   });
   const top = t.audit?.topHoldersPercentage;
   const topEl = $("[data-holder-top]");
-  if (topEl) topEl.textContent = Number.isFinite(top) ? top.toFixed(2) + "%" : "—";
+  if (topEl) setText(topEl, Number.isFinite(top) ? top.toFixed(2) + "%" : "—");
   const status = $("[data-holders-status]");
   if (status) {
     const live = holderStreamFresh(t) || liveHolderCount(t) != null;
@@ -6313,14 +6387,14 @@ function paintQuoteExtras() {
   const bits = quoteBits(currentQuote());
   const n = $("#route-n");
   if (n) {
-    n.hidden = !bits.hops;
-    if (bits.hops) n.textContent = String(bits.hops);
+    if (n.hidden !== !bits.hops) n.hidden = !bits.hops;
+    if (bits.hops) setText(n, String(bits.hops));
   }
   const det = $("#quote-detail");
   if (det) {
     const show = state.quoteOpen && !!bits.line;
-    det.hidden = !show;
-    det.textContent = show ? bits.line : "";
+    if (det.hidden !== !show) det.hidden = !show;
+    setText(det, show ? bits.line : "");
   }
 }
 function quoteSummary() {
@@ -7467,6 +7541,17 @@ const POOL_PROGRAMS = {
   whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc: "orca-whirlpool",
   LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo: "meteora-dlmm"
 };
+// web3.js loads async so it never delays first paint. Anything that needs it waits here (max 15s).
+function web3Ready() {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    (function poll() {
+      if (typeof solanaWeb3 !== "undefined") return resolve(true);
+      if (Date.now() - t0 > 15000) return resolve(false);
+      setTimeout(poll, 50);
+    })();
+  });
+}
 function curvePda(mint) {
   return solanaWeb3.PublicKey.findProgramAddressSync([new TextEncoder().encode("bonding-curve"), new solanaWeb3.PublicKey(mint).toBytes()], new solanaWeb3.PublicKey(PUMP_PROGRAM))[0].toBase58();
 }
@@ -7494,6 +7579,8 @@ async function heliusTrack(token, keep = false) {
     const { ranked, counts } = await heliusCandidates(token);
     if (seq !== hel.seq) return;
     if (!ranked.length) { hel.reason = "no pool"; return; }
+    if (ranked.includes(token.id)) await web3Ready();
+    if (seq !== hel.seq) return;
     const accts = ranked.map((id) => (id === token.id ? curvePda(token.id) : id));
     const info = await helRpc("getMultipleAccounts", [accts, { encoding: "base64", commitment: "processed" }]);
     if (seq !== hel.seq) return;
@@ -7871,7 +7958,11 @@ function streamWatch(limit = STREAM_SILENT_MS) {
 }
 setInterval(() => streamWatch(), 5000);
 setInterval(() => { if (!document.hidden) paintQuoteAge(); }, 1000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) streamWatch(STREAM_RESUME_SILENT_MS); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  streamWatch(STREAM_RESUME_SILENT_MS);
+  if (paintLive.owed) { paintLive.owed = false; paintLive(); }
+});
 window.addEventListener("online", () => { stream.retry = 0; streamReset(); });
 
 function streamSend(type, payload) {
@@ -8155,13 +8246,20 @@ function onStreamAssets(list) {
   if (stream.dirty.live || stream.dirty.alpha) streamFlush();
 }
 // Coalesce bursts into one paint per animation frame (Alpha list: at most every 250 ms).
+const LIVE_PAINT_MS = 140;
 function streamFlush() {
   if (stream.raf) return;
   stream.raf = requestAnimationFrame(() => {
     stream.raf = 0;
     if (chartUi.dragging) { stream.dirty.live = true; return; }
-    if (stream.dirty.live) {
+    // Price ticks can land 13+ times a second. The eye reads ~7 repaints a second just as well,
+    // and every repaint costs a style/layout pass, so live cells repaint at most every 140 ms.
+    const liveWait = LIVE_PAINT_MS - (Date.now() - (stream.liveAt || 0));
+    if (stream.dirty.live && liveWait > 0) {
+      if (!stream.liveTimer) stream.liveTimer = setTimeout(() => { stream.liveTimer = 0; streamFlush(); }, liveWait);
+    } else if (stream.dirty.live) {
       stream.dirty.live = false;
+      stream.liveAt = Date.now();
       const v = stream.pendingVol || 0;
       stream.pendingVol = 0;
       if (v) tickChart(v);
@@ -8193,11 +8291,11 @@ function paintHeadStats() {
   // Live ticks retry expired failures through the same cached, rate-limited queue.
   rcWant([t.id]);
   const px = livePrice(t);
-  st[0].textContent = px == null ? "—" : priceLabel(px);
-  st[1].textContent = t.liquidity == null ? "—" : usd(t.liquidity);
-  st[2].textContent = t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null)
+  setText(st[0], px == null ? "—" : priceLabel(px));
+  setText(st[1], t.liquidity == null ? "—" : usd(t.liquidity));
+  setText(st[2], t.stats1h && (t.stats1h.buyVolume != null || t.stats1h.sellVolume != null)
     ? usd((Number(t.stats1h.buyVolume) || 0) + (Number(t.stats1h.sellVolume) || 0))
-    : "—";
+    : "—");
 }
 
 // Shareable GitHub Pages routes. Never persist wallet, quote or order credentials.
