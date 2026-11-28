@@ -658,3 +658,28 @@ button, a[href], [role=button], [role=tab] { -webkit-tap-highlight-color: transp
 button, [role=button], [role=tab] { -webkit-user-select: none; user-select: none; }
 .pressed { opacity: .78; transition: none !important; }
 .go.pressed, .seg button.pressed, .presets button.pressed, .icon-btn.pressed, .round.pressed, .sheet-x.pressed, .tabs button.pressed, .nav button.pressed, .tf button.pressed { transform: scale(.95); opacity: 1; filter: brightness(1.25); }
+
+/* Touch: bigger hit areas without changing the look. Each ::before is invisible and only
+   reaches into empty space or the gap to the next control, never over another control. */
+.icon-btn, .round, .token-head .copy, .token-head .soc, .stat-more, .tf-scroll button, .tf-tools button,
+.scale-btns button, #chart-mode, .tools button, .seg button, .market, #est-more { position: relative; }
+.icon-btn::before, .round::before, .token-head .copy::before, .token-head .soc::before, .stat-more::before,
+.tf-scroll button::before, .tf-tools button::before, .scale-btns button::before, #chart-mode::before,
+.tools button::before, .seg button::before, .market::before, #est-more::before { content: ""; position: absolute; }
+.icon-btn::before { inset: -4px; }
+.round::before { inset: -6px -4px; }
+.token-head .copy::before { inset: -6px -5px 0; }
+.token-head .soc::before { inset: 0 -2px -6px; }
+.stat-more::before { inset: -16px -8px 0; }
+/* Timeframe row: the stats' bottom padding moves into the row so buttons can reach it. */
+.stats { padding-bottom: 0; }
+.tf { padding-top: 8px; }
+.tf-scroll { padding: 8px 0 6px; margin: -8px 0 -6px; }
+.tf-scroll button::before { top: -11px; bottom: -10px; left: -3.5px; right: -3.5px; }
+.tf-tools button::before { top: -8px; bottom: -6px; left: -1px; right: -1px; }
+.scale-btns button::before { top: -6px; bottom: -10px; left: -5px; right: -5px; }
+.scale-btns button:first-child::before { left: -12px; }
+#chart-mode::before { top: -6px; bottom: -10px; left: -6px; right: -12px; }
+.tools button::before { top: 0; bottom: 0; left: -4px; right: -12px; }
+.seg button::before, .market::before { top: -6px; bottom: -9px; left: -2px; right: -2px; }
+#est-more::before { top: -7px; bottom: -14px; left: -30px; right: -12px; }
