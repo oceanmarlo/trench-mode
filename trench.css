@@ -708,3 +708,12 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .tf-tools { position: relative; }
 .tf-tools button::before { top: -6px; bottom: -10px; }
 .tf-full .tf-scroll { padding: 0; margin: 0; }
+
+/* Header polish (same heights): 24h change as a tinted pill, stat labels slightly dimmer,
+   hairline dividers between the stat cells. */
+.mc-line .chg { align-self: center; padding: 2px 8px; border-radius: 999px; font-size: 14px; background: rgba(255,255,255,.06); }
+.mc-line .chg.up { background: rgba(94,214,140,.13); box-shadow: inset 0 0 0 1px rgba(94,214,140,.22); }
+.mc-line .chg.down { background: rgba(229,84,111,.14); box-shadow: inset 0 0 0 1px rgba(229,84,111,.24); }
+.stats .k { font-size: 10.5px; letter-spacing: .01em; color: #6f7a87; }
+.stats > div { position: relative; }
+.stats > div:not(:first-child)::before { content: ""; position: absolute; left: -3px; top: 2px; bottom: 1px; width: 1px; background: rgba(255,255,255,.06); }
