@@ -767,6 +767,56 @@ async function refreshVisibleHolders() {
   if (Date.now() < holdersRefresh.next || Date.now() < holdersRefresh.rateUntil) return;
   await loadHolders();
 }
+// Brief green/red tint when a live number moves. One observer, Web Animations only
+// (no class toggles, no forced reflow); first paint and token switches never flash.
+const FLASH_SEL = "#mc, #stat-px, [data-holder-count], [data-holder-compact], .sheet [data-sf='price'], .sheet [data-sf='holders'], .sheet [data-sf='bundler'], .sheet [data-sf='vol'], .sheet [data-sf='liq'], .sheet [data-sf='fdv']";
+const FLASH_SUB = "₀₁₂₃₄₅₆₇₈₉";
+function flashValue(text) {
+  let t = String(text == null ? "" : text).replace(/,/g, "");
+  // $0.0₅228 is 0.00000228: the subscript counts the zeros after "0.".
+  t = t.replace(/0\.0([₀-₉]+)(\d+)/, (_, sub, d) => {
+    const n = [...sub].reduce((acc, c) => acc * 10 + FLASH_SUB.indexOf(c), 0);
+    return "0." + "0".repeat(n) + d;
+  });
+  const m = /(-?\d+(?:\.\d+)?)\s*([KMB])?/i.exec(t);
+  if (!m) return null;
+  const v = Number(m[1]) * ({ K: 1e3, M: 1e6, B: 1e9 }[(m[2] || "").toUpperCase()] || 1);
+  return Number.isFinite(v) ? v : null;
+}
+const flashSeen = new WeakMap();
+function flashDirection(el) {
+  const v = flashValue(el.textContent);
+  const had = flashSeen.has(el);
+  const prev = flashSeen.get(el);
+  flashSeen.set(el, v);
+  if (!had || v == null || prev == null || v === prev) return 0;
+  return v > prev ? 1 : -1;
+}
+function flashEl(el) {
+  const dir = flashDirection(el);
+  if (!dir || typeof el.animate !== "function") return;
+  // One keyframe: the browser eases back to the element's own color (up/down/flat).
+  el.animate([
+    dir > 0
+      ? { color: "#7dffa8", textShadow: "0 0 10px rgba(94,214,140,.55)" }
+      : { color: "#ff7d96", textShadow: "0 0 10px rgba(229,84,111,.55)" }
+  ], { duration: 700, easing: "cubic-bezier(.2,.7,.2,1)" });
+}
+function startValueFlash() {
+  if (typeof MutationObserver !== "function" || typeof document === "undefined") return;
+  try { if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch (_) {}
+  const obs = new MutationObserver((list) => {
+    const hit = new Set();
+    for (const m of list) {
+      const node = m.type === "characterData" ? m.target.parentElement : m.target;
+      const el = node && node.closest ? node.closest(FLASH_SEL) : null;
+      if (el) hit.add(el);
+    }
+    hit.forEach(flashEl);
+  });
+  obs.observe(document.body, { subtree: true, childList: true, characterData: true });
+  document.querySelectorAll(FLASH_SEL).forEach((el) => flashSeen.set(el, flashValue(el.textContent)));
+}
 function startHolderRefresh() {
   const tick = async () => {
     try { paintHeaderAge(); } catch (_) {}
@@ -7673,6 +7723,7 @@ async function boot() {
     every(FEED_EVERY_MS, () => Promise.all([loadTape().catch(() => {}), loadCandles().catch(() => {}), (state.view === "spot" && !document.hidden ? bundlerLoad() : null)?.catch?.(() => {})]));
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
     startHolderRefresh();
+    try { startValueFlash(); } catch (_) {}
     if (state.active && state.active.id) gmgnWatch(state.active.id);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.active && state.active.id) gmgnArm(0);
