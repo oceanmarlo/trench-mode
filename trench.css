@@ -643,12 +643,13 @@ body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; 
   .tf button, .tabs button, .go, .seg button, .presets button, .icon-btn, .round, .sheet-x, .amt-box { transition: none; }
 }
 
-/* Drop alerts: unmissable red badge for a sharp Holders / Bundlers fall. */
-#drop-alerts{position:fixed;top:calc(env(safe-area-inset-top,0px) + 58px);left:50%;transform:translateX(-50%);z-index:9000;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none;max-width:calc(100vw - 16px)}
-#drop-alerts .drop-badge{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:999px;background:#e5243b;color:#fff;font-weight:800;font-size:15px;letter-spacing:.01em;font-variant-numeric:tabular-nums;white-space:nowrap;box-shadow:0 0 0 2px rgba(255,255,255,.18),0 6px 22px rgba(229,36,59,.55);animation:drop-pop .28s ease-out,drop-pulse 1.2s ease-in-out .3s infinite}
+/* Drop alerts: red badges that sit in the top browser bar (over the "jup.ag" pill), never over
+   token values. pointer-events none, so the pill below stays tappable. */
+#drop-alerts{position:fixed;top:calc(env(safe-area-inset-top,0px) + 9px);left:50%;transform:translateX(-50%);width:min(290px,calc(100vw - 100px));height:28px;z-index:9000;display:flex;flex-direction:row;align-items:stretch;justify-content:center;gap:4px;pointer-events:none}
+#drop-alerts .drop-badge{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;border-radius:999px;background:#e5243b;color:#fff;font-weight:800;font-size:12px;letter-spacing:0;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 0 0 1.5px rgba(255,255,255,.2),0 4px 14px rgba(229,36,59,.55);animation:drop-pop .28s ease-out,drop-pulse 1.2s ease-in-out .3s infinite}
 .drop-hit{color:#ff3b4e !important;text-shadow:0 0 10px rgba(255,59,78,.55)}
 @keyframes drop-pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
-@keyframes drop-pulse{50%{box-shadow:0 0 0 2px rgba(255,255,255,.18),0 6px 30px rgba(229,36,59,.9)}}
+@keyframes drop-pulse{50%{box-shadow:0 0 0 1.5px rgba(255,255,255,.2),0 4px 20px rgba(229,36,59,.95)}}
 @media (prefers-reduced-motion:reduce){#drop-alerts .drop-badge{animation:none}}
 
 /* Touch: no 300 ms double-tap wait or double-tap zoom on controls; instant press state
@@ -742,3 +743,15 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .al-filter-btn::before { content: ""; position: absolute; left: 0; right: 0; top: -7px; bottom: -3px; }
 .al-head { padding: 0; margin: -3px 0 -9px; position: relative; z-index: 1; }
 .al-head button { padding: 13px 0; }
+
+/* Holders tab count: readable, same weight as the label, tabular so it does not jitter. */
+.tabs .tab-n { color: var(--text); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; margin-left: 2px; }
+.tabs button:not(.on) .tab-n { color: #aab3be; }
+
+/* Short phone viewports (Safari with toolbars, ~660px): slimmer Holding bar so the amount box and
+   Buy row keep more room above the bottom nav. */
+.bar { white-space: nowrap; }
+.bar > * { overflow: hidden; text-overflow: ellipsis; }
+@media (max-height: 740px) {
+  .bar { padding-top: 5px; padding-bottom: 5px; font-size: 13px; }
+}

@@ -191,9 +191,15 @@ const qty = (n) => {
   }
   return Math.abs(n).toFixed(8).replace(/0+$/, "");
 };
+// Wallet SOL balance for display: 4 decimals from 1 SOL up (327.5272, not 327.52717833).
+function solBalText(n) {
+  const v = Number(n);
+  if (n == null || !Number.isFinite(v)) return solText(n);
+  return Math.abs(v) >= 1 ? v.toFixed(4).replace(/\.?0+$/, "") : solText(n);
+}
 function tradeBal() {
   if (!state.wallet) return "—";
-  return state.side === "buy" ? solText(state.sol) : qty(activePnl().amount);
+  return state.side === "buy" ? solBalText(state.sol) : qty(activePnl().amount);
 }
 const solText = (n) => {
   if (!n) return "0";
@@ -1256,6 +1262,47 @@ async function loadHoldingMetadata(mints, owner) {
   }
 }
 let holdingsRequest = null;
+// Cost basis for tokens bought outside this app (or before the live pnl stream connected).
+// Jupiter's wallet PnL scan returns each position's average USD cost and last trade time;
+// it is the same figure the live "pnl" stream sends, so both write the same entry key.
+// 403/429 pauses it (Retry-After honoured, 60 s minimum) instead of retrying.
+const pnlPos = new Map();
+let pnlPosPauseUntil = 0;
+function applyPnlPositions(owner, data) {
+  const list = data && data[owner] && data[owner].tokenPositions;
+  if (!owner || state.wallet !== owner || !Array.isArray(list)) return false;
+  let changed = false;
+  for (const p of list) {
+    const mint = p && p.assetId;
+    if (typeof mint !== "string" || !mint || mint === SOL || mint === NATIVE_SOL) continue;
+    const prev = pnlPos.get(owner + ":" + mint);
+    if (!prev || prev.last !== p.lastActiveTime) changed = true;
+    pnlPos.set(owner + ":" + mint, { last: typeof p.lastActiveTime === "string" ? p.lastActiveTime : "", cost: Number(p.averageCost) });
+    const cost = Number(p.averageCost);
+    if (Number(p.size) > 0 && Number.isFinite(cost) && cost > 0) {
+      const cur = Number(localStorage.getItem(entryKey(mint, owner)));
+      if (cur !== cost) { localStorage.setItem(entryKey(mint, owner), String(cost)); changed = true; }
+    }
+  }
+  return changed;
+}
+async function loadPnlPositions(owner = state.wallet) {
+  if (!owner || Date.now() < pnlPosPauseUntil) return false;
+  let data;
+  try {
+    data = await datapi("https://datapi.jup.ag/v1/pnl-positions?address=" + encodeURIComponent(owner) + "&filter=activePosition");
+  } catch (err) {
+    if (err && (err.status === 403 || err.status === 429)) pnlPosPauseUntil = Date.now() + Math.max(err.retryAfterMs || 0, 60000);
+    return false;
+  }
+  const changed = applyPnlPositions(owner, data);
+  if (changed && state.wallet === owner) queuePnlPaint(true);
+  return changed;
+}
+function holdLastTraded(mint) {
+  const row = pnlPos.get((state.wallet || "") + ":" + mint);
+  return row && row.last ? ageLabel(row.last) : "—";
+}
 async function loadHoldings() {
   if (!state.wallet) return;
   const owner = state.wallet;
@@ -1300,6 +1347,8 @@ async function loadHoldings() {
   const missing = state.holdings.filter((h) => !h.symbol).map((h) => h.mint);
   streamSync();
   await loadHoldingMetadata(missing, owner);
+  if (state.wallet !== owner) return;
+  await loadPnlPositions(owner).catch(() => {});
   if (state.wallet !== owner) return;
   await pollPrices(true).catch(() => {});
   render();
@@ -2389,7 +2438,7 @@ function paintLive() {
   if (solRow) {
     $(".meta span", solRow).textContent = usd(holdingPrice(SOL));
     $(".hold-n", solRow).textContent = usd(holdingValue(SOL, state.sol));
-    $(".hold-q", solRow).textContent = solText(state.sol);
+    $(".hold-q", solRow).textContent = solBalText(state.sol);
   }
   const p = activePnl();
   const solPx = $("#sol-px");
@@ -2470,6 +2519,8 @@ function paintLive() {
     const pn = $(".pnl", row);
     if (hn) hn.textContent = usd(value);
     if (hq) hq.textContent = qty(h.ui);
+    const lt = $("[data-last-traded]", row);
+    if (lt) { const txt = holdLastTraded(h.mint); if (lt.textContent !== txt) lt.textContent = txt; }
     if (pn) {
       if (!(entry > 0) || !(price > 0)) paintHoldingPnl(pn, null, null);
       else paintHoldingPnl(pn, value - h.ui * entry, ((price - entry) / entry) * 100);
@@ -4297,7 +4348,10 @@ const DROP_SHOW_MS = 6000;
 const DROP_CONFIRM_MS = 1500;
 const DROP_RULES = {
   holders: { pct: 2, abs: 50, floor: 5, smooth: 1 },
-  bundlers: { pp: 5, smooth: 5 }
+  // Bundler HOLDINGS share (Jupiter audit holdingPct, lifetime): -5pp, or -20% of the peak when
+  // that is at least 1pp. The windowed bundler volume share is not used: it falls whenever one
+  // big bundler trade ages out of the 1m/5m/... window, which is not bundlers leaving.
+  bundlers: { pp: 5, rel: 20, minPp: 1, smooth: 5 }
 };
 const dropHist = new Map();
 let dropTimer = 0;
@@ -4306,7 +4360,7 @@ function dropTrips(kind, peak, cur) {
   const d = peak - cur;
   if (!r || !(d > 0)) return false;
   if (kind === "holders") return d >= r.floor && (d >= peak * r.pct / 100 || d >= r.abs);
-  return d >= r.pp;
+  return d >= r.pp || (d >= r.minPp && d >= peak * r.rel / 100);
 }
 function dropNote(kind, key, value, now = Date.now()) {
   const r = DROP_RULES[kind];
@@ -4374,6 +4428,11 @@ function paintDropAlerts(now = Date.now()) {
   if (box.innerHTML !== html) box.innerHTML = html;
   dropTimer = setTimeout(() => paintDropAlerts(), Math.max(200, next - now + 30));
 }
+// The tab label shows the exact count under 100K so every change is visible; compact above.
+function holderTabText(count) {
+  if (count == null || !Number.isFinite(Number(count))) return "—";
+  return Number(count) < 100000 ? Math.round(Number(count)).toLocaleString() : compactCount(count);
+}
 function paintHolderCounts() {
   const t = state.active;
   if (!t) return;
@@ -4384,7 +4443,7 @@ function paintHolderCounts() {
   });
   if (count != null) dropNote("holders", t.id, count);
   paintDropAlerts();
-  const compact = count == null ? "—" : compactCount(count);
+  const compact = holderTabText(count);
   document.querySelectorAll("[data-holder-compact]").forEach((el) => {
     if (el.textContent !== compact) el.textContent = compact;
   });
@@ -4522,7 +4581,7 @@ function render() {
       ${t ? tokenHead(t, price, chg) : `<div class="panel">${esc(state.status || "Search a token to trade.")}</div>`}
       ${t ? `<div class="panel trade-dock" id="trade-dock">${tradePanel()}</div>` : ""}
       <div class="tabs" role="tablist" aria-label="Token details">
-        ${[["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" ? ` <span class="tab-n" data-holder-compact>${holderCountOf(t) == null ? "—" : compactCount(holderCountOf(t))}</span>` : ""}</button>`).join("")}
+        ${[["holders","Holders"],["tx","Trades"],["holdings","Holding"]].map(([id,label]) => `<button type="button" role="tab" data-tab="${id}" class="${state.tab===id?"on":""}" aria-selected="${state.tab===id}">${label}${id==="holders" ? ` <span class="tab-n" data-holder-compact>${holderTabText(holderCountOf(t))}</span>` : ""}</button>`).join("")}
       </div>
       <div class="panel">${panel()}</div>`}
     </div>
@@ -4836,9 +4895,9 @@ function paintGmgn() {
     const html = gmgnLineInner();
     if (line.innerHTML !== html) line.innerHTML = html;
   }
-  const main = bundlerView();
   const at = state.active;
-  if (at && !main.loading && !main.unavailable && main.metric != null) dropNote("bundlers", at.id + "|" + main.kind + "|" + (main.win || ""), main.metric);
+  const jb = at ? jupBundler(at) : null;
+  if (at && jb && jb.held != null) dropNote("bundlers", at.id + "|held", jb.held);
   const tile = document.querySelector('[data-sf="bundler"]');
   const lab = document.querySelector('[data-sf="bundlerLab"]');
   const v = bundlerView(state.infoWin);
@@ -5089,7 +5148,7 @@ function holdingsPanel() {
       ? `<b>—</b><span>—</span>`
       : holdPnlHtml(value - h.ui * entry, ((price - entry) / entry) * 100);
     return `<div class="row" data-mint="${h.mint}">
-      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span>—</span></div></div>
+      <div class="who"><div class="tok-av">${tokenIcon(h.icon)}</div><div class="meta"><b>${esc(h.symbol || h.mint.slice(0, 4))}</b><span data-last-traded>${holdLastTraded(h.mint)}</span></div></div>
       <div><div class="hold-n">${usd(value)}</div><div class="hold-q">${qty(h.ui)}</div></div>
       <div class="pnl">${pnl}</div>
       <div class="actions"><button class="sell" data-sell="${h.mint}">Sell</button></div>
@@ -5972,7 +6031,7 @@ function portfolioView() {
       <div class="mc"><div class="px" id="pf-total">${w ? usd(total) : "—"}</div><div class="k">Net worth</div></div></div>`;
   if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Jupiter, Phantom, Solflare, Backpack…) to see your balances.")}</div>`;
   const solRow = `<div class="row" data-pf-sol><div class="who"><div class="tok-av"><img src="${SOL_ICON}" alt=""></div><div class="meta"><b>SOL</b><span>${usd(solPx)}</span></div></div>
-      <div><div class="hold-n">${usd(holdingValue(SOL, state.sol))}</div><div class="hold-q">${solText(state.sol)}</div></div><div></div><div></div></div>`;
+      <div><div class="hold-n">${usd(holdingValue(SOL, state.sol))}</div><div class="hold-q">${solBalText(state.sol)}</div></div><div></div><div></div></div>`;
   return top + `<div class="panel">${solRow}${holdingsPanel()}</div>`;
 }
 
@@ -7440,10 +7499,35 @@ function streamConnect() {
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
 }
 function streamRetry() {
-  const ms = Math.min(10000, 1000 * 2 ** stream.retry++);
-  setTimeout(() => { if (!document.hidden) streamConnect(); }, ms);
+  // Backs off to 15 s so a refused or rate-limited socket is never hammered.
+  const ms = Math.min(15000, 1000 * 2 ** stream.retry++);
+  clearTimeout(stream.retryTimer);
+  stream.retryTimer = setTimeout(() => { if (!document.hidden) streamConnect(); }, ms);
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) streamConnect(); });
+// A phone that was backgrounded or lost signal often keeps a socket that still says OPEN but
+// never delivers again (no close event), so values freeze while the header looks live. Treat a
+// long silence as a dead socket: drop it and reconnect, which also re-subscribes everything.
+const STREAM_SILENT_MS = 25000;
+const STREAM_RESUME_SILENT_MS = 8000;
+function streamStale(now = Date.now(), limit = STREAM_SILENT_MS) {
+  return !!(stream.ws && stream.open && stream.lastMsg && now - stream.lastMsg > limit);
+}
+function streamReset() {
+  const ws = stream.ws;
+  stream.ws = null;
+  stream.open = false;
+  if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close(); } catch (_) {} }
+  clearTimeout(stream.retryTimer);
+  streamConnect();
+}
+function streamWatch(limit = STREAM_SILENT_MS) {
+  if (document.hidden) return;
+  if (streamStale(Date.now(), limit)) streamReset();
+  else streamConnect();
+}
+setInterval(() => streamWatch(), 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) streamWatch(STREAM_RESUME_SILENT_MS); });
+window.addEventListener("online", () => { stream.retry = 0; streamReset(); });
 
 function streamSend(type, payload) {
   if (stream.ws?.readyState === 1) stream.ws.send(JSON.stringify({ type, ...payload }));
