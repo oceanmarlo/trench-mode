@@ -356,7 +356,11 @@ function feeHtml(n) {
 }
 
 function holdingPrice(mint) {
-  return livePrice(state.active?.id === mint ? state.active : { id: mint });
+  if (state.active?.id === mint) return livePrice(state.active);
+  // Tokens the price feed does not carry (dust, new mints) fall back to datapi's last usdPrice
+  // instead of leaving the row and the net worth blank.
+  const h = state.holdings.find((x) => x.mint === mint);
+  return livePrice({ id: mint, usdPrice: h && h.usdPrice });
 }
 function holdingValue(mint, amount) {
   if (!(amount > 0)) return 0;
@@ -374,6 +378,43 @@ function portfolioValue() {
     total += value;
   }
   return total;
+}
+// Portfolio header: value of everything that has a live price (with "+" and an "N unpriced" note when
+// some balance has none, so a subtotal is never passed off as the full net worth) and the unrealised PnL
+// over positions with a known cost basis.
+function portfolioSummary() {
+  const ready = !!state.wallet && !state.holdingsError && !(state.holdingsLoading && !state.holdings.length);
+  if (!ready) return { ready: false, total: null, unpriced: 0, d: null, p: null };
+  const sol = holdingValue(SOL, state.sol);
+  let total = sol || 0;
+  let unpriced = sol == null ? 1 : 0;
+  let priced = sol == null ? 0 : 1;
+  let d = 0, cost = 0;
+  for (const h of state.holdings) {
+    const v = holdingValue(h.mint, h.ui);
+    if (v == null) { unpriced += 1; continue; }
+    priced += 1;
+    total += v;
+    const e = entryOf(h.mint);
+    if (e > 0) { d += v - h.ui * e; cost += h.ui * e; }
+  }
+  if (!priced) return { ready: false, total: null, unpriced, d: null, p: null };
+  return { ready: true, total, unpriced, d: cost > 0 ? d : null, p: cost > 0 ? (d / cost) * 100 : null };
+}
+function portfolioHeadText(s = portfolioSummary()) {
+  const money = !s.ready ? "—" : usd(s.total) + (s.unpriced ? "+" : "");
+  const cap = !s.ready ? "Net worth" : s.unpriced ? `Net worth · ${s.unpriced} unpriced` : "Net worth";
+  const pnl = s.ready && s.d != null ? pnlText(s.d, s.p) : "";
+  return { money, cap, pnl, cls: s.p != null ? cls(s.p) : "" };
+}
+// The bottom bar follows the page: the open token on Spot/Alpha, the whole wallet on Portfolio.
+function barModel() {
+  if (state.view === "portfolio" && state.wallet) {
+    const s = portfolioSummary();
+    if (!s.ready) return { hold: "Net worth —", pnl: "—", clsName: "" };
+    return { hold: "Net worth " + usd(s.total) + (s.unpriced ? "+" : ""), pnl: s.d != null ? pnlText(s.d, s.p) : "—", clsName: s.p != null ? cls(s.p) : "" };
+  }
+  return holdBar(activePnl());
 }
 function activePnl() {
   const t = state.active;
@@ -1256,7 +1297,7 @@ async function loadHoldingMetadata(mints, owner) {
       if (state.wallet !== owner) return;
       (Array.isArray(meta) ? meta : meta?.assets || []).forEach((m) => {
         const h = state.holdings.find((x) => x.mint === m.id);
-        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon });
+        if (h) Object.assign(h, { symbol: m.symbol, name: m.name, icon: m.icon, usdPrice: Number(m.usdPrice) > 0 ? Number(m.usdPrice) : h.usdPrice });
       });
     } catch (_) {} // A missing label must not hide the balance or stop later batches.
   }
@@ -1296,7 +1337,8 @@ async function loadPnlPositions(owner = state.wallet) {
     return false;
   }
   const changed = applyPnlPositions(owner, data);
-  if (changed && state.wallet === owner) queuePnlPaint(true);
+  // Row set is decided by loadHoldings; cost basis / last-traded changes repaint in place.
+  if (changed && state.wallet === owner) queuePnlPaint(false);
   return changed;
 }
 function holdLastTraded(mint) {
@@ -1309,9 +1351,11 @@ async function loadHoldings() {
   // Only the latest snapshot may land; pushes received while it is in flight win.
   const request = { owner, balances: new Map(), sol: null };
   holdingsRequest = request;
+  const sigBefore = holdingsSignature() + (state.holdingsError ? "|err" : "") + (state.holdings.length ? "" : "|empty");
   state.holdingsLoading = true;
   state.holdingsError = "";
-  if (state.view === "portfolio" || state.tab === "holdings") render();
+  // A background refresh with rows already on screen must not rebuild the list under the user's finger.
+  if ((state.view === "portfolio" || state.tab === "holdings") && !state.holdings.length) render();
   let bal;
   try {
     try { bal = await withTimeout(balancesFromJupiter(owner), 10000); }
@@ -1342,16 +1386,21 @@ async function loadHoldings() {
   const old = new Map(state.holdings.map((h) => [h.mint, h]));
   state.holdings = rows.map((h) => {
     const o = old.get(h.mint);
-    return o ? { ...h, symbol: o.symbol, name: o.name, icon: o.icon } : h;
+    return o ? { ...h, symbol: o.symbol, name: o.name, icon: o.icon, usdPrice: o.usdPrice } : h;
   });
-  const missing = state.holdings.filter((h) => !h.symbol).map((h) => h.mint);
+  const missing = state.holdings.filter((h) => !h.symbol || !(Number(state.prices[h.mint]) > 0)).map((h) => h.mint);
   streamSync();
   await loadHoldingMetadata(missing, owner);
   if (state.wallet !== owner) return;
   await loadPnlPositions(owner).catch(() => {});
   if (state.wallet !== owner) return;
   await pollPrices(true).catch(() => {});
-  render();
+  // Unchanged balances and cost basis: repaint numbers in place instead of rebuilding every row.
+  if (holdingsSignature() === sigBefore && (state.view === "portfolio" || state.tab === "holdings")) paintLive();
+  else render();
+}
+function holdingsSignature() {
+  return state.wallet + "|" + state.sol + "|" + state.holdings.map((h) => h.mint + ":" + h.ui + ":" + (h.symbol || "") + ":" + entryOf(h.mint)).join(",");
 }
 
 function withTimeout(p, ms) {
@@ -2431,7 +2480,13 @@ function paintLive() {
   const t = state.active;
   paintHolderCounts();
   const pf = $("#pf-total");
-  if (pf) pf.textContent = usd(portfolioValue());
+  if (pf) {
+    const h = portfolioHeadText();
+    if (pf.textContent !== h.money) pf.textContent = h.money;
+    const cap = $("#pf-cap"); if (cap && cap.textContent !== h.cap) cap.textContent = h.cap;
+    const pn = $("#pf-pnl");
+    if (pn) { if (pn.textContent !== h.pnl) pn.textContent = h.pnl; pn.className = "pf-pnl " + h.cls; pn.hidden = !h.pnl; }
+  }
   const tradeBalance = $("#trade-bal");
   if (tradeBalance) tradeBalance.textContent = tradeBal();
   const solRow = $("[data-pf-sol]");
@@ -2487,7 +2542,7 @@ function paintLive() {
   paintHeaderAge();
   parkLogo();
   paintAxisEdge();
-  const hb = holdBar(p);
+  const hb = barModel();
   if (barH) barH.textContent = hb.hold;
   if (barP) {
     barP.textContent = hb.pnl;
@@ -4578,7 +4633,7 @@ function render() {
   state.scrollToTab = false;
   const t = state.active;
   const p = activePnl();
-  const hb = holdBar(p);
+  const hb = barModel();
   const price = t ? (state.prices[t.id] || t.usdPrice || 0) : 0;
   const chg = t && p.entry ? ((price - p.entry) / p.entry) * 100 : (t?.stats24h?.priceChange || 0);
   app.innerHTML = `
@@ -4887,7 +4942,7 @@ function bundlerTag(v) {
 function bundlerLabel(v) {
   if (v.kind === "win") return v.partial ? "Bundler vol · " + bundlerSpanText(v.spanMs) : "Bundler vol " + v.win;
   if (v.kind === "vol") return "Bundler vol";
-  return v.kind === "held" ? "Bundler H." : "Bundler";
+  return v.kind === "held" ? "Bundlers hold" : "Bundlers";
 }
 function bundlerText(v) {
   return (v.partial ? "~" : "") + gmgnVolText(v.metric);
@@ -5801,7 +5856,7 @@ function lpBadge(mint) {
 function paintAlphaList() {
   const box = $("#alpha-list");
   if (!box) return;
-  box.innerHTML = alphaRowsHtml();
+  withViewAnchor(box, ".al-row", "alphaOpen", () => morphInto(box, alphaRowsHtml(), alphaKey));
   bindAlphaRows();
   paintFilterChrome();
   restoreNavigationScroll();
@@ -6071,10 +6126,10 @@ function bindAlpha() {
 function portfolioView() {
   const w = state.wallet;
   const solPx = holdingPrice(SOL);
-  const total = portfolioValue();
+  const ph = portfolioHeadText();
   const top = `<div class="token-head"><div class="tok-name"><div class="sym">Portfolio</div>
       <div class="sub">${w ? `<span>${w.slice(0, 4)}…${w.slice(-4)}</span><button type="button" class="copy" data-copy="${w}" aria-label="Copy">⧉</button>` : `<span>No wallet connected</span>`}</div></div>
-      <div class="mc"><div class="px" id="pf-total">${w ? usd(total) : "—"}</div><div class="k">Net worth</div></div></div>`;
+      <div class="mc"><div class="px" id="pf-total">${w ? ph.money : "—"}</div><div class="k" id="pf-cap">${w ? ph.cap : "Net worth"}</div><div class="pf-pnl ${ph.cls}" id="pf-pnl"${ph.pnl ? "" : " hidden"}>${esc(ph.pnl)}</div></div></div>`;
   if (!w) return top + `<div class="panel">${connectPrompt("Connect your Solana wallet (Jupiter, Phantom, Solflare, Backpack…) to see your balances.")}</div>`;
   const solRow = `<div class="row" data-pf-sol><div class="who"><div class="tok-av"><img src="${SOL_ICON}" alt=""></div><div class="meta"><b>SOL</b><span>${usd(solPx)}</span></div></div>
       <div><div class="hold-n">${usd(holdingValue(SOL, state.sol))}</div><div class="hold-q">${solBalText(state.sol)}</div></div><div></div><div></div></div>`;
@@ -6264,25 +6319,67 @@ function tapeEmptyLabel(filter) {
   if (!filter || filter === "All") return "No trades in the latest tape.";
   return "No " + String(filter).toLowerCase() + " trades in the latest tape.";
 }
-// Repaint the trades list. Safari has no scroll anchoring, so when the reader has scrolled down into
-// the list, new rows arriving at the top used to push everything they were reading downward. Pin the
-// first row in view instead; at the top of the list new rows still slide in as before.
-function paintTape(box) {
+// ---- In-place list updates ------------------------------------------------------------------
+// Live lists (Alpha, Trades) used to be rebuilt with innerHTML about five times a second. A row
+// replaced between touch-down and touch-up never receives its tap, and a rebuilt list drops :active
+// feedback. morphInto() keeps every existing row node, rewrites only the text/attributes that
+// changed, and reorders keyed rows, so a finger on a row stays on a live element.
+function morphNode(a, b) {
+  if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) { a.replaceWith(b); return b; }
+  if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return a; }
+  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+  for (const at of b.attributes) {
+    let v = at.value;
+    if (at.name === "class" && a.classList.contains("pressed") && !/(^|\s)pressed(\s|$)/.test(v)) v += " pressed";
+    if (a.getAttribute(at.name) !== v) a.setAttribute(at.name, v);
+  }
+  const ak = [...a.childNodes], bk = [...b.childNodes];
+  for (let i = 0; i < bk.length; i++) {
+    if (i < ak.length) morphNode(ak[i], bk[i]);
+    else a.appendChild(bk[i]);
+  }
+  for (let i = ak.length - 1; i >= bk.length; i--) ak[i].remove();
+  return a;
+}
+// Replace box's children with html, reusing nodes that share a key (keyOf(node, index)).
+function morphInto(box, html, keyOf) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const next = [...tpl.content.children];
+  const have = new Map();
+  [...box.children].forEach((c, i) => have.set(keyOf(c, i), c));
+  next.forEach((n, i) => {
+    const ex = have.get(keyOf(n, i));
+    let node = n;
+    if (ex && ex.parentNode === box) { have.delete(keyOf(n, i)); node = morphNode(ex, n); }
+    if (box.children[i] !== node) box.insertBefore(node, box.children[i] || null);
+  });
+  while (box.children.length > next.length) box.lastElementChild.remove();
+}
+const alphaKey = (n, i) => (n.dataset && n.dataset.alphaOpen) ? "t:" + n.dataset.alphaOpen : "i:" + i;
+const tapeKey = (n, i) => (n.dataset && n.dataset.k) ? "k:" + n.dataset.k : "i:" + i;
+// Keep the row the reader is looking at where it was while rows above change (Safari has no
+// scroll anchoring). Only when the list's first row is already scrolled out of view.
+function withViewAnchor(box, rowSel, keyAttr, fn) {
   const sc = document.querySelector(".scroll");
   let key = "", off = 0;
   if (sc) {
     const top = sc.getBoundingClientRect().top;
-    const rows = [...box.querySelectorAll(".trow[data-k]")];
+    const rows = [...box.querySelectorAll(rowSel)];
     if (rows.length && rows[0].getBoundingClientRect().top < top) {
-      const r = rows.find((e) => e.dataset.k && e.getBoundingClientRect().bottom > top + 24);
-      if (r) { key = r.dataset.k; off = r.getBoundingClientRect().top; }
+      const r = rows.find((e) => e.dataset[keyAttr] && e.getBoundingClientRect().bottom > top + 24);
+      if (r) { key = r.dataset[keyAttr]; off = r.getBoundingClientRect().top; }
     }
   }
-  box.innerHTML = tapeRows();
+  fn();
   if (key && sc) {
-    const n = [...box.querySelectorAll(".trow[data-k]")].find((e) => e.dataset.k === key);
+    const n = [...box.querySelectorAll(rowSel)].find((e) => e.dataset[keyAttr] === key);
     if (n) sc.scrollTop += n.getBoundingClientRect().top - off;
   }
+}
+// Repaint the trades list in place, keeping the reader's place when scrolled down into it.
+function paintTape(box) {
+  withViewAnchor(box, ".trow[data-k]", "k", () => morphInto(box, tapeRows(), tapeKey));
 }
 function tapeRows() {
   const t = state.active || {};
@@ -6691,14 +6788,14 @@ function sheetHtml() {
       </div>
       <div class="trend-box"><div class="k"><span data-sf="win"></span> Net Buy Trend</div><div class="trend" id="net-trend"></div></div>
       <div class="delta3">
-        <div><div class="k">Vol %Δ</div><div class="v" data-sf="volD"></div></div>
-        <div><div class="k">Liquidity %Δ</div><div class="v" data-sf="liqD"></div></div>
-        <div><div class="k">Holders %Δ</div><div class="v" data-sf="holdD"></div></div>
+        <div><div class="k">Volume change</div><div class="v" data-sf="volD"></div></div>
+        <div><div class="k">Liquidity change</div><div class="v" data-sf="liqD"></div></div>
+        <div><div class="k">Holders change</div><div class="v" data-sf="holdD"></div></div>
       </div>
       <div class="tiles">
-        <div class="tile"><b data-sf="top10"></b>Top 10 H.</div>
-        <div class="tile"><b data-sf="dev"></b>Dev H.</div>
-        <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers H.</div>
+        <div class="tile"><b data-sf="top10"></b>Top 10 hold</div>
+        <div class="tile"><b data-sf="dev"></b>Dev holds</div>
+        <div class="tile" data-sf-snip hidden><b data-sf="snip"></b>Snipers hold</div>
         <div class="tile"><b data-sf="bundler"></b><span data-sf="bundlerLab">Bundler</span></div>
         <div class="tile"><b data-sf="freeze"></b>Freeze Auth</div>
         <div class="tile"><b data-sf="mint"></b>Mint Auth</div>
@@ -8094,6 +8191,13 @@ window.addEventListener("hashchange", onNavigationHistory);
 window.addEventListener("pagehide", () => saveNavigation("replace"));
 document.addEventListener("pointerdown", () => { navigation.scrollTarget = null; }, { passive: true });
 
+function resumeRefresh() {
+  const jobs = [loadTape(), loadCandles(), pollPrices(true)];
+  if (state.wallet) jobs.push(loadHoldings());
+  if (state.view === "alpha") jobs.push(loadMarketFeeds());
+  if (state.view === "spot" && state.active) jobs.push(refreshQuote());
+  for (const j of jobs) Promise.resolve(j).catch(() => {});
+}
 let started = false;
 function every(ms, fn) {
   const tick = async () => {
@@ -8119,8 +8223,16 @@ async function boot() {
     try { startTouchFeedback(); } catch (_) {}
     try { startTapHaptics(); } catch (_) {}
     if (state.active && state.active.id) gmgnWatch(state.active.id);
+    let hiddenSince = 0;
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && state.active && state.active.id) gmgnArm(0);
+      if (document.hidden) { hiddenSince = Date.now(); return; }
+      if (state.active && state.active.id) gmgnArm(0);
+      // Timers are throttled while the tab is in the background. On return, refresh everything now
+      // instead of waiting out the next (possibly long-delayed) tick.
+      if (hiddenSince && Date.now() - hiddenSince > 5000) {
+        resumeRefresh();
+      }
+      hiddenSince = 0;
     });
     every(30000, () => state.wallet ? loadHoldings() : null);
     every(20000, () => refreshStopLive());

@@ -788,3 +788,22 @@ html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-siz
 .scroll, .sheet-body { -webkit-overflow-scrolling: touch; }
 .trow, .tcols, .row[data-mint], .stats, .mc-line { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .trow a.trader { -webkit-user-select: auto; user-select: auto; }
+
+/* Portfolio header: net worth with the wallet's unrealised PnL under it. */
+.pf-pnl { font-size: 12px; font-weight: 650; text-align: right; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.pf-pnl.up { color: var(--green); }
+.pf-pnl.down { color: var(--red); }
+.pf-pnl[hidden] { display: none; }
+
+/* Token Info sheet readability: brighter captions, roomier tiles, tidier title. */
+.sheet .k { color: #8e98a5; font-size: 12.5px; letter-spacing: .01em; }
+.sheet .v { font-size: 15.5px; }
+.sheet .tile { color: #9aa4b0; font-size: 12.5px; padding: 12px 6px; line-height: 1.25; }
+.sheet .tile b { font-size: 17px; margin-bottom: 3px; }
+.sheet .delta3 { padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 8px 0 12px; }
+.sheet .delta3 .v { font-size: 16px; }
+#sheet-title { font-size: 18px; line-height: 1.25; padding-right: 48px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* Alpha rows: soft press highlight with a green edge, no text selection on long press. */
+.al-row { transition: background-color .12s, box-shadow .12s; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.al-row:active { background: rgba(255, 255, 255, .045); box-shadow: inset 3px 0 0 rgba(125, 255, 107, .55); }
+[data-pf-sol] { -webkit-user-select: none; user-select: none; }
