@@ -723,7 +723,32 @@ function storedHolderCount(t) {
   if (validHolderCount(cached)) return cached;
   return validHolderCount(t?.holderCount) ? t.holderCount : null;
 }
+// Jupiter's holders count (REST and asset stream) only moves every ~10-20 s and its
+// replicas disagree (4607 then 4602). GMGN token info, already polled about twice a
+// second for the bundler line, moves within ~1-1.5 s. Its replicas disagree by up to
+// ~10 holders, so the live count is the median of the last five samples (~2.5 s)
+// from the last 6 s.
+const gmgnHolders = { mint: "", samples: [] };
+const HOLDERS_LIVE_MS = 6000;
+function noteGmgnHolders(mint, n) {
+  if (!mint || !validHolderCount(n)) return;
+  if (gmgnHolders.mint !== mint) { gmgnHolders.mint = mint; gmgnHolders.samples = []; }
+  gmgnHolders.samples.push({ n, at: Date.now() });
+  if (gmgnHolders.samples.length > 5) gmgnHolders.samples.splice(0, gmgnHolders.samples.length - 5);
+}
+function liveHolderCount(t) {
+  if (!t || !t.id || gmgnHolders.mint !== t.id) return null;
+  const now = Date.now();
+  const fresh = gmgnHolders.samples.filter((x) => now - x.at <= HOLDERS_LIVE_MS);
+  if (!fresh.length) return null;
+  if (fresh.length < 3) return fresh[fresh.length - 1].n;
+  const sorted = fresh.map((x) => x.n).sort((a, b) => a - b);
+  return sorted[(sorted.length - 1) >> 1];
+}
 function holderCountOf(t) {
+  const live = liveHolderCount(t);
+  // A live 0 beside net buyers is an unindexed answer; fall back to the stored count.
+  if (live != null && !(live === 0 && positiveNetBuyers(t))) return live;
   const n = storedHolderCount(t);
   if (n === 0 && positiveNetBuyers(t)) return null;
   return n;
@@ -795,7 +820,7 @@ async function loadHolders() {
     state.holdersError = controller.signal.aborted ? "Holder request timed out." : err.message || "Holder data unavailable";
     const delay = Math.max(err.retryAfterMs || 0, Math.min(30000, 2000 * 2 ** Math.min(++holdersRefresh.failures, 4)));
     holdersRefresh.next = Date.now() + delay;
-    if (err.status === 429) holdersRefresh.rateUntil = holdersRefresh.next;
+    if (err.status === 429 || err.status === 403) holdersRefresh.rateUntil = holdersRefresh.next;
   } finally {
     clearTimeout(request.timeout);
     if (holdersRequest === request) {
@@ -4147,10 +4172,11 @@ function paintHolderCounts() {
   if (topEl) topEl.textContent = Number.isFinite(top) ? top.toFixed(2) + "%" : "—";
   const status = $("[data-holders-status]");
   if (status) {
-    const stale = !holdersRefresh.at || Date.now() - holdersRefresh.at > 5000;
-    const label = state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
+    const live = liveHolderCount(t) != null;
+    const stale = !live && (!holdersRefresh.at || Date.now() - holdersRefresh.at > 5000);
+    const label = live ? "Live · ~1s" : state.holdersError ? "Last known · retrying" : state.holdersLoading || stale ? "Updating…" : "Live · 2s";
     if (status.textContent !== label) status.textContent = label;
-    status.classList.toggle("updating", state.holdersLoading || stale || !!state.holdersError);
+    status.classList.toggle("updating", !live && (state.holdersLoading || stale || !!state.holdersError));
   }
   // Count labels update on every price tick. The empty list does not, so a
   // later stream count left "No holders yet." under Holders 3.
@@ -4452,7 +4478,11 @@ function gmgnParse(body) {
     && (px.address == null || px.address === "")
     && (px.price === 0 || px.price === "0" || px.price === "0.0");
   if (stub && !(vol > 0) && !(nWallets > 0)) return null;
-  return { vol, wallets: nWallets };
+  const rawH = data.holder_count != null && data.holder_count !== "" ? data.holder_count : (stat.holder_count != null && stat.holder_count !== "" ? stat.holder_count : null);
+  const h = rawH == null ? null : Number(rawH);
+  // A stub's holder_count is not a measurement either.
+  const holders = !stub && Number.isSafeInteger(h) && h >= 0 ? h : null;
+  return { vol, wallets: nWallets, holders };
 }
 // Jupiter audit.bundlerStats: totalBundles + holdingPct (already percent points).
 // holdingPct is holdings share, never label it as volume.
@@ -4740,6 +4770,10 @@ async function gmgnTick() {
     const body = await res.json().catch(() => null);
     if (gen !== gmgn.gen || !state.active || state.active.id !== mint) return;
     const parsed = res.ok ? gmgnParse(body) : null;
+    if (parsed && parsed.holders != null) {
+      noteGmgnHolders(mint, parsed.holders);
+      try { paintHolderCounts(); } catch (_) {}
+    }
     if (parsed && (parsed.vol != null || parsed.wallets != null)) {
       gmgn.snap = parsed;
       gmgn.error = "";
