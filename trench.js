@@ -4224,6 +4224,93 @@ function patchHolderRows(box, html) {
   });
   [...box.children].forEach((el) => { if (!keep.has(el)) el.remove(); });
 }
+// Drop alerts: a sharp fall in Holders or the Bundlers share gets a red badge with the
+// delta ("-38 holders 1m") that stays up for a few seconds. Inputs are smoothed (the
+// holder count is stream-first / median GMGN; bundler share takes a median of its last
+// five 1 s samples) and a drop must hold for DROP_CONFIRM_MS, so replica jitter does
+// not fire it. The peak is the highest smoothed value seen in the last DROP_WIN_MS.
+const DROP_WIN_MS = 60000;
+const DROP_SHOW_MS = 6000;
+const DROP_CONFIRM_MS = 1500;
+const DROP_RULES = {
+  holders: { pct: 2, abs: 50, floor: 5, smooth: 1 },
+  bundlers: { pp: 5, smooth: 5 }
+};
+const dropHist = new Map();
+let dropTimer = 0;
+function dropTrips(kind, peak, cur) {
+  const r = DROP_RULES[kind];
+  const d = peak - cur;
+  if (!r || !(d > 0)) return false;
+  if (kind === "holders") return d >= r.floor && (d >= peak * r.pct / 100 || d >= r.abs);
+  return d >= r.pp;
+}
+function dropNote(kind, key, value, now = Date.now()) {
+  const r = DROP_RULES[kind];
+  const v = Number(value);
+  if (!r || !key || value == null || value === "" || !Number.isFinite(v)) return null;
+  let h = dropHist.get(kind);
+  if (!h || h.key !== key) {
+    h = { key, raw: [], samples: [], pendSince: 0, alert: null };
+    dropHist.set(kind, h);
+  }
+  const lastRaw = h.raw[h.raw.length - 1];
+  if (lastRaw && now - lastRaw.at < 1000) lastRaw.v = v;
+  else h.raw.push({ at: now, v });
+  if (h.raw.length > r.smooth) h.raw.splice(0, h.raw.length - r.smooth);
+  const sorted = h.raw.map((x) => x.v).sort((a, b) => a - b);
+  const cur = sorted[Math.floor((sorted.length - 1) / 2)];
+  const last = h.samples[h.samples.length - 1];
+  if (last && now - last.at < 1000) last.v = cur;
+  else h.samples.push({ at: now, v: cur });
+  while (h.samples.length && h.samples[0].at < now - DROP_WIN_MS) h.samples.shift();
+  let peak = -Infinity, peakAt = now;
+  for (const x of h.samples) if (x.v >= peak) { peak = x.v; peakAt = x.at; }
+  if (dropTrips(kind, peak, cur)) {
+    if (!h.pendSince) h.pendSince = now;
+    if (now - h.pendSince >= DROP_CONFIRM_MS) {
+      const delta = peak - cur;
+      const keep = h.alert && h.alert.until > now && h.alert.delta > delta ? h.alert : null;
+      h.alert = keep ? { ...keep, until: now + DROP_SHOW_MS } : { delta, spanMs: Math.max(1000, now - peakAt), until: now + DROP_SHOW_MS };
+    }
+  } else h.pendSince = 0;
+  return h.alert && h.alert.until > now ? h.alert : null;
+}
+function dropAlertText(kind, a) {
+  const span = a.spanMs >= 45000 ? "1m" : bundlerSpanText(a.spanMs);
+  if (kind === "holders") return "−" + Math.round(a.delta).toLocaleString() + " holders " + span;
+  return "−" + (Math.round(a.delta * 10) / 10) + "pp bundlers " + span;
+}
+function dropActive(kind, now = Date.now()) {
+  const h = dropHist.get(kind);
+  const t = state.active;
+  if (!h || !h.alert || h.alert.until <= now || !t || !String(h.key).startsWith(t.id)) return null;
+  return h.alert;
+}
+function paintDropAlerts(now = Date.now()) {
+  const items = [];
+  let next = Infinity;
+  for (const kind of ["holders", "bundlers"]) {
+    const a = dropActive(kind, now);
+    document.querySelectorAll(kind === "holders" ? "[data-holder-count], [data-holder-compact], .sheet [data-sf='holders']" : "#gmgn-line, .sheet [data-sf='bundler']").forEach((el) => el.classList.toggle("drop-hit", !!a));
+    if (!a) continue;
+    items.push(`<span class="drop-badge" data-drop="${kind}">▼ ${dropAlertText(kind, a)}</span>`);
+    next = Math.min(next, a.until);
+  }
+  let box = document.getElementById("drop-alerts");
+  clearTimeout(dropTimer);
+  if (!items.length) { if (box) box.remove(); return; }
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "drop-alerts";
+    box.setAttribute("role", "status");
+    box.setAttribute("aria-live", "assertive");
+    document.body.appendChild(box);
+  }
+  const html = items.join("");
+  if (box.innerHTML !== html) box.innerHTML = html;
+  dropTimer = setTimeout(() => paintDropAlerts(), Math.max(200, next - now + 30));
+}
 function paintHolderCounts() {
   const t = state.active;
   if (!t) return;
@@ -4232,6 +4319,8 @@ function paintHolderCounts() {
   document.querySelectorAll("[data-holder-count], [data-sf='holders']").forEach((el) => {
     if (el.textContent !== text) el.textContent = text;
   });
+  if (count != null) dropNote("holders", t.id, count);
+  paintDropAlerts();
   const compact = count == null ? "—" : compactCount(count);
   document.querySelectorAll("[data-holder-compact]").forEach((el) => {
     if (el.textContent !== compact) el.textContent = compact;
@@ -4684,6 +4773,9 @@ function paintGmgn() {
     const html = gmgnLineInner();
     if (line.innerHTML !== html) line.innerHTML = html;
   }
+  const main = bundlerView();
+  const at = state.active;
+  if (at && !main.loading && !main.unavailable && main.metric != null) dropNote("bundlers", at.id + "|" + main.kind + "|" + (main.win || ""), main.metric);
   const tile = document.querySelector('[data-sf="bundler"]');
   const lab = document.querySelector('[data-sf="bundlerLab"]');
   const v = bundlerView(state.infoWin);
@@ -4696,6 +4788,7 @@ function paintGmgn() {
     const label = bundlerLabel(v);
     if (lab.textContent !== label) lab.textContent = label;
   }
+  paintDropAlerts();
 }
 function bundlerReset(mint) {
   bundlerTape.mint = mint;

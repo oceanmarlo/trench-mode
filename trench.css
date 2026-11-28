@@ -642,3 +642,11 @@ body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; 
 @media (prefers-reduced-motion: reduce) {
   .tf button, .tabs button, .go, .seg button, .presets button, .icon-btn, .round, .sheet-x, .amt-box { transition: none; }
 }
+
+/* Drop alerts: unmissable red badge for a sharp Holders / Bundlers fall. */
+#drop-alerts{position:fixed;top:calc(env(safe-area-inset-top,0px) + 58px);left:50%;transform:translateX(-50%);z-index:9000;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none;max-width:calc(100vw - 16px)}
+#drop-alerts .drop-badge{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:999px;background:#e5243b;color:#fff;font-weight:800;font-size:15px;letter-spacing:.01em;font-variant-numeric:tabular-nums;white-space:nowrap;box-shadow:0 0 0 2px rgba(255,255,255,.18),0 6px 22px rgba(229,36,59,.55);animation:drop-pop .28s ease-out,drop-pulse 1.2s ease-in-out .3s infinite}
+.drop-hit{color:#ff3b4e !important;text-shadow:0 0 10px rgba(255,59,78,.55)}
+@keyframes drop-pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+@keyframes drop-pulse{50%{box-shadow:0 0 0 2px rgba(255,255,255,.18),0 6px 30px rgba(229,36,59,.9)}}
+@media (prefers-reduced-motion:reduce){#drop-alerts .drop-badge{animation:none}}
