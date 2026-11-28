@@ -686,3 +686,11 @@ button, [role=button], [role=tab] { -webkit-user-select: none; user-select: none
 
 /* Visual haptic ring (startTapHaptics): overlay only, never takes a tap. */
 .tap-ring { position: fixed; pointer-events: none; z-index: 8999; box-shadow: 0 0 0 2px rgba(255,255,255,.55), 0 0 14px rgba(125,255,107,.35); }
+
+/* Swipe ergonomics: horizontal rows scroll on their own without bouncing the page or
+   chaining into a back-swipe; sheets and the main scroller never drag the page behind. */
+.tf-scroll, .filters, .alpha .chips, .al-sort, #search-sheet .scan-chips, #search-sheet .chips, .af-top .chips { overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+.al-sort, #search-sheet .scan-chips, #search-sheet .chips { scrollbar-width: none; }
+.al-sort::-webkit-scrollbar, #search-sheet .scan-chips::-webkit-scrollbar, #search-sheet .chips::-webkit-scrollbar { display: none; }
+#search-sheet.sheet, #ind-sheet, .scroll { overscroll-behavior: contain; }
+html, body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
