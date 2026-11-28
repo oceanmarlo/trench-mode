@@ -4243,6 +4243,12 @@ function holderEmptyText(t) {
   // A count of 0 is a real empty wallet set. Unknown or a later live count is not.
   return holderCountOf(t) === 0 ? "No holders yet." : "Addresses not in yet.";
 }
+// Thin share bar under each holder row, scaled to the largest shown holder.
+function holderBar(p, max) {
+  if (!(p > 0) || !(max > 0)) return "";
+  const w = Math.max(1, Math.min(100, Math.round((p / max) * 100)));
+  return `<i class="hbar" style="width:${w}%"></i>`;
+}
 function holderRows() {
   const t = state.active || {};
   const limited = Date.now() < holdersRefresh.rateUntil;
@@ -4251,13 +4257,15 @@ function holderRows() {
     const msg = holderEmptyText(t);
     return warning || `<div class="k" data-holder-empty style="padding:12px 0">${esc(msg)}</div>`;
   }
-  return warning + state.holders.slice(0, 40).map((h, i) => {
+  const shown = state.holders.slice(0, 40);
+  const maxPct = shown.reduce((m, h) => Math.max(m, holderPct(h, t) || 0), 0);
+  return warning + shown.map((h, i) => {
     const addr = h.address || "";
     const tags = holderMarks(h, t).map((tag) => `<span class="htag ${tag === "Dev" ? "dev" : "lp"}">${tag}</span>`).join("");
     const who = addr
       ? `<a class="haddr" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" data-copy="${esc(addr)}">${esc(shortAddr(addr))}</a>${tags}`
       : `<span class="haddr">—</span>`;
-    return `<div class="hrow" data-holder-address="${esc(addr)}"><span class="hrank">${i + 1}</span><span class="hwho">${who}</span><span class="hpct">${holderPctText(holderPct(h, t))}</span><span class="hamt">${holderAmt(h.amount)}</span></div>`;
+    return `<div class="hrow" data-holder-address="${esc(addr)}"><span class="hrank">${i + 1}</span><span class="hwho">${who}</span><span class="hpct">${holderBar(holderPct(h, t), maxPct)}${holderPctText(holderPct(h, t))}</span><span class="hamt">${holderAmt(h.amount)}</span></div>`;
   }).join("");
 }
 function patchHolderRows(box, html) {
@@ -6181,7 +6189,7 @@ function tapeRows() {
     const trader = addr
       ? `<a class="trader" href="https://solscan.io/account/${esc(addr)}" target="_blank" rel="noopener noreferrer" aria-label="Trader on Solscan">${esc(addr.slice(-4))}</a>`
       : `<span class="trader">—</span>`;
-    return `<div class="trow"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span>${trader}</div>`;
+    return `<div class="trow ${buy ? "side-buy" : "side-sell"}"><span class="age">${ageLabel(x.timestamp)}</span><span>${mc}</span><span class="${buy ? "up" : "down"}">${qty(x.amount)}</span><span class="vol ${buy ? "up" : "down"}">${tapeVol(x.usdVolume)}</span>${trader}</div>`;
   }).join("");
 }
 
