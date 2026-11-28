@@ -650,3 +650,11 @@ body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; 
 @keyframes drop-pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
 @keyframes drop-pulse{50%{box-shadow:0 0 0 2px rgba(255,255,255,.18),0 6px 30px rgba(229,36,59,.9)}}
 @media (prefers-reduced-motion:reduce){#drop-alerts .drop-badge{animation:none}}
+
+/* Touch: no 300 ms double-tap wait or double-tap zoom on controls; instant press state
+   (".pressed" is set on pointerdown by startTouchFeedback). */
+button, a[href], [role=button], [role=tab], summary, label[for], input, select, textarea { touch-action: manipulation; }
+button, a[href], [role=button], [role=tab] { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+button, [role=button], [role=tab] { -webkit-user-select: none; user-select: none; }
+.pressed { opacity: .78; transition: none !important; }
+.go.pressed, .seg button.pressed, .presets button.pressed, .icon-btn.pressed, .round.pressed, .sheet-x.pressed, .tabs button.pressed, .nav button.pressed, .tf button.pressed { transform: scale(.95); opacity: 1; filter: brightness(1.25); }

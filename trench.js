@@ -820,6 +820,34 @@ function flashEl(el) {
       : { color: "#ff7d96", textShadow: "0 0 10px rgba(229,84,111,.55)" }
   ], { duration: 700, easing: "cubic-bezier(.2,.7,.2,1)" });
 }
+// Touch: iOS waits for scroll detection before :active, so a press can look dead.
+// A passive capture pointerdown marks the control "pressed" in the same frame and
+// clears it on release, cancel, or as soon as the finger starts scrolling.
+const PRESS_SEL = "button, a[href], [role=button], [role=tab], summary, label[for]";
+function pressTarget(el) {
+  const t = el && el.closest ? el.closest(PRESS_SEL) : null;
+  return t && !t.disabled && t.getAttribute("aria-disabled") !== "true" ? t : null;
+}
+function startTouchFeedback() {
+  let cur = null, x0 = 0, y0 = 0;
+  const clear = () => { if (cur) cur.classList.remove("pressed"); cur = null; };
+  document.addEventListener("pointerdown", (e) => {
+    clear();
+    if (e.button > 0) return;
+    cur = pressTarget(e.target);
+    if (!cur) return;
+    x0 = e.clientX; y0 = e.clientY;
+    cur.classList.add("pressed");
+  }, { capture: true, passive: true });
+  document.addEventListener("pointermove", (e) => {
+    if (cur && Math.hypot(e.clientX - x0, e.clientY - y0) > 10) clear();
+  }, { capture: true, passive: true });
+  for (const ev of ["pointerup", "pointercancel", "dragstart"]) document.addEventListener(ev, clear, { capture: true, passive: true });
+  window.addEventListener("scroll", clear, { capture: true, passive: true });
+  window.addEventListener("blur", clear);
+  // An empty passive touchstart is what lets iOS Safari apply :active at all.
+  document.addEventListener("touchstart", () => {}, { passive: true });
+}
 function startValueFlash() {
   if (typeof MutationObserver !== "function" || typeof document === "undefined") return;
   try { if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return; } catch (_) {}
@@ -7851,6 +7879,7 @@ async function boot() {
     every(30000, () => (state.view === "alpha" ? loadMarketFeeds() : null));
     startHolderRefresh();
     try { startValueFlash(); } catch (_) {}
+    try { startTouchFeedback(); } catch (_) {}
     if (state.active && state.active.id) gmgnWatch(state.active.id);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && state.active && state.active.id) gmgnArm(0);
